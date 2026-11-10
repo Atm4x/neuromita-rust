@@ -61,6 +61,14 @@ fn retry_delay(attempt: usize) -> u64 {
     (200_u64 << attempt.min(3)).min(1600)
 }
 
+fn provider_request_error(error: reqwest::Error) -> GenerationError {
+    if error.is_timeout() {
+        GenerationError::DeadlineExceeded
+    } else {
+        GenerationError::Transport(error.without_url().to_string())
+    }
+}
+
 async fn send_with_retry(
     request: reqwest::RequestBuilder,
     retries: u8,
@@ -93,7 +101,7 @@ async fn send_with_retry(
             }
             Err(error) => {
                 if attempt == usize::from(retries) || !error.is_connect() {
-                    return Err(GenerationError::Transport(error.without_url().to_string()));
+                    return Err(provider_request_error(error));
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(retry_delay(attempt))).await;
             }
@@ -122,7 +130,7 @@ pub(crate) async fn send_json(
         let chunk = match response.chunk().await {
             Ok(chunk) => chunk,
             Err(error) => {
-                let error = GenerationError::Transport(error.without_url().to_string());
+                let error = provider_request_error(error);
                 observer.response_received(ProviderReply {
                     status: Some(status.as_u16()),
                     raw_body: String::from_utf8_lossy(&bytes).into_owned().as_str().into(),
@@ -252,7 +260,7 @@ pub(crate) async fn send_sse(
             Ok(Some(chunk)) => chunk,
             Ok(None) => break,
             Err(error) => {
-                failure = Some(GenerationError::Transport(error.without_url().to_string()));
+                failure = Some(provider_request_error(error));
                 break;
             }
         };
@@ -390,6 +398,9 @@ pub(crate) async fn send_sse(
                 failure = Some(error);
                 break;
             }
+        }
+        if failure.is_none() && terminal && (!requires_done || done_marker) && decoder.complete() {
+            break;
         }
     }
 

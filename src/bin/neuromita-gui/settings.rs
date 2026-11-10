@@ -201,6 +201,24 @@ pub fn execute(api: &GuiPresenter, command: Command) -> Result<(), String> {
                 .set(settings)
                 .map_err(|e| e.to_string())?;
         }
+        Command::SetMemoryDedupEnabled(enabled) => {
+            let mut state = api.settings.memory.state.get();
+            state.model_add_dedup_enabled = enabled;
+            api.settings
+                .memory
+                .state
+                .set(state)
+                .map_err(|error| error.to_string())?;
+        }
+        Command::SetMemoryDedupThreshold(value) => {
+            let mut state = api.settings.memory.state.get();
+            state.threshold_per_mille = value;
+            api.settings
+                .memory
+                .state
+                .set(state)
+                .map_err(|error| error.to_string())?;
+        }
         Command::SetToolDepth(value) => {
             if !(1..=5).contains(&value) {
                 return Err("Tool chain depth must be between 1 and 5".into());
@@ -222,6 +240,64 @@ pub fn execute(api: &GuiPresenter, command: Command) -> Result<(), String> {
         _ => return Err("Unsupported administration command".into()),
     }
     Ok(())
+}
+
+fn parse_memory_threshold(value: &str) -> Result<u16, String> {
+    let value = value.trim();
+    let (whole, fraction) = match value.split_once('.') {
+        Some((whole, fraction))
+            if !fraction.is_empty()
+                && fraction.len() <= 3
+                && fraction.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            (whole, fraction)
+        }
+        None => (value, ""),
+        _ => return Err("Memory dedup threshold must be between 0.500 and 1.000".into()),
+    };
+    let integer = match whole {
+        "0" => 0,
+        "1" => 1000,
+        _ => return Err("Memory dedup threshold must be between 0.500 and 1.000".into()),
+    };
+    let fraction = if fraction.is_empty() {
+        0
+    } else {
+        fraction.parse::<u16>().map_err(|error| error.to_string())?
+            * 10u16.pow(3 - fraction.len() as u32)
+    };
+    let parsed = integer + fraction;
+    if !(500..=1000).contains(&parsed) {
+        return Err("Memory dedup threshold must be between 0.500 and 1.000".into());
+    }
+    Ok(parsed)
+}
+
+#[cfg(test)]
+mod memory_threshold_tests {
+    use super::parse_memory_threshold;
+
+    #[test]
+    fn accepts_exact_fixed_point_thresholds() {
+        for (input, expected) in [
+            ("0.5", 500),
+            ("0.800", 800),
+            ("0.925", 925),
+            ("1", 1000),
+            ("1.000", 1000),
+        ] {
+            assert_eq!(parse_memory_threshold(input).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_or_ambiguous_thresholds() {
+        for input in [
+            "", "0.499", "1.001", "0.8009", "0.8e0", "NaN", "800", "-0.8",
+        ] {
+            assert!(parse_memory_threshold(input).is_err(), "{input:?}");
+        }
+    }
 }
 
 fn id(value: &str) -> Result<PresetId, String> {
@@ -615,6 +691,20 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
         }
     });
     let send = dispatch.clone();
+    settings.on_memory_dedup_toggle(move |enabled| send(Command::SetMemoryDedupEnabled(enabled)));
+    let send = dispatch.clone();
+    let weak = window.as_weak();
+    settings.on_memory_dedup_threshold_change(move |value| match parse_memory_threshold(&value) {
+        Ok(value) => send(Command::SetMemoryDedupThreshold(value)),
+        Err(error) => {
+            if let Some(window) = weak.upgrade() {
+                window
+                    .global::<SettingsUi>()
+                    .set_settings_error(error.into());
+            }
+        }
+    });
+    let send = dispatch.clone();
     settings.on_section_visibility(move |index, checked| {
         if let Some(area) = area_for_section(index) {
             send(Command::SectionVisibility(area, checked));
@@ -687,6 +777,10 @@ pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {
     window.set_settings_voice_launcher(settings.values.voice.in_launcher);
     window.set_settings_voice_game(settings.values.voice.in_game);
     window.set_settings_voice_name(settings.values.voice.voice.as_str().into());
+    window.set_memory_dedup_enabled(settings.values.memory.model_add_dedup_enabled);
+    let threshold = settings.values.memory.threshold_per_mille;
+    window
+        .set_memory_dedup_threshold(format!("{}.{:03}", threshold / 1000, threshold % 1000).into());
     let tools = &settings.values.tools;
     window.set_tool_enabled(tools.enabled);
     window.set_tool_calculator(tools.calculator);

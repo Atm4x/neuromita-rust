@@ -227,6 +227,9 @@ impl OpenAiTemplate {
     pub fn model(&self) -> &str {
         &self.definition.model
     }
+    pub fn timeout(&self) -> Duration {
+        Duration::from_millis(self.definition.timeout_ms)
+    }
     pub(crate) fn diagnostic_redaction_values(&self) -> Vec<String> {
         self.key.iter().map(ToString::to_string).collect()
     }
@@ -249,8 +252,11 @@ impl OpenAiProvider {
         template: OpenAiTemplate,
         observer: &mut dyn GenerationObserver,
     ) -> Result<StructuredResponse, GenerationError> {
-        let conversation =
-            LlmConversation::from_context_with_memory(&input.context, &input.prepared_knowledge);
+        let conversation = LlmConversation::from_context_with_window(
+            &input.context,
+            &input.prepared_knowledge,
+            input.history_window.as_ref(),
+        );
         let mut prompt = conversation
             .system_segments(&input.context, input.prompt.as_ref())
             .into_iter()
@@ -368,7 +374,7 @@ impl OpenAiProvider {
         {
             Ok(result) => result,
             Err(_) => {
-                let error = GenerationError::Transport("LLM request deadline exceeded".into());
+                let error = GenerationError::DeadlineExceeded;
                 observer.failed(&error);
                 Err(error)
             }

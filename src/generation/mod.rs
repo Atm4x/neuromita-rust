@@ -21,8 +21,8 @@ pub use presets::{
     PresetRepository, PresetTemplate,
 };
 pub use structured::{
-    RESPONSE_PROTOCOL_VERSION, ResponseSegment, SegmentIntent, StructuredResponse, ToolCall,
-    WorkingState,
+    ModelMemoryAddPolicy, RESPONSE_PROTOCOL_VERSION, ResponseSegment, SegmentIntent,
+    StructuredResponse, ToolCall, WorkingState,
 };
 pub use tools::ToolSettings;
 pub use transforms::{MessageTransform, apply_message_transforms};
@@ -57,6 +57,12 @@ impl ProviderTemplate {
         match self {
             Self::Gemini(_) => ProviderKind::Gemini,
             Self::OpenAi(_) => ProviderKind::OpenAi,
+        }
+    }
+    pub fn timeout(&self) -> std::time::Duration {
+        match self {
+            Self::Gemini(template) => template.settings().timeout(),
+            Self::OpenAi(template) => template.timeout(),
         }
     }
 }

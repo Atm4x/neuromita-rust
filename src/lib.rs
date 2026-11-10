@@ -4,6 +4,7 @@ pub mod api;
 pub mod app;
 pub mod audio;
 pub mod character;
+pub mod document_revision;
 pub mod finetune;
 pub mod game_context;
 pub mod game_link;
@@ -21,6 +22,10 @@ pub mod prompts;
 mod maintenance;
 pub mod migration;
 pub mod presentation;
+#[cfg(feature = "sqlite-system")]
+pub mod recovery_inventory;
+#[cfg(feature = "sqlite-system")]
+pub mod recovery_snapshot;
 pub mod reminders;
 pub mod request;
 mod runtime;

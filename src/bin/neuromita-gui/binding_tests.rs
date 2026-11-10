@@ -427,7 +427,67 @@ fn sandbox_render_and_bindings(catalog: Rc<RefCell<Localizer>>) {
 }
 
 fn settings_render_and_bindings(window: &AppWindow) {
-    use super::super::view::{PresetItem, SettingsUi};
+    use super::super::view::{AiEngineUi, PresetItem, SettingsUi};
+    use neuromita::ai_runtime::{
+        AiService,
+        runtime_status::{LoadedModel, RuntimePhase, RuntimeSnapshot, ServiceRuntimeStatus},
+    };
+    let mut runtime = RuntimeSnapshot::default();
+    assert_eq!(
+        window.global::<AiEngineUi>().get_embedding_status(),
+        "Не настроен"
+    );
+    runtime.services.insert(
+        AiService::Embedding,
+        ServiceRuntimeStatus {
+            phase: RuntimePhase::Failed,
+            last_error: Some("Timeout: mock embedding infer".into()),
+            ..Default::default()
+        },
+    );
+    runtime.services.insert(
+        AiService::Reranker,
+        ServiceRuntimeStatus {
+            phase: RuntimePhase::ModelReady,
+            active_model: Some(LoadedModel {
+                plugin_id: "mock_reranker".into(),
+                asset_revision: None,
+            }),
+            ..Default::default()
+        },
+    );
+    super::super::ai_engine::runtime_status(window, &runtime);
+    let engine = window.global::<AiEngineUi>();
+    assert!(engine.get_embedding_failed());
+    assert!(
+        engine
+            .get_embedding_status()
+            .contains("Timeout: mock embedding infer")
+    );
+    assert!(!engine.get_reranker_failed());
+    assert!(engine.get_reranker_status().contains("mock_reranker"));
+    engine.set_process_mode("split".into());
+    window.global::<SettingsUi>().set_section(6);
+    window.set_page(PageId::Settings);
+    window.window().take_snapshot().unwrap();
+    runtime.services.insert(
+        AiService::Embedding,
+        ServiceRuntimeStatus {
+            phase: RuntimePhase::ModelReady,
+            active_model: Some(LoadedModel {
+                plugin_id: "mock_embedding".into(),
+                asset_revision: None,
+            }),
+            ..Default::default()
+        },
+    );
+    super::super::ai_engine::runtime_status(window, &runtime);
+    assert!(!engine.get_embedding_failed());
+    assert!(engine.get_embedding_status().contains("mock_embedding"));
+    assert!(!engine.get_embedding_status().contains("Timeout"));
+    super::super::ai_engine::runtime_status(window, &RuntimeSnapshot::default());
+    assert_eq!(engine.get_embedding_status(), "Не настроен");
+    assert!(!engine.get_embedding_failed());
     let settings = window.global::<SettingsUi>();
     settings.set_preset_templates(ModelRc::new(VecModel::from(
         super::super::settings::provider_templates(
@@ -472,6 +532,25 @@ fn settings_render_and_bindings(window: &AppWindow) {
         window,
         Rc::new(move |command| sent.borrow_mut().push(command)),
     );
+    settings.invoke_memory_dedup_toggle(true);
+    assert!(matches!(
+        commands.borrow().last(),
+        Some(super::super::runtime::Command::SetMemoryDedupEnabled(true))
+    ));
+    settings.invoke_memory_dedup_threshold_change("0.925".into());
+    assert!(matches!(
+        commands.borrow().last(),
+        Some(super::super::runtime::Command::SetMemoryDedupThreshold(925))
+    ));
+    let before_invalid = commands.borrow().len();
+    settings.invoke_memory_dedup_threshold_change("1.001".into());
+    assert_eq!(commands.borrow().len(), before_invalid);
+    assert!(!settings.get_settings_error().is_empty());
+    settings.set_settings_error("".into());
+    settings.set_memory_dedup_enabled(false);
+    settings.set_memory_dedup_threshold("0.800".into());
+    assert!(!settings.get_memory_dedup_enabled());
+    assert_eq!(settings.get_memory_dedup_threshold(), "0.800");
     settings.invoke_tool_option("calculator".into(), true);
     assert!(matches!(
         commands.borrow().last(),
@@ -737,7 +816,121 @@ fn memory_render_and_contract(window: &AppWindow) {
             .global::<super::super::view::SettingsUi>()
             .set_character_prompt_expanded(false);
         ui.invoke_edit(page.records()[0].id.0.to_string().into());
+        assert!(ui.get_graph_eligible());
+        ui.invoke_graph_preview(0);
+        assert!(ui.get_graph_pending());
+        let Command::GraphPreview(graph_request, graph_character, graph_memory, graph_mode) =
+            commands.borrow_mut().pop().unwrap()
+        else {
+            panic!("expected graph maintenance preview")
+        };
+        assert_eq!(graph_character, CharacterId::Crazy);
+        assert_eq!(graph_memory, page.records()[0].id);
+        assert_eq!(
+            graph_mode,
+            neuromita::knowledge::maintenance::GraphMaintenanceMode::Clear
+        );
+        memory::graph_previewed(
+            window,
+            &state,
+            uuid::Uuid::new_v4(),
+            Ok(crate::runtime::GraphPreviewReport {
+                count: 9,
+                relations: Vec::new(),
+            }),
+        );
+        assert!(ui.get_graph_pending());
+        assert!(!ui.get_graph_confirm_ready());
+        memory::graph_previewed(
+            window,
+            &state,
+            graph_request,
+            Ok(crate::runtime::GraphPreviewReport {
+                count: 1,
+                relations: vec![neuromita::memory::ProvenancedRelation {
+                    source: graph_memory,
+                    source_revision: 3,
+                    relation: neuromita::memory::MemoryRelation {
+                        subject: "Mita\nspoof".into(),
+                        predicate: "likes".into(),
+                        object: "tea".into(),
+                    },
+                }],
+            }),
+        );
+        assert!(!ui.get_graph_pending());
+        assert!(ui.get_graph_confirm_ready());
+        assert!(ui.get_graph_summary().contains("1 derived"));
+        assert!(ui.get_graph_details().contains(&graph_memory.0.to_string()));
+        assert!(ui.get_graph_details().contains("revision 3"));
+        assert!(ui.get_graph_details().contains("Mita\\nspoof"));
+        ui.invoke_graph_confirm();
+        assert!(ui.get_graph_pending());
+        assert!(!ui.get_graph_confirm_ready());
+        let Command::GraphApply(applied_id, applied_character) =
+            commands.borrow_mut().pop().unwrap()
+        else {
+            panic!("expected confirmed graph maintenance")
+        };
+        assert_eq!(applied_id, graph_request);
+        assert_eq!(applied_character, CharacterId::Crazy);
+        memory::graph_applied(window, &state, uuid::Uuid::new_v4(), Ok(()));
+        assert!(ui.get_graph_pending());
+        memory::graph_applied(
+            window,
+            &state,
+            graph_request,
+            Err("stale graph preview".into()),
+        );
+        assert!(!ui.get_graph_pending());
+        assert!(ui.get_error().contains("stale graph preview"));
+        assert!(!ui.get_graph_confirm_ready());
+        ui.invoke_graph_preview(0);
+        let Command::GraphPreview(aborted_id, _, _, _) = commands.borrow_mut().pop().unwrap()
+        else {
+            panic!("expected second graph preview")
+        };
+        ui.invoke_graph_cancel();
+        let Command::GraphAbort(id) = commands.borrow_mut().pop().unwrap() else {
+            panic!("expected abort command")
+        };
+        assert_eq!(id, aborted_id);
+        memory::graph_previewed(
+            window,
+            &state,
+            aborted_id,
+            Ok(crate::runtime::GraphPreviewReport {
+                count: 2,
+                relations: Vec::new(),
+            }),
+        );
+        assert!(!ui.get_graph_pending());
+        assert!(!ui.get_graph_confirm_ready());
+        assert!(ui.get_graph_summary().is_empty());
+        assert!(ui.get_graph_details().is_empty());
         ui.set_content("Изменённый текст".into());
+        ui.invoke_graph_preview(0);
+        let Command::GraphPreview(in_flight_id, _, _, _) = commands.borrow_mut().pop().unwrap()
+        else {
+            panic!("expected in-flight graph preview")
+        };
+        memory::graph_previewed(
+            window,
+            &state,
+            in_flight_id,
+            Ok(crate::runtime::GraphPreviewReport {
+                count: 1,
+                relations: Vec::new(),
+            }),
+        );
+        ui.invoke_graph_confirm();
+        let Command::GraphApply(confirmed_id, _) = commands.borrow_mut().pop().unwrap() else {
+            panic!("expected in-flight confirmed graph apply")
+        };
+        assert_eq!(confirmed_id, in_flight_id);
+        assert!(ui.get_graph_applying());
+        ui.invoke_graph_cancel();
+        assert!(ui.get_graph_applying());
         let snapshot = characters.memories(CharacterId::Crazy).await.unwrap();
         characters
             .edit_memories(
@@ -755,7 +948,79 @@ fn memory_render_and_contract(window: &AppWindow) {
             .await
             .unwrap();
         memory::render(window, &state, &page);
+        assert!(ui.get_graph_applying());
+        memory::graph_applied(window, &state, confirmed_id, Ok(()));
+        assert!(!ui.get_graph_pending());
+        assert!(ui.get_graph_summary().contains("Canonical memory retained"));
         assert_eq!(ui.get_content(), "Изменённый текст");
+
+        assert!(!ui.get_graph_reindex_available());
+        ui.invoke_graph_preview(1);
+        assert!(ui.get_error().contains("unavailable"));
+        assert!(commands.borrow().is_empty());
+        ui.set_graph_reindex_available(true);
+        ui.invoke_graph_preview(1);
+        let Command::GraphPreview(reindex_id, reindex_character, reindex_source, reindex_mode) =
+            commands.borrow_mut().pop().unwrap()
+        else {
+            panic!("expected typed graph reindex preview")
+        };
+        assert_eq!(reindex_character, CharacterId::Crazy);
+        assert_eq!(reindex_source, page.records()[0].id);
+        assert_eq!(
+            reindex_mode,
+            neuromita::knowledge::maintenance::GraphMaintenanceMode::Reindex
+        );
+        memory::graph_previewed(
+            window,
+            &state,
+            reindex_id,
+            Ok(crate::runtime::GraphPreviewReport {
+                count: 3,
+                relations: Vec::new(),
+            }),
+        );
+        assert!(ui.get_graph_reindex_confirmation());
+        assert!(ui.get_graph_summary().contains("Reindex will replace 3"));
+        ui.invoke_graph_confirm();
+        let Command::GraphApply(reindex_apply_id, reindex_apply_character) =
+            commands.borrow_mut().pop().unwrap()
+        else {
+            panic!("expected confirmed reindex")
+        };
+        assert_eq!(reindex_apply_id, reindex_id);
+        assert_eq!(reindex_apply_character, CharacterId::Crazy);
+        assert!(ui.get_graph_applying());
+        memory::graph_applied(window, &state, reindex_id, Ok(()));
+        assert!(!ui.get_graph_pending());
+        assert!(!ui.get_graph_reindex_confirmation());
+        assert!(ui.get_graph_summary().contains("reindexed"));
+
+        ui.invoke_graph_preview(1);
+        let Command::GraphPreview(backend_lost_id, _, _, mode) =
+            commands.borrow_mut().pop().unwrap()
+        else {
+            panic!("expected reindex preview after previous apply")
+        };
+        assert_eq!(
+            mode,
+            neuromita::knowledge::maintenance::GraphMaintenanceMode::Reindex
+        );
+        ui.set_graph_reindex_available(false);
+        memory::graph_previewed(
+            window,
+            &state,
+            backend_lost_id,
+            Ok(crate::runtime::GraphPreviewReport {
+                count: 4,
+                relations: Vec::new(),
+            }),
+        );
+        assert!(!ui.get_graph_confirm_ready());
+        assert!(!ui.get_graph_reindex_confirmation());
+        assert!(ui.get_error().contains("unavailable"));
+        ui.invoke_graph_confirm();
+        assert!(commands.borrow().is_empty());
         ui.invoke_apply(0);
         let command = commands.borrow_mut().pop().unwrap();
         let Command::MemoryEdit(edit_id, expected, edits) = command else {
@@ -774,6 +1039,70 @@ fn memory_render_and_contract(window: &AppWindow) {
         assert!(ui.get_editing());
         memory::failed(window, &state, edit_id, "old error".into());
         assert!(ui.get_error().is_empty());
+
+        let snapshot = characters.memories(CharacterId::Crazy).await.unwrap();
+        let forgotten_id = snapshot
+            .records()
+            .iter()
+            .find(|record| record.content == "Игрок любит зелёный чай.")
+            .unwrap()
+            .id;
+        characters
+            .edit_memories(
+                CharacterId::Crazy,
+                snapshot,
+                vec![MemoryCommand::Forget { id: forgotten_id }],
+            )
+            .await
+            .unwrap();
+        let page = characters
+            .list_memories(CharacterId::Crazy, Default::default())
+            .await
+            .unwrap();
+        memory::render(window, &state, &page);
+        ui.invoke_edit(forgotten_id.0.to_string().into());
+        assert!(ui.get_selected_forgotten());
+        assert!(!ui.get_graph_eligible());
+        ui.set_recall_query("чай".into());
+        ui.invoke_recall();
+        assert!(ui.get_recall_pending());
+        let Command::MemoryRecall(request_id, character, id, query) =
+            commands.borrow_mut().pop().unwrap()
+        else {
+            panic!("expected explicit forgotten recall command");
+        };
+        assert_eq!(character, CharacterId::Crazy);
+        assert_eq!(id, forgotten_id);
+        assert_eq!(query, "чай");
+        memory::recalled(
+            window,
+            &state,
+            uuid::Uuid::new_v4(),
+            Ok(Some("wrong request".into())),
+        );
+        assert!(ui.get_recall_pending());
+        assert!(ui.get_recall_result().is_empty());
+        memory::recalled(
+            window,
+            &state,
+            request_id,
+            Ok(Some("[FORGOTTEN] Игрок любит зелёный чай.".into())),
+        );
+        assert!(!ui.get_recall_pending());
+        assert!(ui.get_recall_result().contains("[FORGOTTEN]"));
+        ui.invoke_edit(
+            page.records()
+                .iter()
+                .find(|record| record.id != forgotten_id)
+                .unwrap()
+                .id
+                .0
+                .to_string()
+                .into(),
+        );
+        assert!(!ui.get_selected_forgotten());
+        assert!(ui.get_recall_result().is_empty());
+
         for (width, height) in [(1560, 918), (1200, 760)] {
             window
                 .window()
@@ -791,6 +1120,19 @@ fn memory_render_and_contract(window: &AppWindow) {
                 .unwrap();
             }
         }
+        ui.invoke_edit(forgotten_id.0.to_string().into());
+        ui.set_recall_query("чай".into());
+        ui.invoke_recall();
+        let Command::MemoryRecall(delayed_id, _, _, _) = commands.borrow_mut().pop().unwrap()
+        else {
+            panic!("expected delayed historical inspection command");
+        };
+        ui.invoke_select(CharacterId::Kind.index() as i32);
+        memory::recalled(window, &state, delayed_id, Ok(Some("stale secret".into())));
+        assert!(ui.get_recall_result().is_empty());
+        assert!(!ui.get_recall_pending());
+        memory::render(window, &state, &page);
+        assert_eq!(ui.get_character(), CharacterId::Kind.index() as i32);
         ui.set_open(false);
         app.shutdown().await.unwrap();
     });

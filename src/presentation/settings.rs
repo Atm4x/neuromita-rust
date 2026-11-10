@@ -6,10 +6,10 @@ use crate::{
     character::CharacterId,
     generation::ToolSettings,
     settings::{
-        AppSettings, AsrPreferences, CharactersSettings, InterfaceSettings, OperationPresets,
-        PresetId, PresetSelection, PresetSettings, SettingsArea, SettingsError, SettingsOwner,
-        SettingsSnapshot, SettingsTransfer, SpeechSettings, StructuredDisplayMode, TtsPreferences,
-        VoiceSettings, Volume,
+        AppSettings, AsrPreferences, CharactersSettings, InterfaceSettings, MemorySettings,
+        OperationPresets, PresetId, PresetSelection, PresetSettings, SettingsArea, SettingsError,
+        SettingsOwner, SettingsSnapshot, SettingsTransfer, SpeechSettings, StructuredDisplayMode,
+        TtsPreferences, VoiceSettings, Volume,
     },
 };
 
@@ -113,6 +113,10 @@ pub struct PresetsSettingsPresenter {
 
 pub struct ToolsSettingsPresenter {
     pub state: BoundProperty<ToolSettings>,
+}
+
+pub struct MemorySettingsPresenter {
+    pub state: BoundProperty<MemorySettings>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -244,6 +248,7 @@ pub struct SettingsPresenter {
     pub asr: AsrSettingsPresenter,
     pub presets: PresetsSettingsPresenter,
     pub tools: ToolsSettingsPresenter,
+    pub memory: MemorySettingsPresenter,
     pub characters: CharactersSettingsPresenter,
 }
 impl SettingsPresenter {
@@ -289,6 +294,17 @@ impl SettingsPresenter {
                     |owner, value| {
                         owner
                             .edit::<ToolSettings>(|settings| *settings = value)
+                            .map(|_| ())
+                    },
+                ),
+            },
+            memory: MemorySettingsPresenter {
+                state: BoundProperty::new(
+                    Arc::clone(&owner),
+                    |settings| settings.memory,
+                    |owner, value| {
+                        owner
+                            .edit::<MemorySettings>(|settings| *settings = value)
                             .map(|_| ())
                     },
                 ),
@@ -432,6 +448,32 @@ mod tests {
         assert_eq!(presenter.asr.preferences.get(), asr);
         assert_eq!(owner.snapshot_all().unwrap().values.speech.tts, tts);
         assert_eq!(owner.snapshot_all().unwrap().values.speech.asr, asr);
+    }
+
+    #[tokio::test]
+    async fn memory_settings_binding_is_observable_and_rejects_invalid_threshold() {
+        let lifecycle = SettingsLifecycle::prepare(SettingsConfig {
+            source: SettingsSource::initial(AppSettings::initial_profile()),
+            repository: Arc::new(MemorySettingsRepository::new()),
+        })
+        .await
+        .unwrap();
+        let owner = lifecycle.owner();
+        let presenter = SettingsPresenter::new(Arc::clone(&owner));
+        let mut observer = presenter.memory.state.observe();
+        assert_eq!(observer.next().await.unwrap(), MemorySettings::default());
+
+        let mut enabled = presenter.memory.state.get();
+        enabled.model_add_dedup_enabled = true;
+        enabled.threshold_per_mille = 920;
+        presenter.memory.state.set(enabled).unwrap();
+        assert_eq!(observer.next().await.unwrap(), enabled);
+        assert_eq!(owner.snapshot_all().unwrap().values.memory, enabled);
+
+        let mut invalid = enabled;
+        invalid.threshold_per_mille = 1001;
+        assert!(presenter.memory.state.set(invalid).is_err());
+        assert_eq!(owner.snapshot_all().unwrap().values.memory, enabled);
     }
 
     #[tokio::test]

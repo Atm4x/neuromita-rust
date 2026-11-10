@@ -58,11 +58,20 @@ pub enum AiSpeechBindingError {
     Unprepared(AiService),
 }
 
+#[derive(Clone)]
+pub struct AiRecoveryHandle {
+    supervisor: std::sync::Weak<AiSupervisor>,
+    prepared_workers: Arc<[AiWorkerSelection]>,
+    hardware_service: Option<AiService>,
+}
+
 pub struct RunningAiApplication {
     supervisor: Arc<AiSupervisor>,
     active: Vec<AiService>,
     selected: HashSet<AiService>,
     worker_services: std::collections::HashMap<AiService, Vec<AiService>>,
+    prepared_workers: Arc<[AiWorkerSelection]>,
+    hardware_service: Option<AiService>,
     voice_profiles: Option<Arc<VoiceProfileStore>>,
 }
 
@@ -236,6 +245,8 @@ impl AiApplicationConfig {
                     .map(|service| (*service, worker.composition.services().to_vec()))
             })
             .collect();
+        let prepared_workers: Arc<[AiWorkerSelection]> = self.workers.clone().into();
+        let hardware_service = hardware.map(|(config, _)| config.selection.service);
         let mut active = Vec::new();
         if let Some((config, _)) = hardware {
             let worker = self
@@ -302,6 +313,8 @@ impl AiApplicationConfig {
             active,
             selected,
             worker_services,
+            prepared_workers,
+            hardware_service,
             voice_profiles: self.voice_profiles,
         })
     }
@@ -333,6 +346,24 @@ impl RunningAiApplication {
     }
     pub fn has_service(&self, service: AiService) -> bool {
         self.selected.contains(&service)
+    }
+
+    pub fn recovery_handle(&self) -> AiRecoveryHandle {
+        AiRecoveryHandle {
+            supervisor: Arc::downgrade(&self.supervisor),
+            prepared_workers: self.prepared_workers.clone(),
+            hardware_service: self.hardware_service,
+        }
+    }
+
+    pub async fn restart_failed_worker(
+        &self,
+        service: AiService,
+        expected_generation: uuid::Uuid,
+    ) -> Result<uuid::Uuid, AiApplicationError> {
+        self.recovery_handle()
+            .restart_failed_worker(service, expected_generation)
+            .await
     }
 
     pub fn speech_recognizer(&self) -> Option<super::speech::PythonSpeechRecognizer> {
@@ -373,6 +404,41 @@ impl RunningAiApplication {
             Some(error) => Err(error.into()),
             None => Ok(()),
         }
+    }
+}
+
+impl AiRecoveryHandle {
+    /// Re-activate only the original failed generation of a previously prepared
+    /// model plan. The handle has no ownership of the running application.
+    pub async fn restart_failed_worker(
+        &self,
+        service: AiService,
+        expected_generation: uuid::Uuid,
+    ) -> Result<uuid::Uuid, AiApplicationError> {
+        let worker = self
+            .prepared_workers
+            .iter()
+            .find(|worker| worker.composition.services().contains(&service))
+            .ok_or_else(|| AiApplicationError::Invalid("service is not selected".into()))?;
+        if self.hardware_service.is_some_and(|hardware_service| {
+            worker.composition.services().contains(&hardware_service)
+        }) {
+            return Err(AiApplicationError::Invalid(
+                "hardware-guarded worker requires renewed selection authorization".into(),
+            ));
+        }
+        let supervisor = self
+            .supervisor
+            .upgrade()
+            .ok_or(AiRuntimeError::NotRunning)?;
+        Ok(supervisor
+            .restart_failed_composed(
+                service,
+                expected_generation,
+                &worker.composition,
+                &worker.models,
+            )
+            .await?)
     }
 }
 

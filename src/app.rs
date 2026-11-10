@@ -1,3 +1,5 @@
+pub mod historical_recall;
+
 use std::{
     collections::{BTreeMap, HashMap},
     num::NonZeroUsize,
@@ -96,6 +98,7 @@ pub struct ApplicationConfig {
     pub prompts: Option<Arc<PromptCatalog>>,
     pub generator: ResponseGenerator,
     pub knowledge: KnowledgeRetrieval,
+    pub graph_extractor: Option<Arc<dyn crate::knowledge::graph::GraphExtractor>>,
     pub limits: RuntimeLimits,
     pub voice: Arc<dyn VoiceProvider>,
     pub ai_runtime: Option<AiApplicationConfig>,
@@ -140,6 +143,7 @@ impl ApplicationConfig {
             prompts: None,
             generator,
             knowledge: KnowledgeRetrieval::lexical(),
+            graph_extractor: None,
             limits,
             voice: Arc::new(UnavailableVoiceProvider),
             ai_runtime: None,
@@ -155,6 +159,16 @@ impl ApplicationConfig {
             games: GamePolicy::default(),
             reminders: ReminderConfig::system(),
         }
+    }
+
+    /// Supply an explicitly selected, typed graph extraction backend.
+    /// Without one, Graph Reindex fails closed instead of synthesizing relations.
+    pub fn with_graph_extractor(
+        mut self,
+        extractor: Arc<dyn crate::knowledge::graph::GraphExtractor>,
+    ) -> Self {
+        self.graph_extractor = Some(extractor);
+        self
     }
 
     pub fn with_prompt_catalog(mut self, catalog: PromptCatalog) -> Self {
@@ -300,6 +314,7 @@ pub struct ApplicationLifecycle {
     audio_input: Arc<crate::audio::input_owner::AudioInputOwner>,
     speech_controller: Arc<tokio::sync::Mutex<crate::audio::controller::SpeechSessionController>>,
     speech_startup_warning: Option<String>,
+    ai_recovery: Option<crate::ai_runtime::application::AiRecoveryHandle>,
     id: Uuid,
     stop: CancellationToken,
     completion: Option<oneshot::Receiver<Result<(), ApplicationError>>>,
@@ -406,6 +421,7 @@ impl ApplicationLifecycle {
             prompts,
             generator,
             knowledge,
+            graph_extractor,
             limits,
             voice,
             ai_runtime,
@@ -541,6 +557,13 @@ impl ApplicationLifecycle {
                 speech_startup_warning.as_deref(),
             ))
         });
+        let ai_recovery = if live_speech.is_none() {
+            ai_runtime
+                .as_ref()
+                .map(RunningAiApplication::recovery_handle)
+        } else {
+            None
+        };
         let speech: Option<Arc<dyn crate::audio::session::SpeechTranscriber>> =
             if let Some(live) = &live_speech {
                 Some(Arc::new(LiveSpeechTranscriber(Arc::clone(live))))
@@ -659,6 +682,8 @@ impl ApplicationLifecycle {
             chat: api,
             timeline: Arc::clone(&timeline),
             characters,
+            knowledge: Arc::clone(&knowledge),
+            graph_extractor,
             settings: settings_owner,
             presets: Arc::clone(&presets),
             games: Arc::clone(&games),
@@ -780,10 +805,31 @@ impl ApplicationLifecycle {
             audio_input,
             speech_controller,
             speech_startup_warning,
+            ai_recovery,
             id,
             stop,
             completion: Some(completion),
         })
+    }
+
+    /// Explicitly restore a failed prepared Python worker, checked against its
+    /// original generation and selected model plan. Does not auto-retry requests.
+    pub async fn restart_failed_ai_worker(
+        &self,
+        service: AiService,
+        expected_generation: Uuid,
+    ) -> Result<Uuid, AiApplicationError> {
+        if self.stop.is_cancelled() {
+            return Err(AiApplicationError::Invalid(
+                "application is stopping".into(),
+            ));
+        }
+        let recovery = self.ai_recovery.as_ref().ok_or_else(|| {
+            AiApplicationError::Invalid("no explicit AI worker recovery is available".into())
+        })?;
+        recovery
+            .restart_failed_worker(service, expected_generation)
+            .await
     }
 
     /// An ASR-powered microphone session is available only when ASR was explicitly activated.

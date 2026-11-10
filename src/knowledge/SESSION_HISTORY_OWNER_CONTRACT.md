@@ -1,0 +1,28 @@
+# D4 / #50: missing SessionArchive owner contract (Cycle 30)
+
+## Verified source boundary
+
+- Agent A baseline: `8d1d2e9dd965cfabaf25008466e3847bef5e426d` (PR #248). This tree has `src/timeline/portable_operations.rs` with one guarded append of exact `CharacterMemoryChanged` and `CharacterVariablesChanged` drafts. It **does not contain** `src/timeline/storage/archive.rs` or the native `tests/timeline_archive.rs` from Agent B.
+- Agent B observed owner branch: `codex/timeline-b46-native-tool-cancel-20261107` at `b98177f5c1c792720d5042e9ef3590e99fb8946b` (PR #247). It is **diverged**, not a parent of Agent A's branch; GitHub compare `A...B` reported 47 commits ahead / 38 behind and merge base `66e603d7ae3916c6f1f74089ecff3a8b40db2049`.
+- Agent B `src/timeline/storage/archive.rs` exports exact **whole SessionId** branch facts, receipts and referenced binary assets. `prepare_import` is private; exposed `import_memory` / `import_sqlite` reject existing SessionId and perform a separate install. `import_assets` writes content-addressed files before the canonical database commit; unreachable assets can remain on failure. `archive_install_with_provenance` uses its own SQLite transaction. None of these calls can join an Agent A `append_guarded` on an already selected character branch.
+
+Thus **D4 remains PARTIAL**. Concatenating a native SessionArchive and a v1 character envelope, executing two importers in sequence, regenerating EventId/receipt values, or writing directly to SQLite is not a supported solution. The v1 composite archive is intentionally strict: an added `session_archive` field is malformed, not silently ignored or applied to a second store.
+
+## Required API from SessionTimeline / Agent B (agreement needed before implementation)
+
+1. **Authoritative export policy.** Define whether the user operation moves a *whole original SessionId* or one selected character's history. Whole-session transfer imports other characters and is **not** the v1 character-scoped operation. For character-scoped history the owner must specify a closed causal subset (ancestors, resets, observer/`seen_by`, branch forks, receipts, event references, asset references) and a rule for references to excluded events. No Agent A-generated history IDs or inferred visibility.
+2. **Typed, read-only preflight.** Add an opaque `PreparedHistoryImport` produced by the Timeline owner, not a generic `Vec<EventDraft>`. It must validate the exact SessionArchive format, global event-ID uniqueness, receipt/draft correspondence, branch graph, parent checkpoints, provenance, media type/digest/size and bounded input. The prepared handle pins the source bytes/digest, origin identities and target `SessionId`/branch selection, expected head/epoch, conflict policy and archive scope.
+3. **Single commit authority.** Provide a Timeline-owner operation that consumes prepared History and exact validated Memory/variables under one agreed durable publication boundary. Either one guarded SQLite transaction stages *all* canonical rows (including receipts/provenance) or a verifiable, durable recovery protocol guarantees no user-observable half-restore. An independently successful `archive_install_with_provenance` followed by `append_guarded` is **not** atomic. Never reuse an existing SessionId without an explicit safe collision policy; do not replace history in place.
+4. **Assets and crash policy.** Stage assets before publication with deduplicated SHA identity and bounded bytes; record whether orphaned, unreferenced blobs are acceptable on rollback. The success condition is that no new history is visible without its character-domain changes, and no character changes are visible without the history. Define fsync/reopen/partial-failure recovery for both SQLite and asset files. No physical GC during an uncommitted import.
+5. **Explicit UI confirmation and one-use plan.** Preview reports origin, destination, requested scope, incoming/identical/conflicting counts, archived binary count/bytes and selection anchor. Confirm must reject stale sessions, branch switches, resets, foreign targets, malformed or mutated archives and cancellation before dispatch. Replay needs an exact no-clobber/idempotency rule; different contents with colliding IDs are an error.
+
+## Cross-owner acceptance tests before D4 can PASS
+
+- Export on original instance, import to a distinct persistent instance, reopen and compare exact EventId/SessionId/BranchId, sequence order, receipts, provenance, branches, visibility/observer state and referenced assets in addition to MemoryRecord and user variables.
+- Prove a stale target head, branch switch or reset rejects the entire batch, with neither history nor character facts becoming visible.
+- Corrupt or duplicate ID / malformed JSON / altered asset digest / missing asset / incompatible version must fail preflight without writes.
+- Inject failures before and during durable commit and after asset staging; verify restart/retry has a declared, consistent outcome and does not leave a visible half-restore.
+- Confirm cancellation-before-dispatch, two concurrent imports, conflicting IDs, repeat identical archive, different archive with same session identity, and no-clobber export publication.
+- Run both default SQLite and no-default-features pathways where supported. Mere source type-checking is not proof of the end-to-end restore.
+
+**Ownership constraint:** Agent A must not copy Agent B's archive parser into Knowledge, synthesize history facts, alter unrelated branches or mark D4/M7/D5 PASS while this typed owner boundary is missing. This file is a verified integration request, not an implemented API.

@@ -1,8 +1,11 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    path::{Component, PathBuf},
+};
 
 use super::{SettingsError, SpeechSettings};
-use crate::generation::{PresetId, ToolSettings};
+use crate::generation::{ModelMemoryAddPolicy, PresetId, ToolSettings};
 use crate::reminders::{LocalTimePolicy, TimeZoneId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -240,6 +243,146 @@ pub struct PresetSettings {
     pub active: PresetId,
 }
 
+/// Model-proposed facts only; manual edits use their explicit MemoryCommand.
+/// Disabled by default to preserve existing Rust memory-write behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MemorySettings {
+    pub model_add_dedup_enabled: bool,
+    pub threshold_per_mille: u16,
+}
+
+impl Default for MemorySettings {
+    fn default() -> Self {
+        Self {
+            model_add_dedup_enabled: false,
+            threshold_per_mille: 800,
+        }
+    }
+}
+
+impl MemorySettings {
+    pub fn validate(self) -> Result<(), SettingsError> {
+        if !(500..=1000).contains(&self.threshold_per_mille) {
+            return Err(SettingsError::Validation(
+                "model memory dedup threshold must be 500..1000 per mille".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn model_add_policy(self) -> ModelMemoryAddPolicy {
+        if self.model_add_dedup_enabled {
+            ModelMemoryAddPolicy::Lexical {
+                threshold_per_mille: self.threshold_per_mille,
+            }
+        } else {
+            ModelMemoryAddPolicy::Ordinary
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryGenerationMode {
+    #[default]
+    Off,
+    Keyword,
+    Fts,
+    Vector,
+    Fusion,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HistoryGenerationSettings {
+    pub mode: HistoryGenerationMode,
+    pub max_results: u8,
+    pub max_content_chars: u16,
+    /// Recent conversational messages retained verbatim when History RAG is enabled.
+    pub active_messages: u8,
+}
+
+impl Default for HistoryGenerationSettings {
+    fn default() -> Self {
+        Self {
+            mode: HistoryGenerationMode::Off,
+            max_results: 4,
+            max_content_chars: 600,
+            active_messages: 8,
+        }
+    }
+}
+
+impl HistoryGenerationSettings {
+    pub fn validate(self) -> Result<(), SettingsError> {
+        if !(1..=8).contains(&self.max_results)
+            || !(64..=1200).contains(&self.max_content_chars)
+            || !(1..=64).contains(&self.active_messages)
+        {
+            return Err(SettingsError::Validation(
+                "history generation requires 1..=8 results, 64..=1200 characters and 1..=64 active messages".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DocumentGenerationSource {
+    pub root: PathBuf,
+    pub index: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DocumentGenerationSettings {
+    pub sources: BTreeMap<crate::identity::CharacterId, DocumentGenerationSource>,
+    pub max_results: u8,
+    pub max_content_chars: u16,
+}
+
+impl Default for DocumentGenerationSettings {
+    fn default() -> Self {
+        Self {
+            sources: BTreeMap::new(),
+            max_results: 3,
+            max_content_chars: 500,
+        }
+    }
+}
+
+impl DocumentGenerationSettings {
+    pub fn validate(&self) -> Result<(), SettingsError> {
+        if !(1..=4).contains(&self.max_results) || !(64..=800).contains(&self.max_content_chars) {
+            return Err(SettingsError::Validation(
+                "document generation requires 1..=4 results and 64..=800 characters per result"
+                    .into(),
+            ));
+        }
+        for source in self.sources.values() {
+            if !source.root.is_absolute()
+                || !source.index.is_absolute()
+                || source.index.starts_with(&source.root)
+                || source.index == source.root
+                || [source.root.as_path(), source.index.as_path()]
+                    .iter()
+                    .any(|path| {
+                        path.components().any(|component| {
+                            matches!(component, Component::ParentDir | Component::CurDir)
+                        })
+                    })
+            {
+                return Err(SettingsError::Validation(
+                    "document generation requires absolute canonical-form source and independent index paths".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RemindersSettings {
@@ -272,6 +415,12 @@ pub struct AppSettings {
     pub reminders: RemindersSettings,
     pub speech: SpeechSettings,
     #[serde(default)]
+    pub memory: MemorySettings,
+    #[serde(default)]
+    pub history_generation: HistoryGenerationSettings,
+    #[serde(default)]
+    pub document_generation: DocumentGenerationSettings,
+    #[serde(default)]
     pub tools: ToolSettings,
 }
 
@@ -300,6 +449,9 @@ impl AppSettings {
             },
             reminders: RemindersSettings::initial_profile(),
             speech: SpeechSettings::default(),
+            memory: MemorySettings::default(),
+            history_generation: HistoryGenerationSettings::default(),
+            document_generation: DocumentGenerationSettings::default(),
             tools: ToolSettings::default(),
         }
     }
@@ -328,6 +480,9 @@ impl AppSettings {
             }
         }
         self.speech.validate()?;
+        self.memory.validate()?;
+        self.history_generation.validate()?;
+        self.document_generation.validate()?;
         self.tools
             .validate()
             .map_err(|error| SettingsError::Validation(error.to_string()))?;
@@ -375,6 +530,9 @@ section!(PresetSettings, presets);
 section!(CharactersSettings, characters);
 section!(VoiceSettings, voice);
 section!(SpeechSettings, speech);
+section!(MemorySettings, memory);
+section!(HistoryGenerationSettings, history_generation);
+section!(DocumentGenerationSettings, document_generation);
 section!(CaptureSettings, capture);
 section!(InterfaceSettings, interface);
 section!(RemindersSettings, reminders);

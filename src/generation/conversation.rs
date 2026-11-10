@@ -5,6 +5,7 @@ use crate::{
     generation::PreparedPrompt,
     identity::{CharacterId, EventId},
     interaction::TurnIntent,
+    knowledge::history_window::HistoryWindow,
     timeline::{
         domain::MessageRole,
         view::{ContextEntry, MitaView},
@@ -131,6 +132,15 @@ pub(crate) fn project_history(
     listener: CharacterId,
     target: Option<(EventId, TurnIntent)>,
 ) -> (Vec<LlmMessage>, bool) {
+    project_history_window(view, listener, target, None)
+}
+
+pub(crate) fn project_history_window(
+    view: &MitaView,
+    listener: CharacterId,
+    target: Option<(EventId, TurnIntent)>,
+    window: Option<&HistoryWindow>,
+) -> (Vec<LlmMessage>, bool) {
     let entries = view.context_entries();
     let target_id = target.map(|(id, _)| id);
     let position = entries.iter().position(|entry| match entry {
@@ -144,6 +154,11 @@ pub(crate) fn project_history(
     let mut messages = Vec::with_capacity(entries.len());
     let mut target_present = false;
     for entry in entries {
+        if let (Some(window), ContextEntry::Message(message)) = (window, &entry) {
+            if !window.is_active(message.event_id) {
+                continue;
+            }
+        }
         let (id, role, mut text) = match entry {
             ContextEntry::Message(message) => {
                 let Some(text) = message_text(&message.fields) else {
@@ -286,16 +301,25 @@ impl LlmConversation {
         memory_query
     }
 
+    #[cfg(test)]
     pub(crate) fn from_context_with_memory(
         context: &CharacterContext,
         prepared_knowledge: &Option<String>,
+    ) -> Self {
+        Self::from_context_with_window(context, prepared_knowledge, None)
+    }
+
+    pub(crate) fn from_context_with_window(
+        context: &CharacterContext,
+        prepared_knowledge: &Option<String>,
+        window: Option<&HistoryWindow>,
     ) -> Self {
         let focus = match context.focus.intent {
             TurnIntent::Reply(id) | TurnIntent::React(id) => Some((id, context.focus.intent)),
             TurnIntent::Initiate => None,
         };
         let (mut messages, target_present) =
-            project_history(&context.view, context.character_id, focus);
+            project_history_window(&context.view, context.character_id, focus, window);
         if !context.working_state.is_empty() {
             let state = &context.working_state;
             let mut handoff = vec![
@@ -540,6 +564,69 @@ mod tests {
             messages[0].text,
             "[Собеседник: Kind -> Crazy] Я говорила кое-что игроку"
         );
+    }
+
+    #[test]
+    fn active_conversation_excludes_retrievable_archive_but_keeps_old_reply_focus() {
+        use crate::knowledge::history_window::HistoryWindow;
+        let mut store = TimelineStore::new();
+        let branch = BranchId::new();
+        store.create_session(SessionId::new(), branch).unwrap();
+        let old = append(
+            &mut store,
+            branch,
+            ConversationMessage::new(
+                "old-unique",
+                ConversationSpeaker::Player,
+                json!("Archive moonstone secret"),
+                [CharacterId::Crazy],
+            ),
+        );
+        append(
+            &mut store,
+            branch,
+            ConversationMessage::new(
+                "middle",
+                ConversationSpeaker::Player,
+                json!("Another conversation"),
+                [CharacterId::Crazy],
+            ),
+        );
+        let newest = append(
+            &mut store,
+            branch,
+            ConversationMessage::new(
+                "newest",
+                ConversationSpeaker::Player,
+                json!("Current topic"),
+                [CharacterId::Crazy],
+            ),
+        );
+        let view =
+            TimelineMessageQueries::capture(&store, branch, CharacterId::Crazy, None).unwrap();
+        let window = HistoryWindow::capture(&view, None, 1);
+        let (active, _) = project_history_window(&view, CharacterId::Crazy, None, Some(&window));
+        assert_eq!(active.len(), 1);
+        assert!(active[0].text.contains("Current topic"));
+        assert!(!active.iter().any(|m| m.text.contains("moonstone")));
+        assert!(window.is_archived(old));
+        assert!(window.is_active(newest));
+        let (all, _) = project_history(&view, CharacterId::Crazy, None);
+        assert_eq!(all.len(), 3);
+
+        let targeted = HistoryWindow::capture(&view, Some(old), 1);
+        let (reply, target_present) = project_history_window(
+            &view,
+            CharacterId::Crazy,
+            Some((old, TurnIntent::Reply(old))),
+            Some(&targeted),
+        );
+        assert!(target_present);
+        assert_eq!(reply.len(), 2);
+        assert!(reply[0].text.contains("Archive moonstone secret"));
+        assert!(reply[0].text.contains("Сообщение или событие"));
+        assert!(reply[1].text.contains("Current topic"));
+        assert!(!targeted.is_archived(old));
     }
 
     #[test]

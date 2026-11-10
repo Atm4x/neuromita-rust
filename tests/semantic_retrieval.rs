@@ -216,6 +216,93 @@ async fn provider_failure_does_not_silently_fallback() {
     assert!(matches!(err, EmbeddingError::Transport(_)));
 }
 
+struct InvalidEmbeddingFixture {
+    space: EmbeddingSpace,
+    document_batch_size: std::sync::Mutex<Vec<usize>>,
+    invalid_query: bool,
+}
+
+impl InvalidEmbeddingFixture {
+    fn new(invalid_query: bool) -> Self {
+        Self {
+            space: EmbeddingSpace::new("fixture", "bad-batch", "v1", 3).unwrap(),
+            document_batch_size: std::sync::Mutex::new(Vec::new()),
+            invalid_query,
+        }
+    }
+}
+
+impl EmbeddingProvider for InvalidEmbeddingFixture {
+    fn space(&self) -> &EmbeddingSpace {
+        &self.space
+    }
+
+    fn embed(&self, purpose: EmbeddingPurpose, _: String) -> EmbeddingFuture<'_, Embedding> {
+        Box::pin(async move {
+            let dimensions = if self.invalid_query && purpose == EmbeddingPurpose::Query {
+                2
+            } else {
+                3
+            };
+            let space = EmbeddingSpace::new("fixture", "bad-batch", "v1", dimensions).unwrap();
+            Embedding::new(vec![1.0; dimensions], &space)
+        })
+    }
+
+    fn embed_documents(&self, texts: Vec<String>) -> EmbeddingFuture<'_, Vec<Embedding>> {
+        Box::pin(async move {
+            self.document_batch_size.lock().unwrap().push(texts.len());
+            Ok(texts
+                .iter()
+                .enumerate()
+                .map(|(index, _)| {
+                    let dimensions = if index + 1 == texts.len() { 2 } else { 3 };
+                    let space =
+                        EmbeddingSpace::new("fixture", "bad-batch", "v1", dimensions).unwrap();
+                    Embedding::new(vec![1.0; dimensions], &space).unwrap()
+                })
+                .collect())
+        })
+    }
+}
+
+#[tokio::test]
+async fn invalid_document_batch_is_rejected_before_any_cache_entry_is_published() {
+    let provider = Arc::new(InvalidEmbeddingFixture::new(false));
+    let retriever = SemanticMemoryRetriever::new(provider.clone(), 16).unwrap();
+    let records = vec![
+        memory(1, MemoryPriority::Normal, "first"),
+        memory(2, MemoryPriority::Normal, "second"),
+    ];
+    for _ in 0..2 {
+        assert!(matches!(
+            retriever
+                .retrieve(CharacterId::Crazy, &records, "search")
+                .await,
+            Err(EmbeddingError::ModelSpaceMismatch { .. })
+        ));
+    }
+    assert_eq!(*provider.document_batch_size.lock().unwrap(), vec![2, 2]);
+}
+
+#[tokio::test]
+async fn invalid_query_vector_must_not_start_document_indexing() {
+    let provider = Arc::new(InvalidEmbeddingFixture::new(true));
+    let retriever = SemanticMemoryRetriever::new(provider.clone(), 16).unwrap();
+    let result = retriever
+        .retrieve(
+            CharacterId::Crazy,
+            &[memory(1, MemoryPriority::Normal, "first")],
+            "search",
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(EmbeddingError::ModelSpaceMismatch { .. })
+    ));
+    assert!(provider.document_batch_size.lock().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn gemini_http_fixture_verifies_query_and_document_protocol() {
     verify_gemini_http(GeminiEmbeddingProtocol::Embedding001).await;
@@ -601,4 +688,257 @@ async fn forgotten_and_deleted_records_never_reach_embeddings_even_via_direct_re
         .unwrap();
     assert_eq!(result.selected_ids.len(), 1);
     assert_eq!(fixture.embedded_documents.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn embedding_cache_maintenance_requires_matching_fresh_confirmed_preview() {
+    use neuromita::knowledge::semantic_memory::EmbeddingCacheMaintenanceError;
+
+    let fixture = Arc::new(SemanticFixture::new("cache-maintenance"));
+    let retrieval = SemanticMemoryRetriever::new(fixture.clone(), 16).unwrap();
+    let records = vec![memory(1, MemoryPriority::Normal, "чай")];
+    let initial = retrieval.preview_cache_clear();
+    assert_eq!(initial.total_entries, 0);
+    retrieval
+        .retrieve(CharacterId::Crazy, &records, "чай")
+        .await
+        .unwrap();
+    let preview = retrieval.preview_cache_clear();
+    assert_eq!(preview.total_entries, 1);
+    assert_eq!(preview.entries_by_character[&CharacterId::Crazy], 1);
+    assert!(matches!(
+        retrieval.clear_cache_confirmed(&preview, false),
+        Err(EmbeddingCacheMaintenanceError::ConfirmationRequired)
+    ));
+    assert!(matches!(
+        retrieval.clear_cache_confirmed(&initial, true),
+        Err(EmbeddingCacheMaintenanceError::StalePreview)
+    ));
+    let foreign = SemanticMemoryRetriever::new(fixture, 16).unwrap();
+    assert!(matches!(
+        foreign.clear_cache_confirmed(&preview, true),
+        Err(EmbeddingCacheMaintenanceError::StalePreview)
+    ));
+    assert_eq!(retrieval.clear_cache_confirmed(&preview, true).unwrap(), 1);
+    assert_eq!(retrieval.preview_cache_clear().total_entries, 0);
+    assert!(matches!(
+        retrieval.clear_cache_confirmed(&preview, true),
+        Err(EmbeddingCacheMaintenanceError::StalePreview)
+    ));
+    let repeated = retrieval
+        .retrieve(CharacterId::Crazy, &records, "чай")
+        .await
+        .unwrap();
+    assert_eq!(repeated.cost.cache_hits, 0);
+}
+
+struct DelayedEmbeddingFixture {
+    inner: SemanticFixture,
+    block_first_documents: std::sync::atomic::AtomicBool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl EmbeddingProvider for DelayedEmbeddingFixture {
+    fn space(&self) -> &EmbeddingSpace {
+        &self.inner.space
+    }
+
+    fn embed(&self, purpose: EmbeddingPurpose, text: String) -> EmbeddingFuture<'_, Embedding> {
+        self.inner.embed(purpose, text)
+    }
+
+    fn embed_documents(&self, texts: Vec<String>) -> EmbeddingFuture<'_, Vec<Embedding>> {
+        Box::pin(async move {
+            self.inner.document_batches.fetch_add(1, Ordering::Relaxed);
+            if self.block_first_documents.swap(false, Ordering::AcqRel) {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            Ok(texts.iter().map(|text| self.inner.vector(text)).collect())
+        })
+    }
+}
+
+#[tokio::test]
+async fn clearing_embedding_cache_during_inflight_batch_prevents_late_repopulation() {
+    let provider = Arc::new(DelayedEmbeddingFixture {
+        inner: SemanticFixture::new("slow-model"),
+        block_first_documents: std::sync::atomic::AtomicBool::new(true),
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let retrieval = Arc::new(SemanticMemoryRetriever::new(provider.clone(), 16).unwrap());
+    let records = vec![memory(2, MemoryPriority::High, "чай")];
+    let task_retrieval = Arc::clone(&retrieval);
+    let task_records = records.clone();
+    let task = tokio::spawn(async move {
+        task_retrieval
+            .retrieve(CharacterId::Crazy, &task_records, "чай")
+            .await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        provider.entered.notified(),
+    )
+    .await
+    .expect("provider received a document batch");
+    let preview = retrieval.preview_cache_clear();
+    assert_eq!(preview.total_entries, 0);
+    assert_eq!(retrieval.clear_cache_confirmed(&preview, true).unwrap(), 0);
+    provider.release.notify_one();
+    let completed = task.await.unwrap().unwrap();
+    assert_eq!(completed.cost.embedded_texts, 2);
+    assert_eq!(retrieval.preview_cache_clear().total_entries, 0);
+    let next = retrieval
+        .retrieve(CharacterId::Crazy, &records, "чай")
+        .await
+        .unwrap();
+    assert_eq!(next.cost.cache_hits, 0);
+    assert_eq!(retrieval.preview_cache_clear().total_entries, 1);
+    assert_eq!(provider.inner.document_batches.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn scoped_retrieval_requires_explicit_forgotten_visibility_and_preserves_timeline() {
+    use neuromita::{
+        knowledge::{
+            retrieval_fusion::FusionMode,
+            semantic_memory::{MemoryRetrievalScope, RetrievalStatus, SemanticRetrievalFilter},
+        },
+        memory::{CharacterMemories, MemoryChange, MemoryKind, MemoryState},
+    };
+
+    let mut snapshot = CharacterMemories::default();
+    for (id, state, kind, expiry) in [
+        (1, MemoryState::Active, MemoryKind::Fact, None),
+        (2, MemoryState::Forgotten, MemoryKind::Fact, None),
+        (3, MemoryState::Deleted, MemoryKind::Fact, None),
+        (4, MemoryState::Active, MemoryKind::Fact, Some(100)),
+        (5, MemoryState::Forgotten, MemoryKind::RagOnly, None),
+        (
+            6,
+            MemoryState::Forgotten,
+            MemoryKind::Island(neuromita::memory::MemoryIsland::Preferences),
+            None,
+        ),
+    ] {
+        let mut record = memory(id, MemoryPriority::Normal, &format!("distinct fact {id}"));
+        record.state = state;
+        record.kind = kind;
+        record.expires_at_unix_ms = expiry;
+        snapshot
+            .apply_committed(&MemoryChange::Upsert(record))
+            .unwrap();
+    }
+    let retained = snapshot.clone();
+    let fixture = Arc::new(SemanticFixture::new("scoped-memory"));
+    let retrieval = SemanticMemoryRetriever::new(fixture.clone(), 16).unwrap();
+
+    let default = retrieval
+        .retrieve(CharacterId::Crazy, &snapshot.all(), "fact")
+        .await
+        .unwrap();
+    assert_eq!(default.selected_ids.len(), 2);
+    assert!(default.selected_ids.contains(&MemoryId(Uuid::from_u128(4))));
+    assert!(!default.selected_ids.contains(&MemoryId(Uuid::from_u128(2))));
+
+    let scoped = |scope| {
+        retrieval.retrieve_scoped(
+            CharacterId::Crazy,
+            &snapshot,
+            "fact",
+            100,
+            scope,
+            SemanticRetrievalFilter::all(),
+            FusionMode::Union,
+        )
+    };
+    let active = scoped(MemoryRetrievalScope::ActiveOnly).await.unwrap();
+    assert_eq!(active.selected_ids, vec![MemoryId(Uuid::from_u128(1))]);
+
+    let all = scoped(MemoryRetrievalScope::ActiveAndForgotten)
+        .await
+        .unwrap();
+    assert_eq!(all.status, RetrievalStatus::Selected);
+    assert_eq!(all.selected_ids.len(), 3);
+    for id in [1, 2, 5] {
+        assert!(all.selected_ids.contains(&MemoryId(Uuid::from_u128(id))));
+    }
+    for id in [3, 4, 6] {
+        assert!(!all.selected_ids.contains(&MemoryId(Uuid::from_u128(id))));
+    }
+    assert_eq!(all.matches.len(), 3);
+
+    let forgotten = scoped(MemoryRetrievalScope::ForgottenOnly).await.unwrap();
+    assert_eq!(forgotten.selected_ids.len(), 2);
+    for id in [2, 5] {
+        assert!(
+            forgotten
+                .selected_ids
+                .contains(&MemoryId(Uuid::from_u128(id)))
+        );
+    }
+    assert_eq!(snapshot, retained);
+}
+
+#[tokio::test]
+async fn forgotten_only_mode_is_empty_without_forgotten_and_never_falls_back_on_provider_failure() {
+    use neuromita::{
+        knowledge::{
+            retrieval_fusion::FusionMode,
+            semantic_memory::{MemoryRetrievalScope, RetrievalStatus, SemanticRetrievalFilter},
+        },
+        memory::{CharacterMemories, MemoryChange, MemoryState},
+    };
+    let mut snapshot = CharacterMemories::default();
+    snapshot
+        .apply_committed(&MemoryChange::Upsert(memory(
+            1,
+            MemoryPriority::Normal,
+            "tea",
+        )))
+        .unwrap();
+    let provider = Arc::new(SemanticFixture {
+        fail: true,
+        ..SemanticFixture::new("scoped-down")
+    });
+    let retrieval = SemanticMemoryRetriever::new(provider.clone(), 8).unwrap();
+    let retrieve = |scope| {
+        retrieval.retrieve_scoped(
+            CharacterId::Crazy,
+            &snapshot,
+            "tea",
+            0,
+            scope,
+            SemanticRetrievalFilter::all(),
+            FusionMode::VectorOnly,
+        )
+    };
+    let empty = retrieve(MemoryRetrievalScope::ForgottenOnly).await.unwrap();
+    assert_eq!(empty.status, RetrievalStatus::EmptyCorpus);
+    assert_eq!(provider.query_count.load(Ordering::Relaxed), 0);
+    assert!(matches!(
+        retrieve(MemoryRetrievalScope::ActiveAndForgotten).await,
+        Err(EmbeddingError::Transport(_))
+    ));
+    let mut updated = snapshot.get(MemoryId(Uuid::from_u128(1))).unwrap().clone();
+    updated.state = MemoryState::Forgotten;
+    snapshot
+        .apply_committed(&MemoryChange::Upsert(updated))
+        .unwrap();
+    assert!(matches!(
+        retrieval
+            .retrieve_scoped(
+                CharacterId::Crazy,
+                &snapshot,
+                "tea",
+                0,
+                MemoryRetrievalScope::ForgottenOnly,
+                SemanticRetrievalFilter::all(),
+                FusionMode::VectorOnly,
+            )
+            .await,
+        Err(EmbeddingError::Transport(_))
+    ));
 }

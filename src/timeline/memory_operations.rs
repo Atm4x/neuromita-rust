@@ -30,10 +30,14 @@ impl SessionTimeline {
         character: CharacterId,
         expected_selection: TimelineSelection,
         expected_anchor: ContextAnchor,
+        expected_context_epoch: u64,
         changes: &[MemoryChange],
     ) -> Result<(), TimelineError> {
         self.assert_selection(expected_selection)?;
-        if self.anchor() != expected_anchor {
+        if self.anchor() != expected_anchor
+            || self.admission(character, expected_selection)?.context_epoch
+                != expected_context_epoch
+        {
             return Err(TimelineError::ConcurrentWrite);
         }
         if changes.is_empty() || changes.len() > MAX_MEMORY_EDIT_CHANGES {
@@ -71,7 +75,7 @@ impl SessionTimeline {
             drafts,
             AppendGuard {
                 selection_generation: expected_selection.generation,
-                context: None,
+                context: Some((character, expected_context_epoch, None)),
                 accepted_reply_revision: None,
             },
         )?;

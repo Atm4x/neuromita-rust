@@ -47,7 +47,7 @@ use crate::voice::{
     AudioArtifact, AudioFormat, VoiceError, VoiceFuture, VoiceOptions, VoiceProvider,
 };
 use hardware::{HardwareProbe, RuntimeProfile, verify_execution, verify_probe};
-use runtime_status::{LoadedModel, RuntimePhase, RuntimeSnapshot};
+use runtime_status::{LoadedModel, RuntimePhase, RuntimeSnapshot, ServiceRuntimeStatus};
 
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_REQUEST_BYTES: usize = 32 * 1024 * 1024;
@@ -102,6 +102,8 @@ pub enum AiRuntimeError {
     AlreadyRunning,
     #[error("worker generation changed before request completed")]
     StaleGeneration,
+    #[error("worker recovery requires a failed worker generation")]
+    WorkerNotFailed,
     #[error("python worker failed to start: {0}")]
     Spawn(#[source] std::io::Error),
     #[error("python worker IPC failed: {0}")]
@@ -468,6 +470,7 @@ struct Activation<'a> {
     models: &'a [ModelActivation],
     profile: Option<&'a RuntimeProfile>,
     verify: Option<&'a (dyn Fn() -> Result<std::fs::File, AiRuntimeError> + Send + Sync)>,
+    expected_failed: Option<(AiService, Uuid)>,
 }
 
 impl AiService {
@@ -480,6 +483,15 @@ impl AiService {
             Self::Beats => "beats",
         }
     }
+}
+
+fn retire_worker_status(status: &mut ServiceRuntimeStatus, reason: &str) {
+    if status.phase != RuntimePhase::Failed || status.last_error.is_none() {
+        status.last_error = Some(reason.to_owned());
+    }
+    status.phase = RuntimePhase::Failed;
+    status.active_model = None;
+    status.pending_model = None;
 }
 
 pub struct AiSupervisor {
@@ -535,10 +547,7 @@ impl AiSupervisor {
                 self.status.send_modify(|snapshot| {
                     for state in snapshot.services.values_mut() {
                         if state.generation == Some(generation) {
-                            state.phase = RuntimePhase::Failed;
-                            state.active_model = None;
-                            state.pending_model = None;
-                            state.last_error = Some(reason.clone());
+                            retire_worker_status(state, &reason);
                         }
                     }
                 });
@@ -623,21 +632,17 @@ impl AiSupervisor {
             if state.generation != Some(generation) {
                 return;
             }
-            state.last_error = Some(error.to_string());
             if fatal {
-                let affected = snapshot.services.values_mut().filter(|status| {
-                    self.topology == ProcessTopology::Shared
-                        && status.generation == Some(generation)
-                });
-                for status in affected {
-                    status.phase = RuntimePhase::Failed;
-                    status.active_model = None;
-                    status.pending_model = None;
+                let reason = error.to_string();
+                for (tracked, status) in &mut snapshot.services {
+                    if status.generation == Some(generation)
+                        && (self.topology == ProcessTopology::Shared || *tracked == service)
+                    {
+                        retire_worker_status(status, &reason);
+                    }
                 }
-                let state = snapshot.services.entry(service).or_default();
-                state.phase = RuntimePhase::Failed;
-                state.active_model = None;
-                state.pending_model = None;
+            } else if state.phase != RuntimePhase::Failed {
+                state.last_error = Some(error.to_string());
             }
         });
     }
@@ -758,6 +763,7 @@ impl AiSupervisor {
             models,
             profile: Some(profile),
             verify: Some(verify),
+            expected_failed: None,
         })
         .await
     }
@@ -825,6 +831,28 @@ impl AiSupervisor {
             models,
             profile: None,
             verify: None,
+            expected_failed: None,
+        })
+        .await
+    }
+
+    /// Replace only an already failed generation, using the exact previously selected models.
+    /// Both the generation and the failure state are checked under the activation lock.
+    pub async fn restart_failed_composed(
+        &self,
+        service: AiService,
+        expected_generation: Uuid,
+        composition: &composition::RuntimeComposition,
+        models: &[ModelActivation],
+    ) -> Result<Uuid, AiRuntimeError> {
+        self.activate(Activation {
+            service,
+            services: composition.services(),
+            layers: composition.paths(),
+            models,
+            profile: None,
+            verify: None,
+            expected_failed: Some((service, expected_generation)),
         })
         .await
     }
@@ -837,6 +865,7 @@ impl AiSupervisor {
             models,
             profile,
             verify,
+            expected_failed,
         } = request;
         use std::collections::HashSet;
         let selected: HashSet<_> = services.iter().copied().collect();
@@ -854,6 +883,31 @@ impl AiSupervisor {
         let key = self.topology.key(service);
         let slot = self.activation_lock(key).await;
         let _guard = slot.lock().await;
+        if let Some((requested, expected_generation)) = expected_failed {
+            let current = self.workers.lock().await.get(&key).cloned();
+            let Some(current) = current else {
+                return Err(AiRuntimeError::NotRunning);
+            };
+            let worker = current.lock().await;
+            if worker.generation != expected_generation
+                || self.status_snapshot().service(requested).generation != Some(expected_generation)
+            {
+                return Err(AiRuntimeError::StaleGeneration);
+            }
+            if !worker.failed
+                || self.status_snapshot().service(requested).phase != RuntimePhase::Failed
+            {
+                return Err(AiRuntimeError::WorkerNotFailed);
+            }
+            if worker.selections.len() != models.len()
+                || models.iter().any(|model| {
+                    worker.selections.get(&model.service)
+                        != Some(&(model.plugin_id.clone(), model.asset_revision.clone()))
+                })
+            {
+                return Err(AiRuntimeError::ActivationSuperseded);
+            }
+        }
         let mut runtime_profiles = HashMap::new();
         if let Some(profile) = profile {
             let previous = self.workers.lock().await.get(&key).cloned();
@@ -1492,6 +1546,153 @@ mod tests {
         fresh.child.start_kill().unwrap();
         fresh.child.wait().await.unwrap();
         tokio::fs::remove_dir_all(temp).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn python_ipc_timeout_retires_worker_and_restart_clears_failure() {
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
+        let temp = std::env::temp_dir().join(format!("nm-timeout-{}", Uuid::new_v4()));
+        let plugin = temp.join("mock_tts");
+        tokio::fs::create_dir_all(&plugin).await.unwrap();
+        tokio::fs::copy(
+            source.join("plugins/builtin/mock_tts/plugin.json"),
+            plugin.join("plugin.json"),
+        )
+        .await
+        .unwrap();
+        let code = tokio::fs::read_to_string(source.join("plugins/builtin/mock_tts/plugin.py"))
+            .await
+            .unwrap()
+            .replace("\r\n", "\n");
+        let needle = "    def initialize(self, settings):\n";
+        assert!(code.contains(needle));
+        let code = code.replace(
+            needle,
+            "    def initialize(self, settings):\n        if settings.get('block'):\n            import time\n            time.sleep(10)\n",
+        );
+        tokio::fs::write(plugin.join("plugin.py"), code)
+            .await
+            .unwrap();
+
+        let supervisor = AiSupervisor::new(
+            ProcessTopology::Split,
+            PythonHostConfig {
+                python_executable: test_python().into(),
+                sdk_root: source,
+                plugins_directory: temp.clone(),
+                models_directory: None,
+                request_timeout: Duration::from_secs(5),
+            },
+        );
+        let initial = supervisor.start(AiService::Tts).await.unwrap();
+        let failed = timeout(
+            Duration::from_secs(7),
+            supervisor.initialize(AiService::Tts, "mock_tts", json!({"block": true})),
+        )
+        .await
+        .expect("the configured worker deadline must terminate this IPC request");
+        assert!(matches!(failed, Err(AiRuntimeError::Timeout)));
+        let status = supervisor.status_snapshot().service(AiService::Tts);
+        assert_eq!(status.phase, RuntimePhase::Failed);
+        assert_eq!(status.generation, Some(initial));
+        assert!(status.active_model.is_none());
+        assert!(
+            status
+                .last_error
+                .as_deref()
+                .unwrap_or("")
+                .contains("timed out")
+        );
+        assert!(matches!(
+            supervisor.discover(AiService::Tts).await,
+            Err(AiRuntimeError::Protocol(message)) if message == "worker requires restart"
+        ));
+        let after_rejected = supervisor.status_snapshot().service(AiService::Tts);
+        assert_eq!(after_rejected.phase, RuntimePhase::Failed);
+        assert!(
+            after_rejected
+                .last_error
+                .as_deref()
+                .unwrap()
+                .contains("timed out")
+        );
+        let refreshed = supervisor.refresh_status().await.service(AiService::Tts);
+        assert_eq!(refreshed.phase, RuntimePhase::Failed);
+        assert!(
+            refreshed
+                .last_error
+                .as_deref()
+                .unwrap()
+                .contains("timed out")
+        );
+
+        supervisor.stop(AiService::Tts).await.unwrap();
+        let stopped = supervisor.status_snapshot().service(AiService::Tts);
+        assert_eq!(stopped.phase, RuntimePhase::Stopped);
+        assert!(stopped.generation.is_none());
+        let restarted = supervisor.start(AiService::Tts).await.unwrap();
+        assert_ne!(restarted, initial);
+        let ready = supervisor
+            .initialize(AiService::Tts, "mock_tts", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(ready["model_ready"], true);
+        let status = supervisor.status_snapshot().service(AiService::Tts);
+        assert_eq!(status.generation, Some(restarted));
+        assert_eq!(status.phase, RuntimePhase::ModelReady);
+        assert_eq!(status.active_model.as_ref().unwrap().plugin_id, "mock_tts");
+        assert!(status.last_error.is_none());
+        supervisor.stop(AiService::Tts).await.unwrap();
+        tokio::fs::remove_dir_all(temp).await.unwrap();
+    }
+
+    #[test]
+    fn fatal_shared_worker_failure_preserves_original_cause_for_all_services() {
+        let supervisor = AiSupervisor::new(
+            ProcessTopology::Shared,
+            PythonHostConfig {
+                python_executable: "python3".into(),
+                sdk_root: PathBuf::new(),
+                plugins_directory: PathBuf::new(),
+                models_directory: None,
+                request_timeout: Duration::from_secs(1),
+            },
+        );
+        let generation = Uuid::new_v4();
+        supervisor.started(&[AiService::Tts, AiService::Asr], &[], generation);
+        supervisor.request_failed(AiService::Tts, generation, &AiRuntimeError::Timeout, true);
+        for service in [AiService::Tts, AiService::Asr] {
+            let status = supervisor.status_snapshot().service(service);
+            assert_eq!(status.generation, Some(generation));
+            assert_eq!(status.phase, RuntimePhase::Failed);
+            assert_eq!(
+                status.last_error.as_deref(),
+                Some("python worker timed out")
+            );
+            assert!(status.active_model.is_none());
+        }
+        supervisor.request_failed(
+            AiService::Asr,
+            generation,
+            &AiRuntimeError::Protocol("worker requires restart".into()),
+            true,
+        );
+        supervisor.request_failed(
+            AiService::Tts,
+            Uuid::new_v4(),
+            &AiRuntimeError::Timeout,
+            true,
+        );
+        for service in [AiService::Tts, AiService::Asr] {
+            assert_eq!(
+                supervisor
+                    .status_snapshot()
+                    .service(service)
+                    .last_error
+                    .as_deref(),
+                Some("python worker timed out")
+            );
+        }
     }
 
     #[test]

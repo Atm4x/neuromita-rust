@@ -46,6 +46,15 @@ pub enum Command {
         neuromita::character::CharacterMemorySnapshot,
         Vec<neuromita::memory::MemoryCommand>,
     ),
+    MemoryRecall(uuid::Uuid, CharacterId, neuromita::memory::MemoryId, String),
+    GraphPreview(
+        uuid::Uuid,
+        CharacterId,
+        neuromita::memory::MemoryId,
+        neuromita::knowledge::maintenance::GraphMaintenanceMode,
+    ),
+    GraphApply(uuid::Uuid, CharacterId),
+    GraphAbort(uuid::Uuid),
     Preview(ConversationChange),
     Confirm,
     Abort,
@@ -74,6 +83,8 @@ pub enum Command {
     StructuredDisplay(neuromita::settings::StructuredDisplayMode),
     SetToolOption(ToolOption, bool),
     SetToolDepth(u8),
+    SetMemoryDedupEnabled(bool),
+    SetMemoryDedupThreshold(u16),
     Select(CharacterId),
     Send(String),
     Cancel(RequestId),
@@ -82,6 +93,22 @@ pub enum Command {
     SpeechSessionEnabled(bool),
     SpeechPushToTalk(bool),
     MicrophoneTest(bool, String, String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphPreviewReport {
+    pub count: usize,
+    pub relations: Vec<neuromita::memory::ProvenancedRelation>,
+}
+
+impl GraphPreviewReport {
+    fn from_plan(plan: &neuromita::knowledge::maintenance::GraphMaintenancePreview) -> Self {
+        let relations = plan.inspected_relations();
+        Self {
+            count: relations.len(),
+            relations,
+        }
+    }
 }
 
 pub enum Update {
@@ -102,6 +129,10 @@ pub enum Update {
     MemoryError(String),
     MemorySaved(uuid::Uuid),
     MemoryEditError(uuid::Uuid, String),
+    MemoryRecallResult(uuid::Uuid, Result<Option<String>, String>),
+    GraphCapability(bool),
+    GraphPreviewResult(uuid::Uuid, Result<GraphPreviewReport, String>),
+    GraphApplyResult(uuid::Uuid, Result<(), String>),
     Confirmation(Option<(ConversationChange, usize)>),
     Diagnostics(String),
     Connections(std::sync::Arc<neuromita::server::ServerSnapshot>),
@@ -328,6 +359,9 @@ async fn run(
         }
     };
     publish(Update::Connected(app.server().address().to_string()));
+    publish(Update::GraphCapability(
+        neuromita::api::GraphMaintenanceApi::reindex_available().unwrap_or(false),
+    ));
     match app.presenter().audio_input.devices().await {
         Ok(devices) => publish(Update::SpeechInventory(
             Box::new(catalog.snapshot().await),
@@ -348,6 +382,7 @@ async fn run(
     if let Err(error) = app.shutdown().await {
         publish(Update::Error(error.to_string()));
     }
+    publish(Update::GraphCapability(false));
     publish(Update::Stopped);
 }
 
@@ -364,7 +399,13 @@ async fn observe(
     let presenter = &administration.conversation;
     let mut connections = administration.connections.observe();
     let mut memories = MemoryWatch::start(administration, CharacterId::Crazy)?;
+    let (recall_updates, mut recall_results) = mpsc::unbounded_channel();
     let mut pending: Option<ConversationChangePreview> = None;
+    let mut graph_pending: Option<(
+        uuid::Uuid,
+        CharacterId,
+        neuromita::knowledge::maintenance::GraphMaintenancePreview,
+    )> = None;
     let mut character = CharacterId::Crazy;
     let mut debug_character = CharacterId::Crazy;
     let mut requests = presenter.observe_requests();
@@ -427,7 +468,7 @@ async fn observe(
                         Err(error) => publish(Update::AdminError(error)),
                     }
                 },
-                Some(command @ (Command::DeletePreset(_) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::AssignAllPresets(..) | Command::SelectPromptSet(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_) | Command::SectionVisibility(..) | Command::HidePrivate(_) | Command::StructuredDisplay(_) | Command::SetToolOption(..) | Command::SetToolDepth(_) | Command::SaveTts(_) | Command::SaveAsr(..) | Command::SaveCharacterVoice(..) | Command::SelectAsrRecognizer(_))) => {
+                Some(command @ (Command::DeletePreset(_) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::AssignAllPresets(..) | Command::SelectPromptSet(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_) | Command::SectionVisibility(..) | Command::HidePrivate(_) | Command::StructuredDisplay(_) | Command::SetToolOption(..) | Command::SetToolDepth(_) | Command::SetMemoryDedupEnabled(_) | Command::SetMemoryDedupThreshold(_) | Command::SaveTts(_) | Command::SaveAsr(..) | Command::SaveCharacterVoice(..) | Command::SelectAsrRecognizer(_))) => {
                     match super::settings::execute(administration, command) {
                         Ok(()) => publish(Update::AdminSaved),
                         Err(error) => publish(Update::AdminError(error)),
@@ -493,11 +534,76 @@ async fn observe(
                 },
                 Some(Command::RefreshReleases) => { if let Err(error) = administration.releases.refresh() { publish(Update::ReleaseError(error.to_string())); } },
                 None => return Ok(()),
-                Some(Command::MemorySelect(id)) => { memories = MemoryWatch::start(administration, id)?; },
+                Some(Command::MemorySelect(id)) => {
+                    graph_pending = None;
+                    memories = MemoryWatch::start(administration, id)?;
+                },
+                Some(Command::GraphPreview(request_id, selected, memory_id, mode)) => {
+                    graph_pending = None;
+                    let result = if mode == neuromita::knowledge::maintenance::GraphMaintenanceMode::Reindex
+                        && !neuromita::api::GraphMaintenanceApi::reindex_available().unwrap_or(false)
+                    {
+                        Err("Graph Reindex backend is unavailable".to_owned())
+                    } else {
+                        neuromita::api::GraphMaintenanceApi::preview(
+                            selected,
+                            &[memory_id],
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis()
+                                .try_into()
+                                .unwrap_or(u64::MAX),
+                            mode,
+                        ).await.map_err(|error| error.to_string())
+                    };
+                    match result {
+                        Ok(plan) => {
+                            let report = GraphPreviewReport::from_plan(&plan);
+                            graph_pending = Some((request_id, selected, plan));
+                            publish(Update::GraphPreviewResult(request_id, Ok(report)));
+                        }
+                        Err(error) => publish(Update::GraphPreviewResult(request_id, Err(error))),
+                    }
+                },
+                Some(Command::GraphApply(request_id, selected)) => {
+                    let result = match graph_pending.take() {
+                        Some((id, owner, plan)) if id == request_id && owner == selected => {
+                            neuromita::api::GraphMaintenanceApi::apply_confirmed(
+                                selected, plan, true, stop,
+                            ).await.map(|_| ()).map_err(|error| error.to_string())
+                        }
+                        other => {
+                            graph_pending = other;
+                            Err("Graph preview is missing or belongs to another selection".to_owned())
+                        }
+                    };
+                    publish(Update::GraphApplyResult(request_id, result));
+                },
+                Some(Command::GraphAbort(request_id)) => {
+                    if graph_pending.as_ref().is_some_and(|(id, _, _)| *id == request_id) {
+                        graph_pending = None;
+                    }
+                },
                 Some(Command::MemoryEdit(edit_id, expected, commands)) => {
                     match administration.characters.edit_memories(expected.character(), expected, commands).await {
                         Ok(_) => publish(Update::MemorySaved(edit_id)), Err(error) => publish(Update::MemoryEditError(edit_id, error.to_string())),
                     }
+                },
+                Some(Command::MemoryRecall(request_id, character, memory_id, query)) => {
+                    let sender = recall_updates.clone();
+                    let cancelled = stop.clone();
+                    tokio::spawn(async move {
+                        let result = tokio::select! {
+                            _ = cancelled.cancelled() => return,
+                            result = neuromita::api::HistoricalRecallApi::inspect(
+                                character,
+                                neuromita::knowledge::forgotten_recall::RecallSelector::Ids(vec![memory_id]),
+                                &query,
+                            ) => result.map_err(|error| error.to_string()),
+                        };
+                        let _ = sender.send(Update::MemoryRecallResult(request_id, result));
+                    });
                 },
                 Some(Command::Preview(operation)) => match presenter.preview_change(character, operation).await {
                     Ok(preview) => { publish(Update::Confirmation(Some((preview.operation(), preview.message_count())))); pending = Some(preview); },
@@ -536,6 +642,9 @@ async fn observe(
                     Ok(()) => {},
                     Err(error) => publish(Update::AdminError(error.to_string())),
                 },
+            },
+            result = recall_results.recv() => {
+                if let Some(result) = result { publish(result); }
             },
             transcript = transcript_updates.recv() => {
                 if let Some(transcript) = transcript {

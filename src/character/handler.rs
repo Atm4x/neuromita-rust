@@ -19,6 +19,13 @@ use crate::{
     character::memory_access::{
         CharacterMemorySnapshot, MemoryEditResult, edit_memory_snapshot, read_memory_snapshot,
     },
+    character::portable_access::{
+        CharacterPortableResult, CharacterPortableSnapshot, import_portable_snapshot,
+        read_portable_snapshot,
+    },
+    character::variables_access::{
+        CharacterVariablesSnapshot, edit_variables_snapshot, read_variables_snapshot,
+    },
     games::{
         GameError, GamePolicy, GameReceipt, GameReply, GameSlot, InviteCause, PendingInvite,
         ReactionInvite, UserGameCommand, seabattle::Side as GameSide,
@@ -56,6 +63,8 @@ pub enum CharacterError {
     StaleState,
     #[error("invalid character memory operation: {0}")]
     InvalidMemory(&'static str),
+    #[error("invalid character variable operation: {0}")]
+    InvalidVariables(&'static str),
     #[error("character operation failed: {0}")]
     Internal(String),
     #[error("invalid mini-game command: {0}")]
@@ -83,6 +92,9 @@ pub(crate) struct AcceptanceContext {
     pub turn: TimelineTurn,
     pub game: Option<EventId>,
     pub game_guard: Option<EventId>,
+    /// An explicitly opted-in external evidence selection must still have the
+    /// exact same authoritative Timeline head when the turn is accepted.
+    pub require_exact_timeline_prefix: bool,
 }
 
 enum Command {
@@ -109,6 +121,19 @@ enum Command {
         >,
     ),
     MemorySnapshot(oneshot::Sender<Result<CharacterMemorySnapshot, CharacterError>>),
+    VariableSnapshot(oneshot::Sender<Result<CharacterVariablesSnapshot, CharacterError>>),
+    PortableSnapshot(oneshot::Sender<Result<CharacterPortableSnapshot, CharacterError>>),
+    ImportPortable {
+        expected: CharacterPortableSnapshot,
+        commands: Vec<MemoryCommand>,
+        variables: std::collections::BTreeMap<String, serde_json::Value>,
+        reply: oneshot::Sender<Result<CharacterPortableResult, CharacterError>>,
+    },
+    ImportVariables {
+        expected: CharacterVariablesSnapshot,
+        values: std::collections::BTreeMap<String, serde_json::Value>,
+        reply: oneshot::Sender<Result<CharacterVariablesSnapshot, CharacterError>>,
+    },
     EditMemory {
         expected: CharacterMemorySnapshot,
         commands: Vec<MemoryCommand>,
@@ -156,6 +181,60 @@ impl CharacterHandle {
         let (reply, receive) = oneshot::channel();
         self.commands
             .send(Command::MemorySnapshot(reply))
+            .await
+            .map_err(|_| CharacterError::Unavailable)?;
+        receive.await.map_err(|_| CharacterError::Unavailable)?
+    }
+
+    pub async fn user_variables(&self) -> Result<CharacterVariablesSnapshot, CharacterError> {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(Command::VariableSnapshot(reply))
+            .await
+            .map_err(|_| CharacterError::Unavailable)?;
+        receive.await.map_err(|_| CharacterError::Unavailable)?
+    }
+
+    pub async fn portable_snapshot(&self) -> Result<CharacterPortableSnapshot, CharacterError> {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(Command::PortableSnapshot(reply))
+            .await
+            .map_err(|_| CharacterError::Unavailable)?;
+        receive.await.map_err(|_| CharacterError::Unavailable)?
+    }
+
+    pub async fn import_portable(
+        &self,
+        expected: CharacterPortableSnapshot,
+        commands: Vec<MemoryCommand>,
+        variables: std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> Result<CharacterPortableResult, CharacterError> {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(Command::ImportPortable {
+                expected,
+                commands,
+                variables,
+                reply,
+            })
+            .await
+            .map_err(|_| CharacterError::Unavailable)?;
+        receive.await.map_err(|_| CharacterError::Unavailable)?
+    }
+
+    pub async fn import_variables(
+        &self,
+        expected: CharacterVariablesSnapshot,
+        values: std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> Result<CharacterVariablesSnapshot, CharacterError> {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(Command::ImportVariables {
+                expected,
+                values,
+                reply,
+            })
             .await
             .map_err(|_| CharacterError::Unavailable)?;
         receive.await.map_err(|_| CharacterError::Unavailable)?
@@ -502,6 +581,86 @@ impl CharacterHandler {
                         });
                     let _ = reply.send(result);
                 }
+                Command::VariableSnapshot(reply) => {
+                    let result = self
+                        .timeline
+                        .lock()
+                        .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))
+                        .and_then(|timeline| {
+                            read_variables_snapshot(&timeline, self.character.id)
+                                .map_err(|error| CharacterError::Internal(error.to_string()))
+                        });
+                    let _ = reply.send(result);
+                }
+                Command::PortableSnapshot(reply) => {
+                    let result = self
+                        .timeline
+                        .lock()
+                        .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))
+                        .and_then(|timeline| {
+                            read_portable_snapshot(&timeline, self.character.id)
+                                .map_err(|error| CharacterError::Internal(error.to_string()))
+                        });
+                    let _ = reply.send(result);
+                }
+                Command::ImportPortable {
+                    expected,
+                    commands,
+                    variables,
+                    reply,
+                } => {
+                    let result = self
+                        .timeline
+                        .lock()
+                        .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))
+                        .and_then(|mut timeline| {
+                            import_portable_snapshot(
+                                &mut timeline,
+                                self.character.id,
+                                &expected,
+                                &commands,
+                                &variables,
+                            )
+                            .map_err(|error| match error {
+                                crate::timeline::domain::TimelineError::ConcurrentWrite => {
+                                    CharacterError::StaleState
+                                }
+                                crate::timeline::domain::TimelineError::Invalid(reason) => {
+                                    CharacterError::InvalidMemory(reason)
+                                }
+                                other => CharacterError::Internal(other.to_string()),
+                            })
+                        });
+                    let _ = reply.send(result);
+                }
+                Command::ImportVariables {
+                    expected,
+                    values,
+                    reply,
+                } => {
+                    let result = self
+                        .timeline
+                        .lock()
+                        .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))
+                        .and_then(|mut timeline| {
+                            edit_variables_snapshot(
+                                &mut timeline,
+                                self.character.id,
+                                &expected,
+                                &values,
+                            )
+                            .map_err(|error| match error {
+                                crate::timeline::domain::TimelineError::ConcurrentWrite => {
+                                    CharacterError::StaleState
+                                }
+                                crate::timeline::domain::TimelineError::Invalid(reason) => {
+                                    CharacterError::InvalidVariables(reason)
+                                }
+                                other => CharacterError::Internal(other.to_string()),
+                            })
+                        });
+                    let _ = reply.send(result);
+                }
                 Command::EditMemory {
                     expected,
                     commands,
@@ -694,7 +853,7 @@ impl CharacterHandler {
         let working_state = captured.working_state;
         let now = CharacterRegistry::now_unix_ms();
         let memories = captured.memories.searchable_at(now);
-        let memory_relations = captured.memories.relations();
+        let memory_relations = captured.memories.relations_at(now);
         let memory_islands = captured.memories.islands_at(now);
         let reminders = match &self.reminders {
             Some(_) => crate::reminders::projection::prompt_reminders_at(
@@ -798,6 +957,9 @@ impl CharacterHandler {
             .lock()
             .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))?;
         let current_at = timeline.anchor();
+        if context.require_exact_timeline_prefix && current_at != context.anchor {
+            return Err(CharacterError::StaleState);
+        }
         let current = timeline
             .inspect_context_at(self.character.id, current_at)
             .map_err(CharacterError::Internal)?;
@@ -1336,6 +1498,7 @@ mod turn_tests {
             turn: context.turn,
             game: context.game_key,
             game_guard: context.game_guard,
+            require_exact_timeline_prefix: false,
         }
     }
 

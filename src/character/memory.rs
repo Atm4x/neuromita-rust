@@ -6,6 +6,8 @@ use uuid::Uuid;
 pub const MAX_ACTIVE_FACTS: usize = 256;
 pub const MAX_RETAINED_MEMORIES: usize = 1024;
 pub const MAX_MEMORY_EDIT_CHANGES: usize = MAX_ACTIVE_FACTS;
+pub const MAX_SOURCE_RELATIONS: usize = 128;
+pub const MAX_EXTRACTED_RELATIONS: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -161,6 +163,11 @@ pub enum MemoryCommand {
         priority: MemoryPriority,
         content: String,
     },
+    /// Trusted-local, exact-identity insertion from a versioned MemoryRecord archive.
+    /// Never modifies an existing ID; an identical record is an idempotent no-op.
+    ImportRecord {
+        record: MemoryRecord,
+    },
     SeedFromPrompt {
         priority: MemoryPriority,
         content: String,
@@ -168,6 +175,13 @@ pub enum MemoryCommand {
         rag_only: bool,
     },
     LinkEntities(MemoryRelation),
+    /// The extractor must supply the source revision captured before inference.
+    /// An edited, forgotten or replaced source must not accept late results.
+    ReplaceExtractedRelations {
+        source: MemoryId,
+        expected_revision: u64,
+        relations: Vec<MemoryRelation>,
+    },
     /// Explicit lexical Jaccard dedup on active facts only. This does not run inference.
     /// A threshold of 800 represents Python MEMORY_DEDUP_THRESHOLD=0.8.
     AddLexicallyDeduplicated {
@@ -302,6 +316,23 @@ impl MemoryRelation {
     }
 }
 
+/// Source identity and revision for an extraction committed in the Timeline.
+/// This is projection input, not an independently mutable graph database.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtractedRelations {
+    pub source: MemoryId,
+    pub source_revision: u64,
+    pub relations: Vec<MemoryRelation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvenancedRelation {
+    pub source: MemoryId,
+    pub source_revision: u64,
+    pub relation: MemoryRelation,
+}
+
 /// Canonical committed operation; upserts include complete values, not partial deltas.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
@@ -313,6 +344,7 @@ impl MemoryRelation {
 pub enum MemoryChange {
     Upsert(MemoryRecord),
     UpsertRelation(MemoryRelation),
+    ReplaceExtractedRelations(ExtractedRelations),
     Delete(MemoryId),
     /// An explicit, auditable protection transition separate from model-authored upserts.
     SetProtection {
@@ -324,7 +356,10 @@ pub enum MemoryChange {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CharacterMemories {
     records: BTreeMap<MemoryId, MemoryRecord>,
+    revision_counter: u64,
+    revisions: BTreeMap<MemoryId, u64>,
     relations: BTreeSet<MemoryRelation>,
+    extracted: BTreeMap<MemoryId, ExtractedRelations>,
 }
 
 impl CharacterMemories {
@@ -357,8 +392,51 @@ impl CharacterMemories {
         Ok(())
     }
 
+    pub fn source_revision(&self, id: MemoryId) -> Option<u64> {
+        self.revisions.get(&id).copied()
+    }
+
+    pub fn source_revisions(&self) -> BTreeMap<MemoryId, u64> {
+        self.revisions.clone()
+    }
+
+    pub fn extracted_relations_at(&self, as_of_unix_ms: u64) -> Vec<ProvenancedRelation> {
+        self.extracted
+            .values()
+            .filter(|batch| {
+                self.revisions.get(&batch.source) == Some(&batch.source_revision)
+                    && self
+                        .records
+                        .get(&batch.source)
+                        .is_some_and(|record| record.available_at(as_of_unix_ms))
+            })
+            .flat_map(|batch| {
+                batch
+                    .relations
+                    .iter()
+                    .cloned()
+                    .map(|relation| ProvenancedRelation {
+                        source: batch.source,
+                        source_revision: batch.source_revision,
+                        relation,
+                    })
+            })
+            .collect()
+    }
+
+    pub fn relations_at(&self, as_of_unix_ms: u64) -> Vec<MemoryRelation> {
+        let mut relations = self.relations.clone();
+        relations.extend(
+            self.extracted_relations_at(as_of_unix_ms)
+                .into_iter()
+                .map(|link| link.relation),
+        );
+        relations.into_iter().collect()
+    }
+
+    /// Untimed administrative projection; generation must use relations_at(now).
     pub fn relations(&self) -> Vec<MemoryRelation> {
-        self.relations.iter().cloned().collect()
+        self.relations_at(0)
     }
 
     /// Current active, non-expired facts are projected by explicit maintenance;
@@ -433,6 +511,39 @@ impl CharacterMemories {
 
     pub fn apply_committed(&mut self, change: &MemoryChange) -> Result<(), &'static str> {
         match change {
+            MemoryChange::ReplaceExtractedRelations(batch) => {
+                let source = self
+                    .records
+                    .get(&batch.source)
+                    .ok_or("graph extraction source is absent")?;
+                if source.state != MemoryState::Active
+                    || !matches!(source.kind, MemoryKind::Fact | MemoryKind::RagOnly)
+                    || self.revisions.get(&batch.source) != Some(&batch.source_revision)
+                {
+                    return Err("graph extraction source revision is stale");
+                }
+                if batch.relations.len() > MAX_SOURCE_RELATIONS
+                    || batch.relations.iter().any(|relation| !relation.is_valid())
+                    || batch.relations.iter().collect::<BTreeSet<_>>().len()
+                        != batch.relations.len()
+                {
+                    return Err("invalid or duplicate graph extraction relation");
+                }
+                let retained = self
+                    .extracted
+                    .iter()
+                    .filter(|(source, _)| **source != batch.source)
+                    .map(|(_, value)| value.relations.len())
+                    .sum::<usize>();
+                if retained + batch.relations.len() > MAX_EXTRACTED_RELATIONS {
+                    return Err("extracted relation capacity exceeded");
+                }
+                if batch.relations.is_empty() {
+                    self.extracted.remove(&batch.source);
+                } else {
+                    self.extracted.insert(batch.source, batch.clone());
+                }
+            }
             MemoryChange::UpsertRelation(relation) => {
                 if !relation.is_valid() {
                     return Err("invalid entity relation");
@@ -477,6 +588,14 @@ impl CharacterMemories {
                 if next_active_facts > MAX_ACTIVE_FACTS {
                     return Err("active memory capacity exceeded");
                 }
+                if self.records.get(&record.id) != Some(record) {
+                    self.revision_counter = self
+                        .revision_counter
+                        .checked_add(1)
+                        .ok_or("memory revision overflow")?;
+                    self.revisions.insert(record.id, self.revision_counter);
+                    self.extracted.remove(&record.id);
+                }
                 self.records.insert(record.id, record.clone());
             }
             // Legacy physical delete is kept for exact replay compatibility.
@@ -486,6 +605,8 @@ impl CharacterMemories {
                     return Err("protected memory must be unprotected before purge");
                 }
                 self.records.remove(id);
+                self.revisions.remove(id);
+                self.extracted.remove(id);
             }
             MemoryChange::SetProtection { id, protected } => {
                 let record = self.records.get_mut(id).ok_or("unknown memory id")?;
@@ -584,6 +705,17 @@ impl CharacterMemories {
                     next.apply_committed(&change)?;
                     changes.push(change);
                 }
+                MemoryCommand::ImportRecord { record } => {
+                    if let Some(existing) = next.get(record.id) {
+                        if existing == record {
+                            continue;
+                        }
+                        return Err("import memory id conflicts with an existing record");
+                    }
+                    let change = MemoryChange::Upsert(record.clone());
+                    next.apply_committed(&change)?;
+                    changes.push(change);
+                }
                 MemoryCommand::EnsureFact { priority, content } => {
                     if content.trim().is_empty() || content.chars().count() > 2000 {
                         return Err("invalid memory record");
@@ -675,6 +807,28 @@ impl CharacterMemories {
                         next.apply_committed(&change)?;
                         changes.push(change);
                     }
+                }
+                MemoryCommand::ReplaceExtractedRelations {
+                    source,
+                    expected_revision,
+                    relations,
+                } => {
+                    if next.source_revision(*source) != Some(*expected_revision) {
+                        return Err("graph extraction source revision is stale");
+                    }
+                    let batch = ExtractedRelations {
+                        source: *source,
+                        source_revision: *expected_revision,
+                        relations: relations.clone(),
+                    };
+                    if next.extracted.get(source) == Some(&batch)
+                        || (batch.relations.is_empty() && !next.extracted.contains_key(source))
+                    {
+                        continue;
+                    }
+                    let change = MemoryChange::ReplaceExtractedRelations(batch);
+                    next.apply_committed(&change)?;
+                    changes.push(change);
                 }
                 MemoryCommand::LinkEntities(relation) => {
                     if !relation.is_valid() {

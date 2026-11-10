@@ -1,0 +1,13 @@
+# Cycle59 — Explicit scoped Documents lexical index (R6 engineering slice)
+
+The owner source is an operator-selected absolute directory **for one exact CharacterId**. Only direct UTF-8 `.md` and `.txt` files are admitted; hidden files, nested folders and other extensions are not indexed. The files remain authoritative, and the versioned JSON index is disposable, never a canonical store. There is no inherited all-character document registry or implicit global source.
+
+Commands run before application/provider initialization:
+
+- `neuromita documents build --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --index NEW_ABSOLUTE_PATH`
+- `neuromita documents verify --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --index ABSOLUTE_PATH`
+- `neuromita documents query --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --index ABSOLUTE_PATH --text "query" [--limit 5]`
+
+The corpus is bounded at 48 files, 128 KiB/file, 512 KiB combined and 1,024 derived chunks (800 Unicode chars each, 120-char overlap). The JSON index is limited to 2 MiB and includes exact source SHA-256, lengths and all derived chunk text. New indexes publish through a private fsynced staging file and atomic no-overwrite hard-link; a failed directory fsync after link reports uncertainty without deleting the published output. A stale index is **rejected**; reindex requires explicitly publishing a different new output pathname. Source scans, strict format/version, exact character/root, source hashes and derived chunks are independently revalidated on `verify` and every `query`. Query scores token overlap without embeddings; it is an **explicit lexical mode**, not a fallback from failed vector processing. Its `RetrievalSource::Document` hits are admitted by existing bounded `retrieval_fusion::fuse` and carry relative source filename, chunk ID and source digest.
+
+Limitations: this is a bounded operator-owned native document selection API/CLI, not full R6. No automatic document import from Python, no recursive folders, PDF/Office extraction, persistent FTS5, vector corpus, model-backed reranker, generation-prompt participation, GUI reindex, authenticated provider or automated user-data backup. The SHA digest binds source bytes but does not authenticate trusted origin. An externally mutating writer can still change source after the final optimistic preflight; no process-excluding lock. Documents are explicitly outside Cycle58 known-file recovery scope. The formal R6 acceptance remains OPEN pending default-app ingestion/indexing/query and end-to-end generated response evidence.

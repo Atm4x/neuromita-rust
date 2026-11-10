@@ -1,6 +1,18 @@
+mod documents_cli;
+mod documents_operator;
 mod logging;
+#[cfg(feature = "sqlite-system")]
+mod recovery_inventory_cli;
+#[cfg(feature = "sqlite-system")]
+mod recovery_snapshot_cli;
 mod settings_cli;
 mod terminal;
+#[cfg(feature = "sqlite-system")]
+mod timeline_backup_cli;
+#[cfg(feature = "sqlite-system")]
+mod timeline_index_cli;
+#[cfg(feature = "sqlite-system")]
+mod timeline_restore_cli;
 
 use std::{error::Error, num::NonZeroUsize, process::ExitCode, sync::Arc, time::Duration};
 
@@ -26,6 +38,57 @@ async fn main() -> ExitCode {
     let mut arguments = std::env::args_os();
     let _program = arguments.next();
     let command = arguments.next();
+    if command.as_deref() == Some(std::ffi::OsStr::new("documents")) {
+        return match documents_cli::run(arguments.collect()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        };
+    }
+    if command.as_deref() == Some(std::ffi::OsStr::new("recovery-snapshot")) {
+        #[cfg(feature = "sqlite-system")]
+        return match recovery_snapshot_cli::run(arguments.collect()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        };
+        #[cfg(not(feature = "sqlite-system"))]
+        return fail("recovery-snapshot requires the sqlite-system feature");
+    }
+    if command.as_deref() == Some(std::ffi::OsStr::new("recovery-inventory")) {
+        #[cfg(feature = "sqlite-system")]
+        return match recovery_inventory_cli::run(arguments.collect()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        };
+        #[cfg(not(feature = "sqlite-system"))]
+        return fail("recovery-inventory requires the sqlite-system feature");
+    }
+    if command.as_deref() == Some(std::ffi::OsStr::new("timeline-backup")) {
+        #[cfg(feature = "sqlite-system")]
+        return match timeline_backup_cli::run(arguments.collect()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        };
+        #[cfg(not(feature = "sqlite-system"))]
+        return fail("timeline-backup requires the sqlite-system feature");
+    }
+    if command.as_deref() == Some(std::ffi::OsStr::new("timeline-restore")) {
+        #[cfg(feature = "sqlite-system")]
+        return match timeline_restore_cli::run(arguments.collect()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        };
+        #[cfg(not(feature = "sqlite-system"))]
+        return fail("timeline-restore requires the sqlite-system feature");
+    }
+    if command.as_deref() == Some(std::ffi::OsStr::new("timeline-index")) {
+        #[cfg(feature = "sqlite-system")]
+        return match timeline_index_cli::run(arguments.collect()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        };
+        #[cfg(not(feature = "sqlite-system"))]
+        return fail("timeline-index maintenance requires the sqlite-system feature");
+    }
     if command.as_deref() == Some(std::ffi::OsStr::new("dataset")) {
         let dataset = match arguments
             .map(|argument| {
@@ -132,9 +195,24 @@ async fn run() -> Result<(), Box<dyn Error>> {
         config.finetune = Some(neuromita::finetune::FineTuneSettings::load(path)?);
     }
     config.knowledge = knowledge;
+    if options.installed_speech {
+        let directory = if options.data_dir.is_absolute() {
+            options.data_dir.clone()
+        } else {
+            std::env::current_dir()?.join(&options.data_dir)
+        };
+        config = config.with_installed_speech_runtime(
+            neuromita::ai_runtime::installed_speech::InstalledSpeechEnvironment::for_desktop(
+                directory,
+            ),
+        );
+    }
     let app = ApplicationLifecycle::start(config).await?;
+    if let Some(warning) = app.speech_startup_warning() {
+        eprintln!("Installed speech activation failed: {warning}");
+    }
     tracing::info!(address = %app.server().address(), "server listening");
-    let result = terminal::run(&app.presenter().chat, options, app.finetune()).await;
+    let result = terminal::run(&app, options, app.finetune()).await;
     let stopped = app.shutdown().await;
     result?;
     stopped?;

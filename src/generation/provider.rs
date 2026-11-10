@@ -8,9 +8,12 @@ use std::{
 
 use thiserror::Error;
 
-use super::{GenerationPreset, ProviderKind, ProviderTemplate, StructuredResponse, ToolSettings};
-use crate::character::CharacterContext;
+use super::{
+    GenerationPreset, ModelMemoryAddPolicy, ProviderKind, ProviderTemplate, StructuredResponse,
+    ToolSettings,
+};
 use crate::prompts::PostDslProgram;
+use crate::{character::CharacterContext, knowledge::history_window::HistoryWindow};
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum GenerationError {
@@ -20,6 +23,8 @@ pub enum GenerationError {
     Duplicate(ProviderKind),
     #[error("transport error: {0}")]
     Transport(String),
+    #[error("LLM request deadline exceeded")]
+    DeadlineExceeded,
     #[error("provider returned HTTP {0}")]
     Http(u16),
     #[error("invalid provider response: {0}")]
@@ -59,7 +64,9 @@ pub struct GenerationRequest {
     pub post_dsl: Option<PostDslProgram>,
     pub preset: GenerationPreset,
     pub prepared_knowledge: Option<String>,
+    pub history_window: Option<HistoryWindow>,
     pub tools: ToolSettings,
+    pub model_memory_policy: ModelMemoryAddPolicy,
 }
 
 impl GenerationRequest {
@@ -74,8 +81,21 @@ impl GenerationRequest {
             post_dsl: None,
             preset,
             prepared_knowledge,
+            history_window: None,
             tools: ToolSettings::default(),
+            model_memory_policy: ModelMemoryAddPolicy::Ordinary,
         }
+    }
+
+    /// Capture the model-write policy with this request, never from mutable global state.
+    pub fn with_model_memory_policy(mut self, policy: ModelMemoryAddPolicy) -> Self {
+        self.model_memory_policy = policy;
+        self
+    }
+
+    pub fn with_history_window(mut self, window: Option<HistoryWindow>) -> Self {
+        self.history_window = window;
+        self
     }
 
     pub fn with_tools(mut self, tools: ToolSettings) -> Self {
@@ -103,6 +123,7 @@ pub struct GenerationInput {
     pub context: CharacterContext,
     pub prompt: Option<PreparedPrompt>,
     pub prepared_knowledge: Option<String>,
+    pub history_window: Option<HistoryWindow>,
     pub tool_history: Vec<PromptMessage>,
     pub(crate) native_tool_history: Vec<NativeToolExchange>,
     pub tool_settings: ToolSettings,
@@ -196,10 +217,19 @@ impl std::ops::Deref for GenerationInput {
 
 impl ProposedResponse {
     pub fn from_structured(structured: StructuredResponse) -> Result<Self, GenerationError> {
+        Self::from_structured_with_memory_policy(structured, ModelMemoryAddPolicy::Ordinary)
+    }
+
+    /// The caller must capture the active memory policy with the generation request.
+    /// This conversion is side-effect free; Timeline acceptance owns the write.
+    pub fn from_structured_with_memory_policy(
+        structured: StructuredResponse,
+        policy: ModelMemoryAddPolicy,
+    ) -> Result<Self, GenerationError> {
         structured.validate()?;
         structured.ensure_supported_effects()?;
         let text = structured.full_text();
-        let effects = structured.proposed_effects()?;
+        let effects = structured.proposed_effects_with_memory_policy(policy)?;
         let segments = structured
             .segments
             .iter()
@@ -258,8 +288,24 @@ impl ResponseGenerator {
         request: GenerationRequest,
         observer: &mut dyn GenerationObserver,
     ) -> Result<ProposedResponse, GenerationError> {
+        request.model_memory_policy.validate()?;
+        if request
+            .history_window
+            .as_ref()
+            .is_some_and(|window| !window.matches(&request.context.view))
+        {
+            return Err(GenerationError::Response(
+                "history window does not match the admitted Timeline".into(),
+            ));
+        }
         let template = request.preset.template().clone();
+        let deadline = tokio::time::Instant::now()
+            .checked_add(template.timeout())
+            .ok_or_else(|| {
+                GenerationError::Response("provider timeout exceeds clock range".into())
+            })?;
         let post_dsl = request.post_dsl;
+        let model_memory_policy = request.model_memory_policy;
         let context_variables = request.context.variables.clone();
         let kind = template.kind();
         let provider = self
@@ -272,15 +318,26 @@ impl ResponseGenerator {
             context: request.context,
             prompt: request.prompt,
             prepared_knowledge: request.prepared_knowledge,
+            history_window: request.history_window,
             tool_history: Vec::new(),
             native_tool_history: Vec::new(),
             tool_settings: tools.clone(),
         };
         let mut depth = 0;
         let structured = loop {
-            let mut output = provider
-                .generate_observed(input.clone(), template.clone(), observer)
-                .await?;
+            let mut output = match tokio::time::timeout_at(
+                deadline,
+                provider.generate_observed(input.clone(), template.clone(), observer),
+            )
+            .await
+            {
+                Ok(result) => result?,
+                Err(_) => {
+                    let error = GenerationError::DeadlineExceeded;
+                    observer.failed(&error);
+                    return Err(error);
+                }
+            };
             let Some(tool_call) = output.tool_call.clone() else {
                 break output;
             };
@@ -325,11 +382,20 @@ impl ResponseGenerator {
                 output.full_text().to_string()
             };
             observer.tool_started(&tool_call.name, &tool_call.args, &spoken);
-            let result =
-                super::tools::execute(&tools, &tool_call.name, &tool_call.args, &input.context)
-                    .await;
+            let result = tokio::time::timeout_at(
+                deadline,
+                super::tools::execute(&tools, &tool_call.name, &tool_call.args, &input.context),
+            )
+            .await;
             observer.tool_finished();
-            let result = result?;
+            let result = match result {
+                Ok(result) => result?,
+                Err(_) => {
+                    let error = GenerationError::DeadlineExceeded;
+                    observer.failed(&error);
+                    return Err(error);
+                }
+            };
             if let Some(origin) = tool_call.native_origin {
                 if !input.tool_history.is_empty() {
                     return Err(GenerationError::Response(
@@ -381,7 +447,8 @@ impl ResponseGenerator {
             }
             None => (structured, Default::default()),
         };
-        match ProposedResponse::from_structured(structured) {
+        match ProposedResponse::from_structured_with_memory_policy(structured, model_memory_policy)
+        {
             Ok(response) => Ok(response.with_character_variables(variables)),
             Err(error) => {
                 observer.failed(&error);

@@ -81,3 +81,96 @@ creation/usage metadata when rewriting an existing row; those fields do not
 exist in the Rust canonical `MemoryRecord`, so timestamp, age and access-based
 forget policies remain separate architectural decisions. Python may produce
 different results for equal-ranked SQL rows; Rust is intentionally deterministic.
+
+## Active structured-response insertion and corrupt-data recovery (2026-11-07)
+
+The read-only Python reference at SHA
+`5f3d061f523d9abefa6a264bb2953048a935fa65` calls
+`MemoryManager.add_memory(priority=..., content=..., entities=...)` from
+`src/characters/character.py::_apply_structured_memory_ops` for each
+`StructuredResponse.memory_add`. That call leaves `skip_if_exists=False`;
+`src/managers/memory_manager.py::add_memory` therefore attempts lexical dedup
+when `MEMORY_DEDUP_ENABLED` (default `True`) and the entry is an ordinary
+fact. The threshold uses `MEMORY_DEDUP_THRESHOLD` (default `0.8`). The same
+method also supports the separate exact-text `skip_if_exists=True` path.
+
+Rust currently reaches `MemoryCommand::Add` from the local GUI memory editor
+(`src/bin/neuromita-gui/memory.rs`), while initial prompt seeding uses
+`SeedFromPrompt`. No production structured-response memory-add path selecting
+`AddLexicallyDeduplicated` was established in this audit. Therefore the
+Python setting must **not** be represented as already effective in Rust, and
+changing ordinary `Add` globally would alter explicit user edits. Integrating
+model-initiated writes requires coordination with the Generation/accepted-turn
+owner; this audit does not wire that path.
+
+The SQLite failure-contract tests
+`malformed_persisted_memory_blocks_new_memory_writes_until_repaired` and
+`invalid_second_memory_change_rolls_back_entire_batch_and_allows_retry`
+exercise corrupt-data admission and partial-write recovery. A syntactically
+valid but semantically invalid persisted `MemoryChange` is **not** interpreted
+as missing memory or silently skipped: further memory appends for the affected
+world fail until the original fact is repaired through an external, controlled
+recovery path. A batch whose later memory effect is invalid leaves no new
+events, head advance or operation receipt; a corrected retry with the same
+operation key succeeds. This proves fail-closed behavior for these fixtures,
+**not** general automatic database repair, damaged-page recovery or full
+Python parity. No storage schema or canonical Timeline contract changed.
+
+## Request-scoped model memory insertion policy (2026-11-07)
+
+`generation::ModelMemoryAddPolicy` is a typed, immutable *conversion intent* for
+accepted structured model responses: `Ordinary` keeps the pre-existing
+`MemoryCommand::Add` behavior (normalized exact-content idempotency), while
+`Lexical { threshold_per_mille }` converts **only** `memory_add` into
+`MemoryCommand::AddLexicallyDeduplicated`. Every `memory_update`, delete, merge,
+state delta, reminder and user-initiated memory edit retains its existing
+semantics. Invalid per-mille thresholds (`<500` or `>1000`) reject the entire
+candidate before Timeline acceptance. The original `from_structured` entry
+point stays unchanged; the request owner may explicitly call
+`GenerationRequest::with_model_memory_policy` with policy captured at
+request creation; `ResponseGenerator` carries that value through the provider
+and post-DSL phases into `ProposedResponse::from_structured_with_memory_policy`. Invalid
+policy is rejected before provider invocation, not after inference.
+Intermediate tool responses do not execute memory writes. Neither conversion writes memory or opens a second database.
+
+This defines the precise adapter point for Python's settings-gated dedup path.
+The active Python reference enables lexical similarity by default under
+`MEMORY_DEDUP_ENABLED`; Rust now captures its own validated, explicitly
+selected policy through `AppSettings.memory` and `MessageHandler` before
+inference. The application default deliberately remains `Ordinary` so
+pre-existing saved fact semantics do not change silently.
+
+## Application setting to generation request (2026-11-07)
+
+`settings::MemorySettings` adds an explicit, validated application setting for
+**model-originated** `StructuredResponse.memory_add`. The existing `SettingsApi`
+`SettingsSection` read/edit/replace and JSON storage paths operate on the same
+canonical `AppSettings.memory` field; no separate settings owner or versioned
+schema was introduced. A stored Rust settings document without the `memory`
+field loads the current default. Invalid `threshold_per_mille` values outside
+`500..=1000` fail settings validation rather than being clamped.
+
+`request::MessageHandler` reads the already captured `SettingsSnapshot` and
+passes `settings.values.memory.model_add_policy()` into the generated request.
+The resolved value remains immutable while provider inference runs and does
+not affect manual memory commands, user-facing editor writes, or other proposed
+model effects. The initial Rust setting is deliberately **disabled** with a
+stored threshold of `800`: this preserves the previously accepted Rust
+`Ordinary` behavior and avoids merging unrelated but highly similar entries.
+Enabling the setting explicitly obtains the Python-style lexical behavior;
+this is not a claim of identical Python defaults. The existing direct
+`GenerationRequest::new` constructor still uses `Ordinary` unless the caller
+supplies the policy.
+
+Verification: `settings_transfer` covers serialization, absent-field defaults,
+invalid values and reconstruction; the `vertical_slice` model-memory scenario
+runs live generated responses through the fake Gemini endpoint and verifies
+both the enabled dedup mode and disabled ordinary Add behavior. This setting is also exposed in the existing Slint `ModelsSettingsPage`
+under **Memory → Memory hygiene**. The toggle and fixed-point threshold field
+are read from the canonical SettingsSnapshot via `SettingsUi`, and changes
+pass through the existing `settings::execute` GUI administration path and
+`SettingsPresenter.memory.state` binding. The input accepts exact `0.500`
+through `1.000` values with three fractional digits, maps them to per-mille
+without floating-point rounding, and rejects malformed values. The manual
+memory editor and unrelated placeholder controls on the Models page remain
+unaffected; the UI does not introduce another settings owner or store.
