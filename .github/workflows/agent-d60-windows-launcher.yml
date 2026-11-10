@@ -1,0 +1,36 @@
+name: Agent D60 Windows launcher owned-child graceful stop acceptance
+on:
+  push:
+    branches:
+      - bridge/agent-d60-launcher-windows-ci-20261110
+permissions:
+  contents: read
+jobs:
+  windows-launcher:
+    runs-on: windows-latest
+    timeout-minutes: 55
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/agent-d60-graceful-owned-game-stop-20261110
+      - name: Verify exact original D60 commit and tree
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "27cdbeb80b5b908805e70aa569714ebffead11cd"
+          test "$(git rev-parse HEAD^{tree})" = "28b5baf5f3f0556014ff3a4922905635677d5b59"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt
+      - name: Native Windows Rust library typecheck
+        run: |
+          cargo check --locked --offline --lib
+      - name: Native Windows launcher integration tests
+        run: |
+          cargo test --locked --offline --test launcher -- --test-threads=2
+      - name: Rustfmt
+        run: |
+          cargo fmt --all -- --check
