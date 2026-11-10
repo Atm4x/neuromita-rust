@@ -5,7 +5,7 @@ on:
       - bridge/abcd-unified-catalog-import-20261111
 jobs:
   import:
-    if: github.event.head_commit.message == 'bridge: verified ABCD unified catalog source'
+    if: "github.event.head_commit.message == 'bridge: verified ABCD unified catalog source'"
     runs-on: ubuntu-latest
     permissions:
       contents: write
