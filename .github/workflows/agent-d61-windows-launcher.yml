@@ -1,0 +1,39 @@
+name: Agent D61 Windows launcher single-flight and WM_CLOSE acceptance
+on:
+  push:
+    branches:
+      - bridge/agent-d61-windows-launcher-ci-20261110
+permissions:
+  contents: read
+jobs:
+  windows-launcher:
+    runs-on: windows-latest
+    timeout-minutes: 55
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/agent-d61-launcher-singleflight-windows-fixture-20261110
+      - name: Verify exact product commit and tree
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "b54a158a333007799da0f8cce79592237a09013d"
+          test "$(git rev-parse HEAD^{tree})" = "8923f819db6743c45bf7869c63c811af35cc03d6"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt
+      - name: Native Windows Slint GUI compile
+        run: |
+          cargo check --locked --offline --features gui --bin neuromita-gui
+      - name: Windows launcher integration with visible WM_CLOSE fixtures
+        run: |
+          cargo test --locked --offline --test launcher -- --test-threads=2
+      - name: Windows launcher controller single-flight unit tests
+        run: |
+          cargo test --locked --offline --lib launcher::controller::tests:: -- --test-threads=1
+      - name: Rustfmt
+        run: |
+          cargo fmt --all -- --check
