@@ -918,6 +918,16 @@ impl ApplicationLifecycle {
                 KnowledgeRetrieval::semantic_fusion(Arc::new(retriever), selection.fusion)?
             }
         };
+        knowledge.bind_dispatch_authority({
+            let timeline = Arc::clone(&timeline);
+            Arc::new(move |turn| {
+                timeline
+                    .lock()
+                    .map_err(|_| EmbeddingError::StaleKnowledge)?
+                    .assert_knowledge_turn(turn, false)
+                    .map_err(|_| EmbeddingError::StaleKnowledge)
+            })
+        })?;
         // A stable speech boundary is needed even if no worker was installed at
         // startup. The worker may appear or change after settings are edited.
         let initial_speech = settings_owner.snapshot_all()?.values.speech.clone();

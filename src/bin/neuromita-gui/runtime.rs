@@ -449,7 +449,12 @@ async fn start(
     let root = std::env::var_os("NEUROMITA_PROMPTS_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| directory.join("Prompts"));
-    let config = config.with_prompt_catalog(neuromita::prompts::PromptCatalog::new(root));
+    let mut config = config.with_prompt_catalog(neuromita::prompts::PromptCatalog::new(root));
+    config.game_link = Some(neuromita::game_link::GameLinkConfig::new(
+        "127.0.0.1:12345"
+            .parse()
+            .expect("valid Unity loopback endpoint"),
+    ));
     ApplicationLifecycle::start(config)
         .await
         .map_err(|e| e.to_string())

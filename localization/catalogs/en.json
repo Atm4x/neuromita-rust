@@ -2026,5 +2026,9 @@
   "launcher.native-update.shutdown-pending": {
     "source": "Не удалось закрыть приложение ({shutdown}) и завершить отмену обновления ({cancellation}). Состояние установки требует проверки; не запускайте повторную установку до восстановления.",
     "translation": "The application could not close ({shutdown}) and update cancellation could not finish ({cancellation}). The installation state must be checked; do not start another installation until recovery."
+  },
+  "memory.graph.confirm": {
+    "source": "Подтвердить очистку",
+    "translation": "Confirm clear"
   }
 }
