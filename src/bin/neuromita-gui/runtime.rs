@@ -105,8 +105,14 @@ pub enum Command {
     },
     ActivateNativeModel {
         model_id: String,
+        service: String,
+        revision: String,
     },
-    StopNativeModel,
+    StopNativeModel {
+        service: String,
+        model_id: String,
+        revision: String,
+    },
     InstallNativePackage {
         model_id: String,
         manifest_sha256: String,
@@ -833,16 +839,24 @@ async fn observe(
                     }
                     refresh_views = false;
                 },
-                Some(Command::ActivateNativeModel { model_id }) => {
-                    let result = native_owner.activate(&model_id).await;
+                Some(Command::ActivateNativeModel { model_id, service, revision }) => {
+                    let result = match service.as_str() {
+                        "tts" => native_owner.activate_exact_for_service(neuromita::ai_runtime::native_speech::NativeSpeechKind::Tts, &model_id, &revision).await,
+                        "asr" => native_owner.activate_exact_for_service(neuromita::ai_runtime::native_speech::NativeSpeechKind::Asr, &model_id, &revision).await,
+                        _ => Err("Модель не объявляет типизированный сервис".into()),
+                    };
                     publish_native(native_owner, publish).await;
                     if result.is_err() {
-                        publish(Update::NativeError("Запуск отклонён: подпись издателя, выбранная ревизия, файлы или ответ worker не подтверждены".into()));
+                        publish(Update::NativeError("Запуск отклонён: подпись издателя, сервис, ревизия, файлы или ответ worker не подтверждены".into()));
                     }
                     refresh_views = false;
                 },
-                Some(Command::StopNativeModel) => {
-                    let result = native_owner.deactivate().await;
+                Some(Command::StopNativeModel { service, model_id, revision }) => {
+                    let result = match service.as_str() {
+                        "tts" => native_owner.deactivate_exact_for_service(neuromita::ai_runtime::native_speech::NativeSpeechKind::Tts, &model_id, &revision).await,
+                        "asr" => native_owner.deactivate_exact_for_service(neuromita::ai_runtime::native_speech::NativeSpeechKind::Asr, &model_id, &revision).await,
+                        _ => Err("Невозможно остановить сервис с неизвестным типом".into()),
+                    };
                     publish_native(native_owner, publish).await;
                     if result.is_err() {
                         publish(Update::NativeError("Завершение нативного worker не подтверждено".into()));

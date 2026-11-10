@@ -26,6 +26,7 @@ pub struct NativeHubRevision {
     pub backend: NativeBackend,
     pub selected: bool,
     pub active: bool,
+    pub active_services: Vec<crate::ai_runtime::native_speech::NativeSpeechKind>,
     pub observed_phase: Option<NativePhase>,
     pub trust: NativeTrustVerdict,
 }
@@ -61,6 +62,11 @@ impl NativeHubPresenter {
                     || service_workers
                         .iter()
                         .any(|session| is_selected_revision(&session.choice));
+                let active_services = service_workers
+                    .iter()
+                    .filter(|session| is_selected_revision(&session.choice))
+                    .map(|session| session.service)
+                    .collect::<Vec<_>>();
                 let observed_phase = if running {
                     worker
                         .as_ref()
@@ -87,6 +93,7 @@ impl NativeHubPresenter {
                     backend,
                     selected,
                     active: running,
+                    active_services,
                     observed_phase,
                     trust: trust
                         .iter()
@@ -137,6 +144,7 @@ mod tests {
                         package_version: "1".into(),
                         manifest_sha256: digest,
                         backends: vec![NativeBackend::Cpu],
+                        speech_services: vec![],
                     })
                     .collect(),
                 selections: vec![],
@@ -175,6 +183,7 @@ mod tests {
                         package_version: "1".into(),
                         manifest_sha256: digest,
                         backends: vec![NativeBackend::Cpu],
+                        speech_services: vec![],
                     })
                     .collect(),
                 selections: vec![NativeSelectionMetadata {

@@ -77,6 +77,7 @@ pub struct NativeRevisionMetadata {
     pub package_version: String,
     pub manifest_sha256: [u8; 32],
     pub backends: Vec<NativeBackend>,
+    pub speech_services: Vec<super::native_speech::NativeSpeechKind>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,6 +324,11 @@ impl NativeRevisionStore {
                 package_version: manifest.package_version.clone(),
                 manifest_sha256: digest,
                 backends: manifest.backends.clone(),
+                speech_services: manifest
+                    .speech_capabilities
+                    .iter()
+                    .map(|capability| capability.kind)
+                    .collect(),
             });
         }
         revisions.sort_by(|left, right| {

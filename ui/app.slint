@@ -136,8 +136,8 @@ export component AppWindow inherits Window {
     callback native-cancel-download();
     callback native-refresh();
     callback native-select(string, string, string);
-    callback native-activate(string);
-    callback native-stop();
+    callback native-activate(string, string, string);
+    callback native-stop(string, string, string);
     in property <[int]> ai-hub-category-counts;
     in property <bool> ai-hub-can-refresh: false;
     in property <int> ai-hub-discovery-warning-count: 0;
@@ -215,8 +215,8 @@ export component AppWindow inherits Window {
                 native-cancel-download-requested => { root.native-cancel-download(); }
                 native-refresh-requested => { root.native-refresh(); }
                 native-select-requested(id, sha, backend) => { root.native-select(id, sha, backend); }
-                native-activate-requested(id) => { root.native-activate(id); }
-                native-stop-requested => { root.native-stop(); }
+                native-activate-requested(id, service, revision) => { root.native-activate(id, service, revision); }
+                native-stop-requested(service, id, revision) => { root.native-stop(service, id, revision); }
                 category-counts: root.ai-hub-category-counts;
                 can-refresh: root.ai-hub-can-refresh;
                 discovery-warning-count: root.ai-hub-discovery-warning-count;

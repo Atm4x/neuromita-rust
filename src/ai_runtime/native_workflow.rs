@@ -114,6 +114,10 @@ impl PreparedSpeechWorker {
 }
 
 impl NativeSpeechSession {
+    pub(crate) fn choice(&self) -> NativeRevisionChoice {
+        self.choice.clone()
+    }
+
     fn snapshot(&self) -> NativeServiceWorkerSnapshot {
         NativeServiceWorkerSnapshot {
             service: self.service,

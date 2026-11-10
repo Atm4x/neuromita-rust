@@ -10,13 +10,15 @@ use neuromita::{
         speech_catalog::SpeechInventory,
     },
     presentation::{
-        ai_hub_catalog::{SpeechHubCatalog, SpeechHubEntry, SpeechHubLoadedModels},
+        ai_hub_catalog::{SpeechHubLoadedModels, UnifiedHubCatalog, UnifiedHubEntry},
         native_hub::NativeHubPresenter,
         native_release_catalog::NativeReleaseCatalogPresenter,
     },
 };
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::rc::Rc;
+
+use neuromita::ai_runtime::model_identity::WorkerImplementation;
 
 use super::{
     runtime::Command,
@@ -25,6 +27,27 @@ use super::{
         NativeRevisionRow,
     },
 };
+
+/// GUI owns the latest immutable Core discovery snapshots, never process state.
+/// Updates from the two sources can arrive in either order.
+#[derive(Default)]
+pub struct HubCatalogState {
+    speech: SpeechInventory,
+    native: Vec<neuromita::presentation::native_release_catalog::NativeReleaseRow>,
+}
+
+fn render_catalog(window: &AppWindow, state: &HubCatalogState) {
+    let catalog = UnifiedHubCatalog::project(&state.speech, &state.native);
+    window.set_ai_hub_entries(ModelRc::new(VecModel::from(
+        catalog.entries.into_iter().map(model).collect::<Vec<_>>(),
+    )));
+    window.set_ai_hub_category_counts(ModelRc::new(VecModel::from(
+        catalog.category_counts.to_vec(),
+    )));
+    window.set_ai_hub_discovery_warning_count(
+        i32::try_from(catalog.discovery_error_count).unwrap_or(i32::MAX),
+    );
+}
 
 pub fn bind(window: &AppWindow, send: Rc<dyn Fn(Command)>) {
     window.set_native_download_configured(super::runtime::native_download_configured());
@@ -49,19 +72,30 @@ pub fn bind(window: &AppWindow, send: Rc<dyn Fn(Command)>) {
         })
     });
     let activate = send.clone();
-    window.on_native_activate(move |model_id| {
+    window.on_native_activate(move |model_id, service, revision| {
         activate(Command::ActivateNativeModel {
             model_id: model_id.into(),
+            service: service.into(),
+            revision: revision.into(),
         })
     });
     let stop = send.clone();
-    window.on_native_stop(move || stop(Command::StopNativeModel));
+    window.on_native_stop(move |service, model_id, revision| {
+        stop(Command::StopNativeModel {
+            service: service.into(),
+            model_id: model_id.into(),
+            revision: revision.into(),
+        })
+    });
     let weak = window.as_weak();
     window.on_ai_hub_find_selection_index(move |identity| {
         weak.upgrade().map_or(-1, |window| {
             let entries = window.get_ai_hub_entries();
             let mut matches = entries.iter().enumerate().filter(|(_, entry)| {
-                entry.category == identity.category && entry.id == identity.id
+                entry.category == identity.category
+                    && entry.id == identity.id
+                    && entry.implementation == identity.implementation
+                    && entry.revision == identity.revision
             });
             match (matches.next(), matches.next()) {
                 (Some((index, _)), None) => i32::try_from(index).unwrap_or(-1),
@@ -78,9 +112,15 @@ pub fn bind(window: &AppWindow, send: Rc<dyn Fn(Command)>) {
         let entries = window.get_ai_hub_entries();
         let matches = entries
             .iter()
-            .filter(|entry| entry.category == identity.category && entry.id == identity.id)
+            .filter(|entry| {
+                entry.category == identity.category
+                    && entry.id == identity.id
+                    && entry.implementation == identity.implementation
+                    && entry.revision == identity.revision
+            })
             .count();
         if matches == 1
+            && identity.implementation.as_str() == "python"
             && (identity.category.as_str() == "tts" || identity.category.as_str() == "asr")
         {
             send_preview(Command::PreviewAiHubInstall {
@@ -111,10 +151,16 @@ pub fn bind(window: &AppWindow, send: Rc<dyn Fn(Command)>) {
         let count = window
             .get_ai_hub_entries()
             .iter()
-            .filter(|entry| entry.category == identity.category && entry.id == identity.id)
+            .filter(|entry| {
+                entry.category == identity.category
+                    && entry.id == identity.id
+                    && entry.implementation == identity.implementation
+                    && entry.revision == identity.revision
+            })
             .count();
         if count == 1
             && preview.can_install
+            && identity.implementation.as_str() == "python"
             && (preview.stage == "review" || preview.stage == "wheel-review")
             && preview.token == token
             && preview.category == identity.category
@@ -133,22 +179,15 @@ pub fn bind(window: &AppWindow, send: Rc<dyn Fn(Command)>) {
             && window.get_ai_hub_can_refresh()
         {
             send(Command::RefreshSpeechInventory);
+            send(Command::RefreshNativeModels);
         }
     });
 }
 
-pub fn inventory(window: &AppWindow, inventory: &SpeechInventory) {
+pub fn inventory(window: &AppWindow, state: &mut HubCatalogState, inventory: &SpeechInventory) {
     window.set_ai_hub_install_preview(HubInstallPreview::default());
-    let catalog = SpeechHubCatalog::from_inventory(inventory);
-    window.set_ai_hub_entries(ModelRc::new(VecModel::from(
-        catalog.entries.into_iter().map(model).collect::<Vec<_>>(),
-    )));
-    window.set_ai_hub_category_counts(ModelRc::new(VecModel::from(
-        catalog.category_counts.to_vec(),
-    )));
-    window.set_ai_hub_discovery_warning_count(
-        i32::try_from(catalog.discovery_error_count).unwrap_or(i32::MAX),
-    );
+    state.speech = inventory.clone();
+    render_catalog(window, state);
     window.set_ai_hub_can_refresh(true);
 }
 
@@ -173,13 +212,19 @@ pub fn stopped(window: &AppWindow) {
     window.set_ai_hub_loaded_asr_id("".into());
 }
 
-fn model(entry: SpeechHubEntry) -> HubModel {
+fn model(entry: UnifiedHubEntry) -> HubModel {
+    let implementation = match entry.identity.implementation {
+        WorkerImplementation::Python => "python",
+        WorkerImplementation::Rust => "rust",
+    };
     HubModel {
-        id: entry.id.into(),
-        category: entry.category.as_str().into(),
+        id: entry.identity.model_id.into(),
+        category: entry.service.into(),
+        implementation: implementation.into(),
+        revision: entry.identity.revision.unwrap_or_default().into(),
         title: entry.title.into(),
         description: entry.description.into(),
-        backend: "Не определена".into(),
+        backend: implementation.into(),
         language: "".into(),
         size: "".into(),
         state: entry.state.as_str().into(),
@@ -235,10 +280,14 @@ pub fn install_operation(
 /// pinned trust policy and the existing revision inventory, never a mutable catalog.
 pub fn native_release_catalog(
     window: &AppWindow,
+    state: &mut HubCatalogState,
     releases: Vec<NativeAuthorizedRelease>,
     overview: NativeRevisionOverview,
 ) {
-    let rows = NativeReleaseCatalogPresenter::project(releases, &overview)
+    let native = NativeReleaseCatalogPresenter::project(releases, &overview);
+    state.native = native.clone();
+    render_catalog(window, state);
+    let rows = native
         .into_iter()
         .map(|entry| NativeReleaseRow {
             model_id: entry.model_id.into(),
@@ -285,6 +334,12 @@ pub fn native_models(window: &AppWindow, snapshot: NativeWorkflowSnapshot) {
                 backend: item.backend.as_str().into(),
                 selected: item.selected,
                 running: item.active,
+                running_tts: item
+                    .active_services
+                    .contains(&neuromita::ai_runtime::native_speech::NativeSpeechKind::Tts),
+                running_asr: item
+                    .active_services
+                    .contains(&neuromita::ai_runtime::native_speech::NativeSpeechKind::Asr),
                 observed_phase: observed_phase.into(),
             }
         })

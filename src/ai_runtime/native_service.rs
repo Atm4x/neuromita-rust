@@ -202,7 +202,7 @@ impl AiHubNativeService {
             [service] => {
                 let service = *service;
                 drop(state);
-                self.activate_speech(service, model_id).await
+                self.activate_speech(service, model_id, None).await
             }
             _ => Err(
                 "Для модели с несколькими сервисами необходима привязка к конкретному сервису"
@@ -215,6 +215,7 @@ impl AiHubNativeService {
         &self,
         service: NativeSpeechKind,
         model_id: &str,
+        expected_revision: Option<[u8; 32]>,
     ) -> Result<NativeModelSnapshot, String> {
         let service_id = match service {
             NativeSpeechKind::Tts => super::AiService::Tts,
@@ -233,6 +234,9 @@ impl AiHubNativeService {
                 .prepare_for_service(service, model_id, Duration::from_secs(30))
                 .map_err(|e| e.to_string())?;
             let choice = prepared.choice();
+            if expected_revision.is_some_and(|digest| choice.manifest_sha256 != digest) {
+                return Err("Выбранная ревизия изменилась до запуска worker".into());
+            }
             (prepared, choice)
         };
         let model = crate::settings::SpeechModelReference::rust(
@@ -274,6 +278,27 @@ impl AiHubNativeService {
         service: NativeSpeechKind,
         model_id: &str,
     ) -> Result<NativeModelSnapshot, String> {
+        self.activate_for_service_pinned(service, model_id, None)
+            .await
+    }
+
+    pub async fn activate_exact_for_service(
+        &self,
+        service: NativeSpeechKind,
+        model_id: &str,
+        revision: &str,
+    ) -> Result<NativeModelSnapshot, String> {
+        let digest = super::native_registry::parse_sha256(revision).map_err(|e| e.to_string())?;
+        self.activate_for_service_pinned(service, model_id, Some(digest))
+            .await
+    }
+
+    async fn activate_for_service_pinned(
+        &self,
+        service: NativeSpeechKind,
+        model_id: &str,
+        expected_revision: Option<[u8; 32]>,
+    ) -> Result<NativeModelSnapshot, String> {
         let ai_service = match service {
             NativeSpeechKind::Tts => super::AiService::Tts,
             NativeSpeechKind::Asr => super::AiService::Asr,
@@ -293,10 +318,30 @@ impl AiHubNativeService {
             return Err("Модель не поддерживает запрошенный сервис".into());
         }
         drop(state);
-        self.activate_speech(service, model_id).await
+        self.activate_speech(service, model_id, expected_revision)
+            .await
     }
 
     pub async fn deactivate_for_service(&self, service: NativeSpeechKind) -> Result<(), String> {
+        self.deactivate_for_service_pinned(service, None).await
+    }
+
+    pub async fn deactivate_exact_for_service(
+        &self,
+        service: NativeSpeechKind,
+        model_id: &str,
+        revision: &str,
+    ) -> Result<(), String> {
+        let digest = super::native_registry::parse_sha256(revision).map_err(|e| e.to_string())?;
+        self.deactivate_for_service_pinned(service, Some((model_id, digest)))
+            .await
+    }
+
+    async fn deactivate_for_service_pinned(
+        &self,
+        service: NativeSpeechKind,
+        expected: Option<(&str, [u8; 32])>,
+    ) -> Result<(), String> {
         let ai_service = match service {
             NativeSpeechKind::Tts => super::AiService::Tts,
             NativeSpeechKind::Asr => super::AiService::Asr,
@@ -307,12 +352,19 @@ impl AiHubNativeService {
             if self.stop.is_cancelled() {
                 return Err("Приложение завершает работу".into());
             }
-            state
+            let session = state
                 .workflow
                 .as_ref()
                 .ok_or("Нативная сессия недоступна")?
                 .speech_session(service)
-                .map_err(|error| error.to_string())?
+                .map_err(|error| error.to_string())?;
+            if expected.is_some_and(|(model_id, digest)| {
+                let actual = session.choice();
+                actual.model_id != model_id || actual.manifest_sha256 != digest
+            }) {
+                return Err("Активная ревизия сервиса изменилась до остановки".into());
+            }
+            session
         };
         session
             .deactivate()
