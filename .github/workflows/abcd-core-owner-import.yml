@@ -1,0 +1,29 @@
+name: ABCD exact Core AI owner import
+on:
+  push:
+    branches:
+      - bridge/abcd-core-owner-import-20261110
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Import exact verified Core owner commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f transfer/abcd-core-owner.b64 || exit 0
+          git fetch origin +refs/heads/codex/abcd-core-boundary-fixes-20261110:refs/heads/abcd-base
+          BASE=$(git rev-parse refs/heads/abcd-base)
+          test "$BASE" = "e9fee6938fdfe0f3b999c8e0ff00658b0065c448"
+          base64 -d transfer/abcd-core-owner.b64 > "$RUNNER_TEMP/core-owner.bundle"
+          git bundle verify "$RUNNER_TEMP/core-owner.bundle"
+          git fetch "$RUNNER_TEMP/core-owner.bundle" refs/heads/codex/abcd-integration-20261110:refs/heads/abcd-candidate
+          HEAD=$(git rev-parse refs/heads/abcd-candidate)
+          test "$HEAD" = "e8a3143a6d0ba87306234d034c0cb11682672ce3"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git push origin refs/heads/abcd-candidate:refs/heads/codex/abcd-core-boundary-fixes-20261110
