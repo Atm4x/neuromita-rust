@@ -5,7 +5,6 @@ on:
       - bridge/abcd-unified-catalog-import-20261111
 jobs:
   import:
-    if: "github.event.head_commit.message == 'bridge: verified ABCD unified catalog source'"
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -19,6 +18,7 @@ jobs:
           set -euo pipefail
           git fetch origin +refs/heads/codex/abcd-core-boundary-fixes-20261110:refs/heads/abcd-base
           BASE=$(git rev-parse refs/heads/abcd-base)
+          if [ "$BASE" = "a6612788dcb4a087e0f98957fa66c98585ae22f8" ]; then echo 'Source already imported'; exit 0; fi
           test "$BASE" = "6f039276d483e294adf685670fe639d275d78c50"
           base64 -d transfer/abcd-unified-catalog.b64 > "$RUNNER_TEMP/unified-catalog.bundle"
           echo "5c5544c3fe59c4f75e681eee203ce73b6c47e52768d5b8931a750e829dc9ce6a  $RUNNER_TEMP/unified-catalog.bundle" | sha256sum -c -
@@ -42,7 +42,7 @@ jobs:
       - name: Install native Linux GUI/audio build dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y libasound2-dev libudev-dev libxkbcommon-dev
+          sudo apt-get install -y libasound2-dev libudev-dev libxkbcommon-dev libfontconfig1-dev
       - name: Verify Rust 1.98.1 GUI integration
         uses: dtolnay/rust-toolchain@1.98.1
         with:
