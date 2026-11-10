@@ -12,7 +12,10 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::native_model::{NativeBackend, NativeModelLaunch};
+use super::{
+    native_model::{NativeBackend, NativeModelLaunch},
+    native_speech::{CONTRACT_VERSION, NativeSpeechCapability},
+};
 
 const MANIFEST_NAME: &str = "native-model.json";
 const MAX_MANIFEST_BYTES: u64 = 128 * 1024;
@@ -68,6 +71,10 @@ pub struct NativeModelManifest {
     pub assets: Vec<NativeFileRef>,
     #[serde(default)]
     pub runtime_files: Vec<NativeRuntimeFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech_contract_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub speech_capabilities: Vec<NativeSpeechCapability>,
 }
 
 #[derive(Debug, Clone)]
@@ -133,6 +140,8 @@ impl NativeModelRegistration {
             runtime_directory: runtime_directory.to_path_buf(),
             backend,
             request_timeout,
+            speech_contract_version: self.manifest.speech_contract_version,
+            speech_capabilities: self.manifest.speech_capabilities.clone(),
         })
     }
 }
@@ -247,10 +256,38 @@ fn valid_version(value: &str) -> bool {
 }
 
 pub(super) fn validate_manifest(manifest: &NativeModelManifest) -> Result<(), NativeRegistryError> {
-    if manifest.schema_version != 1 || manifest.protocol_version != 1 {
+    if !matches!(manifest.schema_version, 1 | 2) || manifest.protocol_version != 1 {
         return Err(NativeRegistryError::Invalid(
             "unsupported manifest/protocol version",
         ));
+    }
+    match manifest.schema_version {
+        1 if manifest.speech_contract_version.is_some()
+            || !manifest.speech_capabilities.is_empty() =>
+        {
+            return Err(NativeRegistryError::Invalid(
+                "legacy package cannot declare speech",
+            ));
+        }
+        2 if manifest.speech_contract_version != Some(CONTRACT_VERSION)
+            || manifest.speech_capabilities.is_empty()
+            || manifest.speech_capabilities.len() > 2 =>
+        {
+            return Err(NativeRegistryError::Invalid(
+                "unsupported native speech contract",
+            ));
+        }
+        2 => {
+            let mut kinds = HashSet::new();
+            for cap in &manifest.speech_capabilities {
+                cap.validate()
+                    .map_err(|_| NativeRegistryError::Invalid("invalid speech capability"))?;
+                if !kinds.insert(cap.kind) {
+                    return Err(NativeRegistryError::Invalid("duplicate speech capability"));
+                }
+            }
+        }
+        _ => {}
     }
     if !valid_identifier(&manifest.model_id)
         || !valid_version(&manifest.package_version)

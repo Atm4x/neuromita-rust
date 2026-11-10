@@ -34,6 +34,7 @@ pub mod native_registry;
 pub mod native_release_index;
 pub mod native_revisions;
 pub mod native_service;
+pub mod native_speech;
 pub mod native_trust;
 pub mod native_workflow;
 pub mod overlay;

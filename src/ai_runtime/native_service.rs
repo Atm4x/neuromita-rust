@@ -166,6 +166,57 @@ impl AiHubNativeService {
             .map_err(|error| error.to_string())
     }
 
+    pub async fn synthesize_speech(
+        &self,
+        model_id: &str,
+        manifest_sha256: &str,
+        text: &str,
+        voice: &str,
+        language: &str,
+        volume_percent: u8,
+    ) -> Result<crate::voice::AudioArtifact, String> {
+        let mut state = self.state.lock().await;
+        if self.stop.is_cancelled() {
+            return Err("Приложение завершает работу".into());
+        }
+        let workflow = state
+            .workflow
+            .as_mut()
+            .ok_or("Нативная сессия недоступна")?;
+        workflow
+            .synthesize_speech(
+                model_id,
+                manifest_sha256,
+                text,
+                voice,
+                language,
+                volume_percent,
+            )
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    pub async fn transcribe_speech(
+        &self,
+        model_id: &str,
+        manifest_sha256: &str,
+        wav: &[u8],
+        language: &str,
+    ) -> Result<crate::ai_runtime::speech::Transcript, String> {
+        let mut state = self.state.lock().await;
+        if self.stop.is_cancelled() {
+            return Err("Приложение завершает работу".into());
+        }
+        let workflow = state
+            .workflow
+            .as_mut()
+            .ok_or("Нативная сессия недоступна")?;
+        workflow
+            .transcribe_speech(model_id, manifest_sha256, wav, language)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     pub async fn deactivate(&self) -> Result<(), String> {
         let mut state = self.state.lock().await;
         if self.stop.is_cancelled() {

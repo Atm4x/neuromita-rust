@@ -22,7 +22,7 @@ use crate::{
         controller::SpeechSessionController,
         session::{SpeechFuture, SpeechSessionError, SpeechTranscriber},
     },
-    settings::{SettingsOwner, SpeechSettings, TtsBackend},
+    settings::{SettingsOwner, SpeechEngineSelection, SpeechSettings, TtsBackend},
     voice::{VoiceError, VoiceFuture, VoiceOptions, VoiceProvider},
 };
 
@@ -44,19 +44,22 @@ impl SelectionKey {
     fn from_settings(settings: &SpeechSettings) -> Self {
         let tts = (settings.tts.enabled
             && settings.tts.backend == TtsBackend::Local
-            && settings.tts.local_auto_load)
-            .then(|| {
-                let id = &settings.tts.local_model_id;
-                (
-                    id.clone(),
-                    settings.tts.local_language.clone(),
-                    settings
-                        .tts_model_options
-                        .get(id)
-                        .map_or_else(|| "{}".to_owned(), serde_json::Value::to_string),
-                )
-            });
-        let asr = (!settings.asr.recognizer_id.is_empty()).then(|| {
+            && settings.tts.local_auto_load
+            && matches!(settings.tts_engine, SpeechEngineSelection::Python))
+        .then(|| {
+            let id = &settings.tts.local_model_id;
+            (
+                id.clone(),
+                settings.tts.local_language.clone(),
+                settings
+                    .tts_model_options
+                    .get(id)
+                    .map_or_else(|| "{}".to_owned(), serde_json::Value::to_string),
+            )
+        });
+        let asr = (!settings.asr.recognizer_id.is_empty()
+            && matches!(settings.asr_engine, SpeechEngineSelection::Python))
+        .then(|| {
             let id = &settings.asr.recognizer_id;
             (
                 id.clone(),

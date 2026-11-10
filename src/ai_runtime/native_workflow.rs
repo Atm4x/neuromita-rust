@@ -14,6 +14,7 @@ use super::{
     native_revisions::{
         NativeRevisionChoice, NativeRevisionError, NativeRevisionOverview, NativeRevisionStore,
     },
+    native_speech::{self, NativeSpeechError, NativeSpeechKind},
     native_trust::{NativeReleaseTrust, NativeTrustError, NativeTrustVerdict},
 };
 
@@ -33,6 +34,10 @@ pub enum NativeWorkflowError {
     Controller(#[from] NativeControllerError),
     #[error(transparent)]
     Trust(#[from] NativeTrustError),
+    #[error(transparent)]
+    Speech(#[from] NativeSpeechError),
+    #[error("active native model identity differs from the selected speech model")]
+    ModelMismatch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,6 +197,59 @@ impl NativeModelWorkflow {
             Some(session) => Ok(session.controller.status().await?),
             None => Ok(None),
         }
+    }
+
+    pub async fn synthesize_speech(
+        &mut self,
+        model_id: &str,
+        manifest_sha256: &str,
+        text: &str,
+        voice: &str,
+        language: &str,
+        volume_percent: u8,
+    ) -> Result<crate::voice::AudioArtifact, NativeWorkflowError> {
+        let session = self.active.as_mut().ok_or(NativeWorkflowError::NotActive)?;
+        if session.choice.model_id != model_id
+            || session.choice.manifest_sha256 != parse_sha256(manifest_sha256)?
+        {
+            return Err(NativeWorkflowError::ModelMismatch);
+        }
+        let caps = session
+            .controller
+            .speech_capabilities()
+            .ok_or(NativeWorkflowError::NotActive)?
+            .to_vec();
+        let payload = native_speech::encode_tts(&caps, text, voice, language, volume_percent)?;
+        let response = session.controller.infer(payload).await?;
+        Ok(native_speech::decode_tts(&caps, language, response)?)
+    }
+
+    pub async fn transcribe_speech(
+        &mut self,
+        model_id: &str,
+        manifest_sha256: &str,
+        wav: &[u8],
+        language: &str,
+    ) -> Result<crate::ai_runtime::speech::Transcript, NativeWorkflowError> {
+        let session = self.active.as_mut().ok_or(NativeWorkflowError::NotActive)?;
+        if session.choice.model_id != model_id
+            || session.choice.manifest_sha256 != parse_sha256(manifest_sha256)?
+        {
+            return Err(NativeWorkflowError::ModelMismatch);
+        }
+        let caps = session
+            .controller
+            .speech_capabilities()
+            .ok_or(NativeWorkflowError::NotActive)?
+            .to_vec();
+        native_speech::capability(&caps, NativeSpeechKind::Asr, language)?;
+        let payload = native_speech::encode_asr(&caps, wav, language)?;
+        let response = session.controller.infer(payload).await?;
+        let transcript = native_speech::decode_asr(response)?;
+        if let Some(language) = &transcript.language {
+            native_speech::capability(&caps, NativeSpeechKind::Asr, language)?;
+        }
+        Ok(transcript)
     }
 
     pub async fn infer(&mut self, payload: Value) -> Result<Value, NativeWorkflowError> {

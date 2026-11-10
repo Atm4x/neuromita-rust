@@ -100,16 +100,58 @@ impl Default for AsrPreferences {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "engine", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SpeechEngineSelection {
+    #[default]
+    Python,
+    Native {
+        model_id: String,
+        manifest_sha256: String,
+    },
+}
+
+impl SpeechEngineSelection {
+    pub fn native_id(&self) -> Option<&str> {
+        match self {
+            Self::Python => None,
+            Self::Native { model_id, .. } => Some(model_id),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpeechSettings {
     pub tts: TtsPreferences,
     pub asr: AsrPreferences,
     pub tts_model_options: BTreeMap<String, serde_json::Value>,
     pub asr_model_options: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub tts_engine: SpeechEngineSelection,
+    #[serde(default)]
+    pub asr_engine: SpeechEngineSelection,
 }
 
 impl SpeechSettings {
     pub fn validate(&self) -> Result<(), SettingsError> {
+        for engine in [&self.tts_engine, &self.asr_engine] {
+            if let SpeechEngineSelection::Native {
+                model_id,
+                manifest_sha256,
+            } = engine
+                && (model_id.is_empty()
+                    || model_id.len() > 128
+                    || manifest_sha256.len() != 64
+                    || !manifest_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    || !model_id
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'))
+            {
+                return Err(SettingsError::Validation(
+                    "invalid native speech model id".into(),
+                ));
+            }
+        }
         let t = &self.tts;
         if t.telegram_wait_seconds == 0
             || t.telegram_wait_seconds > 600
@@ -216,6 +258,35 @@ impl SpeechSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_speech_settings_are_python_and_explicit_native_selection_is_validated() {
+        let mut encoded = serde_json::to_value(SpeechSettings::default()).unwrap();
+        encoded.as_object_mut().unwrap().remove("tts_engine");
+        encoded.as_object_mut().unwrap().remove("asr_engine");
+        let legacy: SpeechSettings = serde_json::from_value(encoded).unwrap();
+        assert_eq!(legacy.tts_engine, SpeechEngineSelection::Python);
+        assert_eq!(legacy.asr_engine, SpeechEngineSelection::Python);
+
+        let mut selected = legacy;
+        selected.tts_engine = SpeechEngineSelection::Native {
+            model_id: "model-A".into(),
+            manifest_sha256: "a".repeat(64),
+        };
+        selected.asr_engine = SpeechEngineSelection::Native {
+            model_id: "model-A".into(),
+            manifest_sha256: "a".repeat(64),
+        };
+        assert!(selected.validate().is_ok());
+        let restored: SpeechSettings =
+            serde_json::from_value(serde_json::to_value(&selected).unwrap()).unwrap();
+        assert_eq!(restored, selected);
+        selected.asr_engine = SpeechEngineSelection::Native {
+            model_id: "../../model".into(),
+            manifest_sha256: "b".repeat(64),
+        };
+        assert!(selected.validate().is_err());
+    }
+
     #[test]
     fn known_asr_languages_are_checked_before_persistence() {
         let mut speech = SpeechSettings::default();

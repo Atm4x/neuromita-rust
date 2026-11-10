@@ -26,6 +26,7 @@ use crate::{
             LiveSpeechRuntime, LiveSpeechTranscriber, LiveSpeechVoice, watch_speech_settings,
         },
         native_service::AiHubNativeService,
+        native_speech::{RoutedSpeechTranscriber, RoutedSpeechVoice},
     },
     character::{CharacterHandle, CharacterId, CharacterRegistry, ReminderBridge},
     finetune::{FineTuneCollector, FineTuneError, FineTuneSettings},
@@ -1002,6 +1003,21 @@ impl ApplicationLifecycle {
                 _ => voice,
             }
         };
+        let speech: Option<Arc<dyn crate::audio::session::SpeechTranscriber>> =
+            if speech.is_some() || ai_hub_native.is_some() {
+                Some(Arc::new(RoutedSpeechTranscriber {
+                    settings: Arc::clone(&settings_owner),
+                    python: speech,
+                    native: ai_hub_native.clone(),
+                }))
+            } else {
+                None
+            };
+        let voice: Arc<dyn VoiceProvider> = Arc::new(RoutedSpeechVoice {
+            settings: Arc::clone(&settings_owner),
+            python: voice,
+            native: ai_hub_native.clone(),
+        });
         let registry = Arc::new(RequestRegistry::new_with_diagnostics(
             limits.discovery_buffer.get(),
             crate::request::DiagnosticsLimits::default(),

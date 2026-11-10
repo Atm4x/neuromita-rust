@@ -62,6 +62,8 @@ impl Fixture {
             ),
             assets: vec![file_ref(&weights, "models/weights.bin")],
             runtime_files: vec![],
+            speech_contract_version: None,
+            speech_capabilities: Vec::new(),
         };
         let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
         fs::write(package.join("native-model.json"), &manifest_bytes).unwrap();

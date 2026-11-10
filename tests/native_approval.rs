@@ -195,6 +195,8 @@ impl LocalFixture {
                 sha256: sha_hex(b"synthetic-weight"),
             }],
             runtime_files: vec![],
+            speech_contract_version: None,
+            speech_capabilities: Vec::new(),
         };
         let bytes = serde_json::to_vec(&manifest).unwrap();
         let digest = digest(&SHA256, &bytes);

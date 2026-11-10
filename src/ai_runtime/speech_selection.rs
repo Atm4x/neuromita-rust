@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::settings::{SpeechSettings, TtsBackend};
+use crate::settings::{SpeechEngineSelection, SpeechSettings, TtsBackend};
 
 use super::{
     AiRuntimeError, AiService, ModelActivation, PythonHostConfig, fetch_speech_plugin_inspection,
@@ -71,6 +71,13 @@ pub fn select_speech_model(
     inventory: &SpeechInventory,
     service: AiService,
 ) -> Result<Option<SpeechSelection>, SpeechSelectionError> {
+    if matches!(service, AiService::Tts)
+        && !matches!(settings.tts_engine, SpeechEngineSelection::Python)
+        || matches!(service, AiService::Asr)
+            && !matches!(settings.asr_engine, SpeechEngineSelection::Python)
+    {
+        return Ok(None);
+    }
     let (plugin_id, language_hint) = match service {
         AiService::Tts => {
             if !settings.tts.enabled || settings.tts.backend != TtsBackend::Local {
@@ -261,6 +268,38 @@ mod tests {
             serde_json::json!({"speaker":"default"})
         );
         assert!(selected[0].inspection.install_probe.installed);
+    }
+
+    #[test]
+    fn native_selection_never_resolves_to_a_python_plugin_even_with_same_id() {
+        let mut settings = SpeechSettings::default();
+        settings.tts.enabled = true;
+        settings.tts.backend = TtsBackend::Local;
+        settings.tts.local_model_id = "same_id".into();
+        settings.asr.recognizer_id = "same_id".into();
+        settings.tts_engine = SpeechEngineSelection::Native {
+            model_id: "same_id".into(),
+            manifest_sha256: "b".repeat(64),
+        };
+        settings.asr_engine = SpeechEngineSelection::Native {
+            model_id: "same_id".into(),
+            manifest_sha256: "b".repeat(64),
+        };
+        let inventory = SpeechInventory {
+            tts: vec![entry("same_id", &["rev1"])],
+            asr: vec![entry("same_id", &["rev1"])],
+            errors: vec![],
+        };
+        assert!(
+            select_speech_model(&settings, &inventory, AiService::Tts)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            select_speech_model(&settings, &inventory, AiService::Asr)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

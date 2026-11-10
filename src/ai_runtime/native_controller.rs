@@ -3,6 +3,7 @@
 
 use std::{path::PathBuf, time::Duration};
 
+use super::native_speech::NativeSpeechCapability;
 use serde_json::Value;
 use thiserror::Error;
 
@@ -88,6 +89,12 @@ impl NativeModelController {
             return Ok(Some(process.snapshot()));
         }
         Ok(Some(process.refresh().await?))
+    }
+
+    pub fn speech_capabilities(&self) -> Option<&[NativeSpeechCapability]> {
+        self.active
+            .as_ref()
+            .map(NativeModelProcess::speech_capabilities)
     }
 
     pub fn last_observed_snapshot(&self) -> Option<NativeModelSnapshot> {

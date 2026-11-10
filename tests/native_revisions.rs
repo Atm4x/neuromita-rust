@@ -83,6 +83,8 @@ impl Fixture {
                 backends: vec![NativeBackend::Cpu],
                 file: file_ref(&runtime_file, "shared/runtime.bin"),
             }],
+            speech_contract_version: None,
+            speech_capabilities: Vec::new(),
         };
         let fixture = Self {
             root,

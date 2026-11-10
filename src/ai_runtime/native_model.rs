@@ -8,6 +8,7 @@ use std::{
     time::Duration,
 };
 
+use super::native_speech::NativeSpeechCapability;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -20,6 +21,7 @@ use uuid::Uuid;
 
 const PROTOCOL_VERSION: u32 = 1;
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
+const MAX_SPEECH_FRAME_BYTES: usize = 24 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -88,6 +90,8 @@ pub struct NativeModelLaunch {
     pub runtime_directory: PathBuf,
     pub backend: NativeBackend,
     pub request_timeout: Duration,
+    pub speech_contract_version: Option<u32>,
+    pub speech_capabilities: Vec<NativeSpeechCapability>,
 }
 
 #[derive(Debug, Error)]
@@ -185,7 +189,10 @@ impl NativeModelLaunch {
     }
 }
 
-async fn read_frame(stdout: &mut BufReader<ChildStdout>) -> Result<Vec<u8>, NativeModelError> {
+async fn read_frame(
+    stdout: &mut BufReader<ChildStdout>,
+    max_bytes: usize,
+) -> Result<Vec<u8>, NativeModelError> {
     let mut result = Vec::new();
     loop {
         let bytes = stdout.fill_buf().await?;
@@ -196,7 +203,7 @@ async fn read_frame(stdout: &mut BufReader<ChildStdout>) -> Result<Vec<u8>, Nati
             .iter()
             .position(|byte| *byte == b'\n')
             .map_or(bytes.len(), |index| index + 1);
-        if result.len() + count > MAX_FRAME_BYTES {
+        if result.len() + count > max_bytes {
             return Err(NativeModelError::Protocol);
         }
         result.extend_from_slice(&bytes[..count]);
@@ -212,6 +219,7 @@ async fn exchange(
     stdout: &mut BufReader<ChildStdout>,
     command: &str,
     payload: Value,
+    max_bytes: usize,
 ) -> Result<Value, NativeModelError> {
     let id = Uuid::new_v4();
     let request = serde_json::to_vec(&WorkerRequest {
@@ -221,13 +229,13 @@ async fn exchange(
         payload,
     })
     .map_err(|_| NativeModelError::Protocol)?;
-    if request.len() + 1 > MAX_FRAME_BYTES {
+    if request.len() + 1 > max_bytes {
         return Err(NativeModelError::Protocol);
     }
     stdin.write_all(&request).await?;
     stdin.write_all(b"\n").await?;
     stdin.flush().await?;
-    let bytes = read_frame(stdout).await?;
+    let bytes = read_frame(stdout, max_bytes).await?;
     let response: WorkerResponse =
         serde_json::from_slice(&bytes).map_err(|_| NativeModelError::Protocol)?;
     if response.version != PROTOCOL_VERSION || response.id != id {
@@ -287,14 +295,38 @@ impl NativeModelProcess {
                     .iter()
                     .any(|backend| backend.as_str() == Some(process.launch.backend.as_str()))
             });
+        let speech_attested = match process.launch.speech_contract_version {
+            None => {
+                capabilities.get("speech_contract_version").is_none()
+                    && capabilities.get("speech_capabilities").is_none()
+            }
+            Some(version) => {
+                capabilities
+                    .get("speech_contract_version")
+                    .and_then(Value::as_u64)
+                    == Some(version as u64)
+                    && capabilities
+                        .get("speech_capabilities")
+                        .cloned()
+                        .and_then(|value| {
+                            serde_json::from_value::<Vec<NativeSpeechCapability>>(value).ok()
+                        })
+                        .is_some_and(|attested| attested == process.launch.speech_capabilities)
+            }
+        };
         if capabilities.get("model_id").and_then(Value::as_str)
             != Some(process.launch.model_id.as_str())
             || !supported
+            || !speech_attested
         {
             process.invalidate(NativeFailure::Protocol).await;
             return Err(NativeModelError::Protocol);
         }
         Ok(process)
+    }
+
+    pub fn speech_capabilities(&self) -> &[NativeSpeechCapability] {
+        &self.launch.speech_capabilities
     }
 
     pub fn snapshot(&self) -> NativeModelSnapshot {
@@ -333,9 +365,20 @@ impl NativeModelProcess {
                 return Err(NativeModelError::Io(error));
             }
         }
+        let speech_frame = command == "infer"
+            && self.launch.speech_contract_version.is_some()
+            && matches!(
+                payload.get("kind").and_then(Value::as_str),
+                Some("tts" | "asr")
+            );
+        let limit = if speech_frame {
+            MAX_SPEECH_FRAME_BYTES
+        } else {
+            MAX_FRAME_BYTES
+        };
         match timeout(
             self.launch.request_timeout,
-            exchange(&mut self.stdin, &mut self.stdout, command, payload),
+            exchange(&mut self.stdin, &mut self.stdout, command, payload, limit),
         )
         .await
         {
