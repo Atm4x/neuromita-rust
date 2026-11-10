@@ -1,0 +1,30 @@
+name: ABCD exact per-service IPC refactor import
+on:
+  push:
+    branches:
+      - bridge/abcd-service-ipc-import-20261111
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Import exactly verified local worker commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f transfer/abcd-service-ipc.b64 || exit 0
+          git fetch origin +refs/heads/codex/abcd-core-boundary-fixes-20261110:refs/heads/abcd-base
+          BASE=$(git rev-parse refs/heads/abcd-base)
+          test "$BASE" = "ae2e7a1a24a6afc6e863cdf33ee617c6b8f1f5c5"
+          base64 -d transfer/abcd-service-ipc.b64 > "$RUNNER_TEMP/service-ipc.bundle"
+          echo "8ed615653b04f25ffa431e634e83b2fd18ce9d0c208ac4ac9e214ec55db6b6d0  $RUNNER_TEMP/service-ipc.bundle" | sha256sum -c -
+          git bundle verify "$RUNNER_TEMP/service-ipc.bundle"
+          git fetch "$RUNNER_TEMP/service-ipc.bundle" refs/heads/codex/abcd-integration-20261110:refs/heads/abcd-candidate
+          HEAD=$(git rev-parse refs/heads/abcd-candidate)
+          test "$HEAD" = "f0fe30ffe50919b7a3487e6e86cfbbdf4ed3ec0a"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git push origin refs/heads/abcd-candidate:refs/heads/codex/abcd-core-boundary-fixes-20261110
