@@ -50,18 +50,15 @@ async fn explicit_prompt_set_requires_a_catalog_before_provider_invocation() {
         .prompt_set
         .set(Some("Default".into()))
         .unwrap();
-    let request = app
+    let result = app
         .presenter()
         .conversation
-        .reply(CharacterId::Crazy, "Test prompt selection".into())
-        .unwrap();
-    let result = timeout(Duration::from_secs(2), request.wait())
-        .await
-        .unwrap()
-        .unwrap();
+        .reply(CharacterId::Crazy, "Test prompt selection".into());
     assert!(matches!(
-        result.state,
-        RequestState::Finished(RequestOutcome::InternalError(_))
+        result,
+        Err(neuromita::presentation::PresenterError::Submit(
+            SubmitError::PromptUnavailable(_)
+        ))
     ));
     assert!(
         server.calls.try_recv().is_err(),

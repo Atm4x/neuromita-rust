@@ -5,7 +5,7 @@ use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use ring::digest::{SHA256, digest};
@@ -148,10 +148,33 @@ fn file_metadata(path: &Path) -> Result<fs::Metadata, DocumentError> {
     regular(path)
 }
 
-fn validate_root(root: &Path) -> Result<(), DocumentError> {
-    if !root.is_absolute() || fs::canonicalize(root)? != root {
-        return Err(DocumentError::UnsafePath(root.display().to_string()));
+fn canonical_spelling(path: &Path) -> Result<PathBuf, DocumentError> {
+    if !path.is_absolute() {
+        return Err(DocumentError::UnsafePath(path.display().to_string()));
     }
+    let canonical = fs::canonicalize(path)?;
+    if canonical == path {
+        return Ok(canonical);
+    }
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        let mut input = path.components();
+        let mut resolved = canonical.components();
+        if let (Some(Component::Prefix(input_drive)), Some(Component::Prefix(resolved_drive))) =
+            (input.next(), resolved.next())
+            && matches!((input_drive.kind(), resolved_drive.kind()),
+                (Prefix::Disk(left), Prefix::VerbatimDisk(right)) if left == right)
+            && input.eq(resolved)
+        {
+            return Ok(canonical);
+        }
+    }
+    Err(DocumentError::UnsafePath(path.display().to_string()))
+}
+
+fn validate_root(root: &Path) -> Result<(), DocumentError> {
+    canonical_spelling(root)?;
     let meta = fs::symlink_metadata(root)?;
     if !meta.is_dir() || meta.file_type().is_symlink() {
         return Err(DocumentError::UnsafePath(root.display().to_string()));
@@ -287,7 +310,7 @@ pub fn import_new_document(
     name: &str,
 ) -> Result<ImportedDocument, DocumentError> {
     validate_root(root)?;
-    if !source.is_absolute() || fs::canonicalize(source)? != source || source.starts_with(root) {
+    if canonical_spelling(source)?.starts_with(canonical_spelling(root)?) {
         return Err(DocumentError::UnsafePath(source.display().to_string()));
     }
     if name.starts_with('.')
@@ -757,7 +780,7 @@ fn fork_changing_with_hooks(
     let replacement_bytes = change
         .source()
         .map(|path| {
-            if !path.is_absolute() || fs::canonicalize(path)? != path || path.starts_with(root) {
+            if canonical_spelling(path)?.starts_with(canonical_spelling(root)?) {
                 return Err(DocumentError::UnsafePath(
                     "invalid document input path".into(),
                 ));

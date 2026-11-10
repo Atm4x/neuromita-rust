@@ -269,17 +269,18 @@ pub fn download_finished_notice(result: Result<NativeDownloadResult, String>) ->
             size,
             reused,
         }) => {
-            let key = if reused {
-                "launcher.native-update.verified-reused"
+            let notice = if reused {
+                i18n(
+                    "launcher.native-update.verified-reused",
+                    "Релиз {tag}: файл {asset} повторно проверен (SHA-256: {hash}, {bytes} байт). Установка не выполнена.",
+                )
             } else {
-                "launcher.native-update.verified-new"
+                i18n(
+                    "launcher.native-update.verified-new",
+                    "Релиз {tag}: файл {asset} скачан и проверен (SHA-256: {hash}, {bytes} байт). Установка не выполнена.",
+                )
             };
-            let source = if reused {
-                "Релиз {tag}: файл {asset} повторно проверен (SHA-256: {hash}, {bytes} байт). Установка не выполнена."
-            } else {
-                "Релиз {tag}: файл {asset} скачан и проверен (SHA-256: {hash}, {bytes} байт). Установка не выполнена."
-            };
-            i18n(key, source)
+            notice
                 .arg("tag", tag)
                 .arg("asset", asset_name)
                 .arg("hash", sha256)

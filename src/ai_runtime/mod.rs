@@ -891,6 +891,30 @@ impl AiSupervisor {
         models: &[ModelActivation],
         check_current: &(dyn Fn() -> Result<(), AiRuntimeError> + Send + Sync),
     ) -> Result<Uuid, AiRuntimeError> {
+        self.recover_failed_composed_inner(
+            service,
+            expected_generation,
+            composition,
+            models,
+            check_current,
+        )
+        .await
+        .map_err(|error| match error {
+            AiRuntimeError::NotRunning
+            | AiRuntimeError::StaleGeneration
+            | AiRuntimeError::WorkerNotFailed => AiRuntimeError::ActivationSuperseded,
+            other => other,
+        })
+    }
+
+    async fn recover_failed_composed_inner(
+        &self,
+        service: AiService,
+        expected_generation: Uuid,
+        composition: &composition::RuntimeComposition,
+        models: &[ModelActivation],
+        check_current: &(dyn Fn() -> Result<(), AiRuntimeError> + Send + Sync),
+    ) -> Result<Uuid, AiRuntimeError> {
         if !composition.services().contains(&service)
             || (self.topology == ProcessTopology::Split && composition.services() != [service])
         {
@@ -1053,7 +1077,7 @@ impl AiSupervisor {
         composition: &composition::RuntimeComposition,
         models: &[ModelActivation],
     ) -> Result<Uuid, AiRuntimeError> {
-        self.recover_failed_composed_guarded(
+        self.recover_failed_composed_inner(
             service,
             expected_generation,
             composition,
@@ -1063,7 +1087,16 @@ impl AiSupervisor {
         .await
     }
 
-    async fn activate(&self, request: Activation<'_>) -> Result<Uuid, AiRuntimeError> {
+    fn activate<'a>(
+        &'a self,
+        request: Activation<'a>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Uuid, AiRuntimeError>> + Send + 'a>,
+    > {
+        Box::pin(self.activate_inner(request))
+    }
+
+    async fn activate_inner(&self, request: Activation<'_>) -> Result<Uuid, AiRuntimeError> {
         let Activation {
             service,
             services,
@@ -1092,7 +1125,13 @@ impl AiSupervisor {
         let _guard = slot.lock().await;
         if let Some(expected) = expected_failed_generation {
             let status = self.status_snapshot();
-            let previous = self.workers.lock().await.get(&key).cloned();
+            let previous = self
+                .workers
+                .lock()
+                .await
+                .get(&key)
+                .cloned()
+                .ok_or(AiRuntimeError::NotRunning)?;
             if services
                 .iter()
                 .any(|service| status.service(*service).generation != Some(expected))
@@ -1105,7 +1144,6 @@ impl AiSupervisor {
             {
                 return Err(AiRuntimeError::WorkerNotFailed);
             }
-            let previous = previous.ok_or(AiRuntimeError::ActivationSuperseded)?;
             let process = previous.lock().await;
             if process.generation != expected {
                 return Err(AiRuntimeError::ActivationSuperseded);

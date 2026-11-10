@@ -43,6 +43,7 @@ struct EmbeddingCache {
     snapshots: HashMap<CharacterId, AuthoritativeSnapshot>,
     revisions: HashMap<CharacterId, u64>,
     clear_revision: u64,
+    cache_write_epoch: u64,
 }
 
 struct AuthoritativeSnapshot {
@@ -54,6 +55,7 @@ struct AuthoritativeSnapshot {
 struct RetrievalBarrier {
     revision: u64,
     clear_revision: u64,
+    cache_write_epoch: u64,
 }
 
 impl EmbeddingCache {
@@ -65,6 +67,7 @@ impl EmbeddingCache {
             snapshots: HashMap::new(),
             revisions: HashMap::new(),
             clear_revision: 0,
+            cache_write_epoch: 0,
         }
     }
     fn purge_character(&mut self, character: CharacterId, keep: Option<&HashSet<CacheKey>>) {
@@ -128,6 +131,7 @@ impl EmbeddingCache {
         Ok(RetrievalBarrier {
             revision: *self.revisions.get(&character).unwrap_or(&0),
             clear_revision: self.clear_revision,
+            cache_write_epoch: self.cache_write_epoch,
         })
     }
 
@@ -399,6 +403,7 @@ impl SemanticMemoryRetriever {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         Self::clear_locked_cache(&mut cache);
+        cache.clear_revision = cache.clear_revision.wrapping_add(1);
     }
 
     fn clear_locked_cache(cache: &mut EmbeddingCache) -> usize {
@@ -406,7 +411,7 @@ impl SemanticMemoryRetriever {
         cache.entries.clear();
         cache.order.clear();
         cache.revision = cache.revision.wrapping_add(1);
-        cache.clear_revision = cache.clear_revision.wrapping_add(1);
+        cache.cache_write_epoch = cache.cache_write_epoch.wrapping_add(1);
         cleared
     }
 
@@ -712,7 +717,9 @@ impl SemanticMemoryRetriever {
                 if !cache.unchanged(character, barrier) {
                     return Err(EmbeddingError::StaleKnowledge);
                 }
-                if turn.is_some() || !cache.snapshots.contains_key(&character) {
+                if barrier.cache_write_epoch == cache.cache_write_epoch
+                    && (turn.is_some() || !cache.snapshots.contains_key(&character))
+                {
                     cache.insert(keys[index].clone(), vector, self.max_entries);
                 }
             }

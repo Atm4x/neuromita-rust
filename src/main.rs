@@ -129,7 +129,7 @@ async fn main() -> ExitCode {
             }
         };
     }
-    let result = run(&logging).await;
+    let result = Box::pin(run(&logging)).await;
     neuromita::diagnostics::boundary(
         neuromita::diagnostics::Boundary::CliFinish,
         if result.is_ok() {

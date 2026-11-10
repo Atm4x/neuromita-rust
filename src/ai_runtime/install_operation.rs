@@ -388,7 +388,8 @@ impl InstallOperation {
         let mut file = OpenOptions::new()
             .create(true)
             .read(true)
-            .append(true)
+            .write(true)
+            .truncate(false)
             .open(&log_path)?;
         #[cfg(unix)]
         if file.metadata()?.len() == 0 {

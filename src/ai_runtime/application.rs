@@ -182,7 +182,7 @@ impl AiApplicationConfig {
     }
 
     pub async fn activate(self) -> Result<RunningAiApplication, AiApplicationError> {
-        self.activate_selected(None).await
+        Box::pin(self.activate_selected(None)).await
     }
 
     pub async fn activate_with_hardware(
@@ -193,7 +193,7 @@ impl AiApplicationConfig {
         config
             .validate()
             .map_err(|error| AiApplicationError::Invalid(error.to_string()))?;
-        self.activate_selected(Some((config, store))).await
+        Box::pin(self.activate_selected(Some((config, store)))).await
     }
 
     async fn activate_selected(

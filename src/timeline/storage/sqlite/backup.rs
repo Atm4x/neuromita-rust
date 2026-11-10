@@ -254,7 +254,9 @@ impl SqliteTimelineRepository {
         #[cfg(unix)]
         source_identity.verify(source)?;
 
-        fs::File::open(&staged.0)
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&staged.0)
             .and_then(|file| file.sync_all())
             .map_err(io_error)?;
         fs::hard_link(&staged.0, destination).map_err(io_error)?;

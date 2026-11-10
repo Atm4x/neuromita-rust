@@ -263,6 +263,11 @@ impl ChatApiState {
             .for_character(request.character_id())
             .prompt_set
             .as_deref();
+        if selected.is_some() && self.prompts.is_none() {
+            return Err(SubmitError::PromptUnavailable(
+                "prompt catalog is not configured for the explicitly selected prompt set".into(),
+            ));
+        }
         let prompt = self
             .prompts
             .as_ref()

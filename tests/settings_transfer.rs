@@ -96,6 +96,8 @@ fn export_is_a_complete_canonical_envelope() {
         [
             "capture",
             "characters",
+            "document_generation",
+            "history_generation",
             "interface",
             "memory",
             "onboarding",
