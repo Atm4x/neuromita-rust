@@ -40,3 +40,53 @@ A `run_exclusive("chat-stage-files")` prevents overlapping file-stage workers bu
 Tests to implement later: Enter/Shift+Enter/clipboard image; no API preset/missing prompts and late readiness; empty text with auto image capture that returns no frames; MIME mismatch; multiple-stage cumulative limit; remove one image before send; cancel generation after another starts; stop while ASR recognizing; clipboard paste + app close + temp directory; `ENABLE_IMAGE_ANALYSIS` false with images only; stale character during async capture; file swap/read failure; radio ownership handoff.
 
 **Remaining GUI scope:** actual `ChatWidget`, `MessageRenderer`, `message actions` and `presentation_coordinator` (streaming, delete/edit/regenerate, structured outputs). Эти ветви помечены как следующие для полного GUI audit. Связи: [Sandbox](sandbox-page-functional-contract.md), [Image capture](../01-functional/images-and-capture.md), [dialogue lifecycle](../01-functional/llm-and-generation.md), [runtime events](../03-runtime/typed-services-and-settings-observers.md).
+
+## Rust Slint desktop (Agent B47, 2026-11-07): late completion ownership
+
+The active Rust GUI implementation is narrower than the PyQt contracts documented above: it supports a local-file-to-Timeline event, text submission, and explicit request cancellation, but not PyQt-style staged thumbnails/camera capture. A local file append does **not** automatically start a model request. None of these are implicit parity claims.
+
+`neuromita-gui::sandbox` now stamps `Select`, `Send`, and `AttachFile` with a `(CharacterId, selection_revision)` origin. A character selection increments the view-only revision immediately; runtime snapshots, submit acknowledgments, attachment confirmations, and corresponding errors carry their captured origin. The Slint adapter discards any late update not matching both the current character and revision. In particular, A→B→A is **not** the same selection as the original A. The runtime also rejects stale queued send/attach commands before starting their operation. This revision only fences UI feedback; `ApplicationLifecycle` and Timeline remain authoritative for character state, branch selection, immutable history, and attachment commit validation.
+
+The lightweight `chat_fence.rs` policy has an independently executable Rust test target. `binding_tests.rs` exercises the real Slint callbacks and stale update application via a headless adapter. Compilation/type-check and executable Slint results must be reported separately: a successful `cargo check` is not a successful runtime GUI test. Full #36 acceptance still requires user-visible streaming, refresh+live dedup, stale history page fencing, branch-switch acceptance, message actions, and parity review against the active Python implementation.
+
+## Rust Slint desktop (Agent B48, 2026-11-07): delayed ASR and cancellation feedback
+
+In the active Rust desktop, a recognized transcript is stamped with the selected `(CharacterId, selection_revision)` **when the desktop runtime receives it**. The UI only merges it into the draft if that selection is still active. Delayed automatic submission captures the same origin and checks it again immediately before invoking the send callback, so revisiting A after A→B→A cannot trigger A's original delayed auto-send. A later recording delivered to the runtime **after** navigation is stamped with the newly selected character; capture-start/utterance-start provenance is not provided by the current speech sink and is **not** certified by this change.
+
+The Slint cancel callback similarly stamps the selected request command. Runtime refuses cancel commands queued for a different selection, and cancel failures are published as origin-scoped `ChatError` rather than an unscoped global chat error. Request cancellation remains owned by `GuiPresenter`; the UI revision only decides whether a completion belongs to the visible composer. The selection token does not alter Timeline or change request acceptance semantics.
+
+The previous combined Slint localization/layout test can fail at an unrelated localization `SourceMismatch("sandbox.attach")` before exercising chat callbacks. The selection/attachment/ASR checks therefore have a **separate headless Slint test**. A successful `cargo check` does not certify the executable GUI test; report its actual runtime result separately. This increment does not implement PyQt-style image staging or history paging and does not claim full #36 closure.
+
+## Rust Slint desktop (Agent B49, 2026-11-07): confirmation and diagnostics selection fencing
+
+The native `ConversationUi` commands `Preview`, `Confirm`, `Abort` and `Diagnostics` are separate from sending a message. They now carry the same ephemeral `ChatOrigin(CharacterId, selection_revision)` used by attachment/send/cancel UI callbacks. The runtime rejects preview and diagnostics commands whose origin does not match the selected character and selection revision. Confirmation is permitted only when **both** the current selection and the stored preview owner match; a new valid preview invalidates a previous preview before computation, and a preview failure clears the confirmation. The actual irreversible Timeline change is still guarded by `ConversationPresenter::apply_change` against the captured `ContextAnchor` and `TimelineSelection`.
+
+Confirmation, diagnostics and errors returned to Slint are tagged with the captured origin and ignored after character reselection. Selecting A→B or A→B→A also closes the visible confirmation, history dialog and diagnostics immediately; returning to A does not reinstate the obsolete A overlay. This is **UI owner fencing**, not an additional Timeline authority or a new persistence store. An isolated headless Slint callback test verifies stale and current updates separately.
+
+The current Rust GUI `Refresh` command does not load a separately paginated historical page. Each runtime observation reconstructs up to 200 projected messages plus live request rows from an authoritative `ConversationSnapshot`; the `VecModel` is replaced rather than append-only. Do not claim that PyQt's `HistoryLoadTicket`/late older-page reconciliation, per-message edit/regenerate menu, or staged-image thumbnails are implemented in Rust merely because the Python parity documentation describes them. Those are outstanding #36 product scope, not regressions to patch with a second history cache.
+
+## B55 — отправка, отмена и голосовой ввод
+
+Основной контрол компоновщика переключается с Send на Stop на основе текущего
+`ConversationSnapshot`: выбранный персонаж имеет незавершённый запрос. Stop
+передаёт исходный `RequestId` через `ChatOrigin` и не создаёт новый запрос; при
+неканцелируемой стадии принятия ответов Stop остаётся неактивным. Под
+компоновщиком показывается «Мита думает…», пока запрос находится в работе.
+Кнопка микрофона отображает фактическое состояние `SpeechSessionPhase` и
+включает существующую ASR-сессию. Для `radio`/`push_to_talk` она также
+включает PTT; при выключении отпускает PTT и останавливает запись.
+Анимированные полосы рядом с микрофоном обозначают активную запись, но не
+претендуют на показ измеренной амплитуды (такого поля нет в `SpeechSessionSnapshot`).
+
+Каждый `DesktopTranscriptSink` получает неизменяемый `ChatOrigin` при старте
+конкретной speech-сессии. Transcript из старой сессии не приписывается новому
+персонажу: очередь несёт исходный токен и отклоняется на границе runtime. При
+смене выбора персонажа текущая session-bound запись останавливается, токен
+нового выбора не наследует старую ASR-сессию. Дополнительное требование к
+проверке — реальный аудио-девайс и полный Python/PyQt visual parity; без него
+не утверждается аппаратная проверка записи.
+
+Retry и Regenerate не подменяются новым `reply(text)` — такое действие создало
+бы второй пользовательский Timeline event и нарушило бы смысл повторной
+генерации. Для них необходим отдельный контракт на исходный `EventId`,
+`RequestId`, observer scope и атомарную проверку Timeline head.

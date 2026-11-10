@@ -371,6 +371,14 @@
     "source": "История",
     "translation": "History"
   },
+  "sandbox.history.loading": {
+    "source": "Загрузка истории…",
+    "translation": "Loading history…"
+  },
+  "sandbox.history.older": {
+    "source": "Загрузить предыдущие 200 сообщений",
+    "translation": "Load 200 older messages"
+  },
   "sandbox.label.active": {
     "source": "Активных запросов",
     "translation": "Active requests"
@@ -406,6 +414,30 @@
   "sandbox.mic": {
     "source": "Микрофон",
     "translation": "Microphone"
+  },
+  "sandbox.mic.start": {
+    "source": "Начать голосовой ввод",
+    "translation": "Start voice input"
+  },
+  "sandbox.mic.stop": {
+    "source": "Остановить голосовой ввод",
+    "translation": "Stop voice input"
+  },
+  "sandbox.mic.wait": {
+    "source": "Микрофон переключается…",
+    "translation": "Switching microphone…"
+  },
+  "sandbox.mic.listening": {
+    "source": "Слушаю микрофон…",
+    "translation": "Listening to microphone…"
+  },
+  "sandbox.mita-thinking": {
+    "source": "Мита думает…",
+    "translation": "Mita is thinking…"
+  },
+  "sandbox.stop": {
+    "source": "Отменить ответ",
+    "translation": "Cancel response"
   },
   "sandbox.no-link": {
     "source": "Нет связи",
@@ -602,6 +634,18 @@
   "settings.voice.game": {
     "source": "Озвучивать в игре",
     "translation": "Speak in game"
+  },
+  "sandbox.message.hide": {
+    "source": "Скрыть сообщение",
+    "translation": "Hide message"
+  },
+  "conversation.hide.title": {
+    "source": "Скрыть выбранное сообщение?",
+    "translation": "Hide selected message?"
+  },
+  "conversation.hide.body": {
+    "source": "Сообщение исчезнет из истории этого персонажа. Исходное событие сохранится.",
+    "translation": "The message will disappear from this character's history. The original event remains intact."
   },
   "conversation.clear.title": {
     "source": "Очистить видимую историю?",
@@ -1866,5 +1910,25 @@
   "settings.ai-engine.maintenance-unavailable": {
     "source": "Обслуживание недоступно",
     "translation": "Maintenance is unavailable"
+  },
+  "conversation.revise.title": {
+    "source": "Изменить сообщение для этого персонажа?",
+    "translation": "Revise message for this character?"
+  },
+  "conversation.revise.editor": {
+    "source": "Редактирование сообщения",
+    "translation": "Edit message"
+  },
+  "conversation.revise.body": {
+    "source": "Текст изменится только для этого персонажа; исходное событие останется в Timeline.",
+    "translation": "Text will change only for this character; the original Timeline event remains intact."
+  },
+  "conversation.revise.save": {
+    "source": "Сохранить редакцию",
+    "translation": "Save revision"
+  },
+  "sandbox.message.edit": {
+    "source": "Редактировать",
+    "translation": "Edit"
   }
 }

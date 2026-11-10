@@ -56,6 +56,8 @@ pub enum EmbeddingError {
         expected: EmbeddingSpace,
         actual: EmbeddingSpace,
     },
+    #[error("semantic retrieval context has been superseded")]
+    StaleKnowledge,
 }
 
 #[derive(Debug, Clone)]

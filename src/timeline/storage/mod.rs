@@ -1,3 +1,5 @@
+pub mod archive;
+pub mod assets;
 #[cfg(feature = "sqlite-system")]
 mod sqlite;
 
@@ -6,3 +8,5 @@ pub use sqlite::{
     DerivedIndexDrift, DerivedIndexPreview, SqliteTimelineRepository, VerifiedTimelineBackup,
     VerifiedTimelineRestore,
 };
+
+pub mod python_archive;

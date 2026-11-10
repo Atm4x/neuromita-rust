@@ -33,6 +33,15 @@ use crate::{
     voice::{VoiceError, VoiceOptions, VoiceProvider},
 };
 
+pub(crate) trait ProviderDispatchFence: Send + Sync {
+    fn before_provider(
+        &self,
+        request: RequestId,
+        admission: crate::timeline::selection::TimelineAdmission,
+        protocol: Option<RegenerateProtocol>,
+    ) -> Result<(), String>;
+}
+
 #[derive(Clone)]
 pub(crate) struct MessageHandler {
     pub(crate) character: CharacterHandle,
@@ -47,6 +56,8 @@ pub(crate) struct MessageHandler {
     pub(crate) selection_updates: watch::Receiver<TimelineSelection>,
     pub(crate) context_updates: watch::Receiver<u64>,
     pub(crate) games: Arc<GamePolicy>,
+    pub(crate) assets: Option<Arc<crate::timeline::storage::assets::TimelineAssetStore>>,
+    pub(crate) dispatch_fence: Arc<dyn ProviderDispatchFence>,
 }
 
 impl MessageHandler {
@@ -256,7 +267,7 @@ impl MessageHandler {
                     None
                 } else {
                     self.knowledge
-                        .select_with_relations(context.character_id, &context.memories, &context.memory_islands, &context.memory_relations, &query)
+                        .select_with_relations_at(context.character_id, &context.memories, &context.memory_islands, &context.memory_relations, &query, context.turn)
                         .await
                         .map_err(|error| GenerationError::Response(
                             format!("knowledge retrieval failed: {error}")
@@ -290,6 +301,7 @@ impl MessageHandler {
                                 max_content_chars: usize::from(history_policy.max_content_chars),
                             },
                             history_policy.mode == HistoryGenerationMode::Fusion,
+                            context.turn,
                         ).await.map_err(|error| GenerationError::Response(
                             format!("combined semantic generation evidence rejected: {error}")
                         ))?;
@@ -388,7 +400,11 @@ impl MessageHandler {
                     .with_model_memory_policy(settings.values.memory.model_add_policy())
                     .with_prompt(prompt)
                     .with_post_dsl(post_dsl)
-                    .with_tools(settings.values.tools.clone());
+                    .with_tools(settings.values.tools.clone())
+                    .with_assets(self.assets.clone());
+                self.dispatch_fence
+                    .before_provider(id, record.admission(), record.regenerate_protocol())
+                    .map_err(GenerationError::Response)?;
                 let mut combined = RecordObserver {
                     record: &record,
                     capture: observer.as_mut(),
@@ -583,7 +599,9 @@ impl MessageHandler {
                 return;
             }
         };
-        record.mark_applied();
+        if !record.mark_applied() {
+            return;
+        }
         if let Some(invite) = accepted.game_invite.clone()
             && (!invite.auto_gated || self.games.auto_reactions)
         {

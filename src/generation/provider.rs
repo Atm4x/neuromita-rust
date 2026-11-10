@@ -67,6 +67,7 @@ pub struct GenerationRequest {
     pub history_window: Option<HistoryWindow>,
     pub tools: ToolSettings,
     pub model_memory_policy: ModelMemoryAddPolicy,
+    pub assets: Option<Arc<crate::timeline::storage::assets::TimelineAssetStore>>,
 }
 
 impl GenerationRequest {
@@ -83,6 +84,7 @@ impl GenerationRequest {
             prepared_knowledge,
             history_window: None,
             tools: ToolSettings::default(),
+            assets: None,
             model_memory_policy: ModelMemoryAddPolicy::Ordinary,
         }
     }
@@ -95,6 +97,14 @@ impl GenerationRequest {
 
     pub fn with_history_window(mut self, window: Option<HistoryWindow>) -> Self {
         self.history_window = window;
+        self
+    }
+
+    pub fn with_assets(
+        mut self,
+        assets: Option<Arc<crate::timeline::storage::assets::TimelineAssetStore>>,
+    ) -> Self {
+        self.assets = assets;
         self
     }
 
@@ -127,6 +137,7 @@ pub struct GenerationInput {
     pub tool_history: Vec<PromptMessage>,
     pub(crate) native_tool_history: Vec<NativeToolExchange>,
     pub tool_settings: ToolSettings,
+    pub assets: Option<Arc<crate::timeline::storage::assets::TimelineAssetStore>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -171,7 +182,8 @@ pub struct PreparedRequest {
     pub max_output_tokens: Option<u32>,
     /// The provider-neutral prompt used to produce `payload_json`.
     pub prompt: Arc<[PromptMessage]>,
-    /// The exact JSON bytes sent as the request body.
+    /// Exact request JSON for text-only requests. Media payloads are redacted
+    /// before passing into observers to prevent retaining binary attachments.
     pub payload_json: Arc<str>,
     pub captured_at: SystemTime,
 }
@@ -298,6 +310,19 @@ impl ResponseGenerator {
                 "history window does not match the admitted Timeline".into(),
             ));
         }
+        let captured = &request.context;
+        if captured.anchor.branch_id != captured.view.branch.0
+            || captured.anchor.through != captured.view.through
+            || captured.character_id != captured.view.observer()
+            || captured.turn.selection.branch_id != captured.view.branch
+            || captured.turn.context_head != captured.view.through
+            || captured.turn.character != captured.character_id
+        {
+            return Err(GenerationError::Response(
+                "generation view, character and Timeline turn have different captured anchors"
+                    .into(),
+            ));
+        }
         let template = request.preset.template().clone();
         let deadline = tokio::time::Instant::now()
             .checked_add(template.timeout())
@@ -322,6 +347,7 @@ impl ResponseGenerator {
             tool_history: Vec::new(),
             native_tool_history: Vec::new(),
             tool_settings: tools.clone(),
+            assets: request.assets,
         };
         let mut depth = 0;
         let structured = loop {
@@ -429,6 +455,7 @@ impl ResponseGenerator {
             }
             observer.stream_reset();
             depth += 1;
+            tokio::task::yield_now().await;
         };
         let (structured, variables) = match post_dsl {
             Some(program) => {

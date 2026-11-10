@@ -426,6 +426,238 @@ fn sandbox_render_and_bindings(catalog: Rc<RefCell<Localizer>>) {
     window.hide().unwrap();
 }
 
+#[test]
+fn chat_refresh_and_live_reconcile_preserves_model_and_deduplicates_rows() {
+    slint::platform::set_platform(Box::new(TestPlatform)).unwrap();
+    let window = AppWindow::new().unwrap();
+    window.show().unwrap();
+    use super::super::sandbox::reconcile_rows;
+    use super::super::view::{ChatRow, ChatStatus};
+
+    let user = ChatRow {
+        sequence: "#1".into(),
+        text: "player".into(),
+        user: true,
+        ..Default::default()
+    };
+    let pending = ChatRow {
+        request_id: "1234".into(),
+        text: "draft".into(),
+        status: ChatStatus::Text,
+        ..Default::default()
+    };
+    let accepted = ChatRow {
+        sequence: "#2".into(),
+        text: "final".into(),
+        status: ChatStatus::Success,
+        ..Default::default()
+    };
+    reconcile_rows(&window, vec![user.clone(), pending.clone()]);
+    let model = window.get_chat_messages();
+    assert_eq!(model.row_count(), 2);
+    reconcile_rows(&window, vec![user.clone(), pending.clone()]);
+    assert_eq!(
+        model,
+        window.get_chat_messages(),
+        "refresh must retain the model"
+    );
+    assert_eq!(model.row_count(), 2);
+
+    let streaming = ChatRow {
+        text: "draft updated".into(),
+        ..pending.clone()
+    };
+    reconcile_rows(&window, vec![user.clone(), streaming.clone()]);
+    assert_eq!(model, window.get_chat_messages());
+    assert_eq!(model.row_data(1), Some(streaming));
+    reconcile_rows(&window, vec![user.clone(), accepted.clone()]);
+    reconcile_rows(&window, vec![user.clone(), accepted.clone()]);
+    assert_eq!(
+        model.row_count(),
+        2,
+        "accepted message replaces the request row"
+    );
+    assert_eq!(model.row_data(1), Some(accepted.clone()));
+
+    let newest = ChatRow {
+        sequence: "#3".into(),
+        text: "newer".into(),
+        ..Default::default()
+    };
+    reconcile_rows(&window, vec![accepted.clone(), newest.clone()]);
+    assert_eq!(model, window.get_chat_messages());
+    assert_eq!(model.row_count(), 2);
+    assert_eq!(model.row_data(0), Some(accepted));
+    assert_eq!(model.row_data(1), Some(newest));
+
+    let other_branch = ChatRow {
+        sequence: "#1".into(),
+        text: "other branch".into(),
+        user: true,
+        ..Default::default()
+    };
+    reconcile_rows(&window, vec![other_branch.clone()]);
+    assert_eq!(model.row_count(), 1);
+    assert_eq!(model.row_data(0), Some(other_branch));
+    window.hide().unwrap();
+}
+
+#[test]
+fn chat_feedback_and_asr_callbacks_are_scoped_to_selection_revision() {
+    slint::platform::set_platform(Box::new(TestPlatform)).unwrap();
+    let window = AppWindow::new().unwrap();
+    window.show().unwrap();
+    let editor = std::sync::Arc::new(std::sync::Mutex::new(
+        super::super::memory::MemoryEditor::default(),
+    ));
+    let commands = Rc::new(RefCell::new(Vec::new()));
+    let collected = commands.clone();
+    let revision = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    super::super::sandbox::bind_chat_actions(
+        &window,
+        Rc::new(move |command| collected.borrow_mut().push(command)),
+        revision.clone(),
+    );
+    use super::super::runtime::{ChatOrigin, Command, Update};
+    use neuromita::character::CharacterId;
+    let first = ChatOrigin {
+        character: CharacterId::Crazy,
+        selection_revision: 0,
+    };
+    window.set_chat_character(CharacterId::Crazy.index() as i32);
+    window.invoke_chat_attach("identical draft".into(), "/test/identical.png".into());
+    window.invoke_chat_select_character(CharacterId::Kind.index() as i32);
+    assert_eq!(
+        window.get_chat_character(),
+        CharacterId::Kind.index() as i32
+    );
+    window.set_chat_draft("identical draft".into());
+    window.set_chat_attachment_path("/test/identical.png".into());
+    super::super::sandbox::apply(
+        &window,
+        Update::FileAttached(
+            first,
+            "identical draft".into(),
+            "/test/identical.png".into(),
+        ),
+        &editor,
+        &revision,
+    );
+    assert_eq!(
+        window.get_chat_draft(),
+        "identical draft",
+        "late A completion must not clear B draft"
+    );
+    assert_eq!(window.get_chat_attachment_path(), "/test/identical.png");
+    let old_draft = window.get_chat_draft();
+    super::super::sandbox::apply(
+        &window,
+        Update::RecognizedText {
+            origin: first,
+            text: "obsolete ASR".into(),
+            auto_send_after: Some(std::time::Duration::ZERO),
+            merge_with_draft: true,
+        },
+        &editor,
+        &revision,
+    );
+    assert_eq!(window.get_chat_draft(), old_draft);
+    window.set_chat_error("B error".into());
+    super::super::sandbox::apply(
+        &window,
+        Update::ChatError(first, "A error".into()),
+        &editor,
+        &revision,
+    );
+    assert_eq!(
+        window.get_chat_error(),
+        "B error",
+        "stale file failure must not overwrite B error"
+    );
+    window.invoke_chat_attach("B draft".into(), "/test/b.png".into());
+    window.invoke_chat_select_character(CharacterId::Crazy.index() as i32);
+    assert_eq!(
+        window.get_chat_character(),
+        CharacterId::Crazy.index() as i32
+    );
+    super::super::sandbox::apply(
+        &window,
+        Update::FileAttached(
+            first,
+            "identical draft".into(),
+            "/test/identical.png".into(),
+        ),
+        &editor,
+        &revision,
+    );
+    assert_eq!(
+        window.get_chat_draft(),
+        "identical draft",
+        "reselected A is a distinct selection"
+    );
+    assert_eq!(window.get_chat_attachment_path(), "/test/identical.png");
+    super::super::sandbox::apply(
+        &window,
+        Update::RecognizedText {
+            origin: first,
+            text: "old A ASR".into(),
+            auto_send_after: Some(std::time::Duration::ZERO),
+            merge_with_draft: false,
+        },
+        &editor,
+        &revision,
+    );
+    assert_eq!(window.get_chat_draft(), "identical draft");
+    super::super::sandbox::apply(
+        &window,
+        Update::RecognizedText {
+            origin: ChatOrigin {
+                character: CharacterId::Crazy,
+                selection_revision: 2,
+            },
+            text: "current ASR".into(),
+            auto_send_after: None,
+            merge_with_draft: true,
+        },
+        &editor,
+        &revision,
+    );
+    assert_eq!(window.get_chat_draft(), "identical draft current ASR");
+    window.set_chat_draft("identical draft".into());
+    super::super::sandbox::apply(
+        &window,
+        Update::FileAttached(
+            ChatOrigin {
+                character: CharacterId::Crazy,
+                selection_revision: 2,
+            },
+            "identical draft".into(),
+            "/test/identical.png".into(),
+        ),
+        &editor,
+        &revision,
+    );
+    assert_eq!(window.get_chat_draft(), "");
+    assert_eq!(window.get_chat_attachment_path(), "");
+    let cancel_id = uuid::Uuid::new_v4();
+    window.invoke_chat_cancel(cancel_id.to_string().into());
+    let recorded = commands.borrow();
+    assert!(matches!(&recorded[0], Command::AttachFile(origin, _, _) if *origin == first));
+    assert!(
+        matches!(&recorded[1], Command::Select(origin) if origin.character == CharacterId::Kind && origin.selection_revision == 1)
+    );
+    assert!(
+        matches!(&recorded[2], Command::AttachFile(origin, _, _) if origin.character == CharacterId::Kind && origin.selection_revision == 1)
+    );
+    assert!(
+        matches!(&recorded[3], Command::Select(origin) if origin.character == CharacterId::Crazy && origin.selection_revision == 2)
+    );
+    assert!(
+        matches!(&recorded[4], Command::Cancel(origin, id) if origin.character == CharacterId::Crazy && origin.selection_revision == 2 && id.0 == cancel_id)
+    );
+    window.hide().unwrap();
+}
+
 fn settings_render_and_bindings(window: &AppWindow) {
     use super::super::view::{AiEngineUi, PresetItem, SettingsUi};
     use neuromita::ai_runtime::{
@@ -1136,4 +1368,692 @@ fn memory_render_and_contract(window: &AppWindow) {
         ui.set_open(false);
         app.shutdown().await.unwrap();
     });
+}
+
+#[test]
+fn conversation_admin_callbacks_reject_late_a_b_a_results() {
+    use super::super::runtime::{ChatOrigin, Command, Update};
+    use super::super::view::ConversationUi;
+    use neuromita::{character::CharacterId, presentation::ConversationChange};
+
+    slint::platform::set_platform(Box::new(TestPlatform)).unwrap();
+    let window = AppWindow::new().unwrap();
+    let editor = std::sync::Arc::new(std::sync::Mutex::new(
+        super::super::memory::MemoryEditor::default(),
+    ));
+    let revision = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let commands = Rc::new(RefCell::new(Vec::new()));
+    let collected = commands.clone();
+    super::super::sandbox::bind_chat_actions(
+        &window,
+        Rc::new(move |command| collected.borrow_mut().push(command)),
+        revision.clone(),
+    );
+    let first = ChatOrigin {
+        character: CharacterId::Crazy,
+        selection_revision: 0,
+    };
+    window.set_chat_character(CharacterId::Crazy.index() as i32);
+    let conversation = window.global::<ConversationUi>();
+    conversation.invoke_preview(1);
+    conversation.invoke_trace();
+    conversation.set_confirmation(1);
+    conversation.set_history(true);
+    conversation.set_diagnostics("A-private-trace".into());
+
+    window.invoke_chat_select_character(CharacterId::Kind.index() as i32);
+    assert_eq!(conversation.get_confirmation(), 0);
+    assert!(!conversation.get_history());
+    assert_eq!(conversation.get_diagnostics(), "");
+    super::super::sandbox::apply(
+        &window,
+        Update::Confirmation(first, Some((ConversationChange::ClearMessages, 7))),
+        &editor,
+        &revision,
+    );
+    super::super::sandbox::apply(
+        &window,
+        Update::Diagnostics(first, "A-private-trace".into()),
+        &editor,
+        &revision,
+    );
+    super::super::sandbox::apply(
+        &window,
+        Update::ConversationError(first, "A error".into()),
+        &editor,
+        &revision,
+    );
+    assert_eq!(conversation.get_confirmation(), 0);
+    assert_eq!(conversation.get_diagnostics(), "");
+    assert_eq!(window.get_chat_error(), "");
+
+    window.invoke_chat_select_character(CharacterId::Crazy.index() as i32);
+    super::super::sandbox::apply(
+        &window,
+        Update::Confirmation(first, Some((ConversationChange::ResetContext, 8))),
+        &editor,
+        &revision,
+    );
+    super::super::sandbox::apply(
+        &window,
+        Update::Diagnostics(first, "A-private-trace".into()),
+        &editor,
+        &revision,
+    );
+    assert_eq!(conversation.get_confirmation(), 0);
+    assert_eq!(conversation.get_diagnostics(), "");
+
+    let selected = ChatOrigin {
+        character: CharacterId::Crazy,
+        selection_revision: 2,
+    };
+    conversation.invoke_preview(2);
+    super::super::sandbox::apply(
+        &window,
+        Update::Confirmation(selected, Some((ConversationChange::ResetContext, 3))),
+        &editor,
+        &revision,
+    );
+    assert_eq!(conversation.get_confirmation(), 2);
+    assert_eq!(conversation.get_count(), 3);
+    conversation.invoke_confirm();
+    super::super::sandbox::apply(
+        &window,
+        Update::Confirmation(selected, None),
+        &editor,
+        &revision,
+    );
+    assert_eq!(conversation.get_confirmation(), 0);
+    conversation.invoke_trace();
+    super::super::sandbox::apply(
+        &window,
+        Update::Diagnostics(selected, "new trace".into()),
+        &editor,
+        &revision,
+    );
+    assert_eq!(conversation.get_diagnostics(), "new trace");
+    conversation.invoke_abort();
+
+    let recorded = commands.borrow();
+    assert!(
+        matches!(&recorded[0], Command::Preview(origin, ConversationChange::ClearMessages) if *origin == first)
+    );
+    assert!(matches!(&recorded[1], Command::Diagnostics(origin) if *origin == first));
+    assert!(
+        matches!(&recorded[2], Command::Select(origin) if origin.character == CharacterId::Kind && origin.selection_revision == 1)
+    );
+    assert!(matches!(&recorded[3], Command::Select(origin) if *origin == selected));
+    assert!(
+        matches!(&recorded[4], Command::Preview(origin, ConversationChange::ResetContext) if *origin == selected)
+    );
+    assert!(matches!(&recorded[5], Command::Confirm(origin) if *origin == selected));
+    assert!(matches!(&recorded[6], Command::Diagnostics(origin) if *origin == selected));
+    assert!(matches!(&recorded[7], Command::Abort(origin) if *origin == selected));
+}
+
+#[test]
+fn chat_single_message_hide_callback_uses_event_id_and_origin_revision() {
+    slint::platform::set_platform(Box::new(TestPlatform)).unwrap();
+    let window = AppWindow::new().unwrap();
+    window.show().unwrap();
+    let editor = std::sync::Arc::new(std::sync::Mutex::new(
+        super::super::memory::MemoryEditor::default(),
+    ));
+    let received = Rc::new(RefCell::new(Vec::new()));
+    let collected = received.clone();
+    let revision = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    super::super::sandbox::bind_chat_actions(
+        &window,
+        Rc::new(move |command| collected.borrow_mut().push(command)),
+        revision.clone(),
+    );
+    use super::super::{
+        runtime::{ChatOrigin, Command, Update},
+        view::ConversationUi,
+    };
+    use neuromita::{character::CharacterId, presentation::ConversationChange};
+    let target = neuromita::timeline::EventId::new();
+    window.set_chat_character(CharacterId::Crazy.index() as i32);
+    window.invoke_chat_hide_message(target.0.to_string().into());
+    assert!(
+        matches!(&received.borrow()[0], Command::Preview(origin, ConversationChange::HideMessage(id))
+        if origin.character == CharacterId::Crazy && origin.selection_revision == 0 && *id == target)
+    );
+    window.invoke_chat_select_character(CharacterId::Kind.index() as i32);
+    super::super::sandbox::apply(
+        &window,
+        Update::Confirmation(
+            ChatOrigin {
+                character: CharacterId::Crazy,
+                selection_revision: 0,
+            },
+            Some((ConversationChange::HideMessage(target), 1)),
+        ),
+        &editor,
+        &revision,
+    );
+    assert_eq!(window.global::<ConversationUi>().get_confirmation(), 0);
+    window.invoke_chat_select_character(CharacterId::Crazy.index() as i32);
+    window.invoke_chat_hide_message(target.0.to_string().into());
+    assert!(
+        matches!(&received.borrow()[3], Command::Preview(origin, ConversationChange::HideMessage(id))
+        if origin.character == CharacterId::Crazy && origin.selection_revision == 2 && *id == target)
+    );
+    super::super::sandbox::apply(
+        &window,
+        Update::Confirmation(
+            ChatOrigin {
+                character: CharacterId::Crazy,
+                selection_revision: 2,
+            },
+            Some((ConversationChange::HideMessage(target), 1)),
+        ),
+        &editor,
+        &revision,
+    );
+    assert_eq!(window.global::<ConversationUi>().get_confirmation(), 3);
+    window.global::<ConversationUi>().invoke_confirm();
+    assert!(matches!(&received.borrow()[4], Command::Confirm(origin)
+        if origin.character == CharacterId::Crazy && origin.selection_revision == 2));
+    window.hide().unwrap();
+}
+
+#[test]
+fn chat_real_history_pages_are_ticket_fenced_and_preserve_live_rows() {
+    use super::super::{
+        runtime::{ChatOrigin, Command, Update},
+        sandbox::{HistoryPager, apply_with_pager, bind_history_actions, reconcile_rows},
+        view::{ChatRow, ChatStatus},
+    };
+    use neuromita::{
+        character::CharacterId,
+        presentation::ConversationHistoryPage,
+        timeline::{
+            ContextAnchor,
+            domain::{EventKind, MessageRole, ProjectedMessage},
+            selection::TimelineSelection,
+        },
+    };
+    slint::platform::set_platform(Box::new(TestPlatform)).unwrap();
+    let window = AppWindow::new().unwrap();
+    window.show().unwrap();
+    let editor = std::sync::Arc::new(std::sync::Mutex::new(
+        super::super::memory::MemoryEditor::default(),
+    ));
+    let revision = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let pager = std::sync::Arc::new(std::sync::Mutex::new(HistoryPager::default()));
+    let origin = ChatOrigin {
+        character: CharacterId::Crazy,
+        selection_revision: 0,
+    };
+    let branch = uuid::Uuid::new_v4();
+    let at = ContextAnchor {
+        branch_id: branch,
+        through: 205,
+    };
+    let selected = TimelineSelection {
+        branch_id: neuromita::timeline::domain::BranchId(branch),
+        generation: 1,
+    };
+    let commands = Rc::new(RefCell::new(Vec::new()));
+    let collected = commands.clone();
+    bind_history_actions(
+        &window,
+        Rc::new(move |command| collected.borrow_mut().push(command)),
+        revision.clone(),
+        pager.clone(),
+    );
+    pager.lock().unwrap().observe(origin, at, selected, 205);
+    window.set_chat_character(CharacterId::Crazy.index() as i32);
+    let existing = (6..=205)
+        .map(|i| ChatRow {
+            sequence: format!("#{i}").into(),
+            event_id: uuid::Uuid::from_u128(i).to_string().into(),
+            text: format!("history-{i}").into(),
+            user: true,
+            ..Default::default()
+        })
+        .chain(std::iter::once(ChatRow {
+            request_id: "pending-live".into(),
+            text: "streaming".into(),
+            status: ChatStatus::Text,
+            can_cancel: true,
+            ..Default::default()
+        }))
+        .collect();
+    reconcile_rows(&window, existing);
+    let model = window.get_chat_messages();
+    window.invoke_chat_load_older();
+    window.invoke_chat_load_older();
+    assert_eq!(
+        commands.borrow().len(),
+        1,
+        "one bounded read must be in flight"
+    );
+    let (ticket, offset) = match &commands.borrow()[0] {
+        Command::LoadOlder(request_origin, id, request_at, request_selection, offset) => {
+            assert_eq!(*request_origin, origin);
+            assert_eq!(*request_at, at);
+            assert_eq!(*request_selection, selected);
+            (*id, *offset)
+        }
+        _ => panic!("expected typed Timeline history page"),
+    };
+    assert_eq!(offset, 200);
+    let older = (1..=5)
+        .map(|i| ProjectedMessage {
+            event_id: neuromita::timeline::EventId(uuid::Uuid::from_u128(i)),
+            request_id: None,
+            kind: EventKind::PlayerMessage,
+            message_id: format!("message-{i}"),
+            external_message_id: None,
+            sequence: i as u64,
+            learned_at: i as u64,
+            role: MessageRole::User,
+            speaker: Some("player".into()),
+            content: format!("history-{i}"),
+            fields: Default::default(),
+        })
+        .collect::<Vec<_>>();
+    let page = ConversationHistoryPage {
+        character: CharacterId::Crazy,
+        at,
+        selection: selected,
+        offset: 200,
+        total: 205,
+        messages: older.clone(),
+    };
+    apply_with_pager(
+        &window,
+        Update::OlderPage(origin, ticket, Ok(page)),
+        &editor,
+        &revision,
+        Some(&pager),
+    );
+    assert_eq!(
+        window.get_chat_messages(),
+        model,
+        "pages retain mounted Slint model"
+    );
+    assert_eq!(model.row_count(), 206, "older messages plus live pending");
+    assert_eq!(model.row_data(0).unwrap().text, "history-1");
+    assert_eq!(model.row_data(204).unwrap().text, "history-205");
+    assert_eq!(model.row_data(205).unwrap().request_id, "pending-live");
+    assert!(!window.get_chat_has_older());
+    window.invoke_chat_load_older();
+    assert_eq!(commands.borrow().len(), 1);
+    apply_with_pager(
+        &window,
+        Update::OlderPage(
+            origin,
+            ticket,
+            Ok(ConversationHistoryPage {
+                character: CharacterId::Crazy,
+                at,
+                selection: selected,
+                offset: 200,
+                total: 205,
+                messages: older.clone(),
+            }),
+        ),
+        &editor,
+        &revision,
+        Some(&pager),
+    );
+    assert_eq!(
+        model.row_count(),
+        206,
+        "duplicate page cannot append duplicate events"
+    );
+
+    let loading_at = ContextAnchor { through: 206, ..at };
+    let changed_at = ContextAnchor { through: 207, ..at };
+    pager
+        .lock()
+        .unwrap()
+        .observe(origin, loading_at, selected, 206);
+    assert_eq!(
+        pager.lock().unwrap().visible(),
+        206,
+        "a new accepted reply must retain loaded older rows and include the new row"
+    );
+    assert!(
+        pager.lock().unwrap().request(origin).is_none(),
+        "a live reply must not re-request pages already mounted"
+    );
+    *pager.lock().unwrap() = HistoryPager::default();
+    pager
+        .lock()
+        .unwrap()
+        .observe(origin, loading_at, selected, 205);
+    let (late_ticket, _, _, _) = pager.lock().unwrap().request(origin).unwrap();
+    pager
+        .lock()
+        .unwrap()
+        .observe(origin, changed_at, selected, 204);
+    apply_with_pager(
+        &window,
+        Update::OlderPage(
+            origin,
+            late_ticket,
+            Ok(ConversationHistoryPage {
+                character: CharacterId::Crazy,
+                at,
+                selection: selected,
+                offset: 200,
+                total: 205,
+                messages: older.clone(),
+            }),
+        ),
+        &editor,
+        &revision,
+        Some(&pager),
+    );
+    assert_eq!(
+        model.row_count(),
+        206,
+        "edit/hide during read cannot resurrect old rows"
+    );
+
+    pager.lock().unwrap().observe(
+        origin,
+        at,
+        TimelineSelection {
+            generation: 2,
+            ..selected
+        },
+        205,
+    );
+    let (new_ticket, _, _, _) = pager.lock().unwrap().request(origin).unwrap();
+    apply_with_pager(
+        &window,
+        Update::OlderPage(
+            origin,
+            new_ticket,
+            Ok(ConversationHistoryPage {
+                character: CharacterId::Crazy,
+                at,
+                selection: selected,
+                offset: 200,
+                total: 205,
+                messages: older.clone(),
+            }),
+        ),
+        &editor,
+        &revision,
+        Some(&pager),
+    );
+    assert_eq!(
+        model.row_count(),
+        206,
+        "same branch/head but different generation must be fenced"
+    );
+
+    revision.store(2, std::sync::atomic::Ordering::Release);
+    apply_with_pager(
+        &window,
+        Update::OlderPage(
+            origin,
+            new_ticket,
+            Ok(ConversationHistoryPage {
+                character: CharacterId::Crazy,
+                at,
+                selection: selected,
+                offset: 200,
+                total: 205,
+                messages: older,
+            }),
+        ),
+        &editor,
+        &revision,
+        Some(&pager),
+    );
+    assert_eq!(
+        model.row_count(),
+        206,
+        "A→B→A old result cannot mutate current selection"
+    );
+    window.hide().unwrap();
+}
+
+#[test]
+fn chat_message_revision_callback_is_fenced_across_character_reselection() {
+    use super::super::{
+        runtime::{ChatOrigin, Command, Update},
+        sandbox::bind_chat_actions,
+        view::ConversationUi,
+    };
+    use neuromita::{character::CharacterId, presentation::ConversationChange};
+    slint::platform::set_platform(Box::new(TestPlatform)).unwrap();
+    let window = AppWindow::new().unwrap();
+    window.show().unwrap();
+    let commands = Rc::new(RefCell::new(Vec::new()));
+    let output = commands.clone();
+    let revision = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let editor = std::sync::Arc::new(std::sync::Mutex::new(
+        super::super::memory::MemoryEditor::default(),
+    ));
+    bind_chat_actions(
+        &window,
+        Rc::new(move |command| output.borrow_mut().push(command)),
+        revision.clone(),
+    );
+    let event = neuromita::timeline::EventId::new();
+    window.set_chat_character(CharacterId::Crazy.index() as i32);
+    window
+        .global::<ConversationUi>()
+        .invoke_revise(event.0.to_string().into(), "changed".into());
+    assert!(
+        matches!(&commands.borrow()[0], Command::Preview(origin, ConversationChange::ReviseMessage(id, content))
+        if origin.character == CharacterId::Crazy && origin.selection_revision == 0 && *id == event && content == "changed")
+    );
+    window.invoke_chat_select_character(CharacterId::Kind.index() as i32);
+    let stale = ChatOrigin {
+        character: CharacterId::Crazy,
+        selection_revision: 0,
+    };
+    super::super::sandbox::apply(
+        &window,
+        Update::Confirmation(
+            stale,
+            Some((
+                ConversationChange::ReviseMessage(event, "changed".into()),
+                1,
+            )),
+        ),
+        &editor,
+        &revision,
+    );
+    assert_eq!(window.global::<ConversationUi>().get_confirmation(), 0);
+    window.invoke_chat_select_character(CharacterId::Crazy.index() as i32);
+    assert_eq!(window.global::<ConversationUi>().get_edit_target(), "");
+    window
+        .global::<ConversationUi>()
+        .invoke_revise(event.0.to_string().into(), "current".into());
+    assert!(
+        matches!(&commands.borrow()[3], Command::Preview(origin, ConversationChange::ReviseMessage(id, content))
+        if origin.character == CharacterId::Crazy && origin.selection_revision == 2 && *id == event && content == "current")
+    );
+    super::super::sandbox::apply(
+        &window,
+        Update::Confirmation(
+            ChatOrigin {
+                character: CharacterId::Crazy,
+                selection_revision: 2,
+            },
+            Some((
+                ConversationChange::ReviseMessage(event, "current".into()),
+                1,
+            )),
+        ),
+        &editor,
+        &revision,
+    );
+    assert_eq!(window.global::<ConversationUi>().get_confirmation(), 4);
+    window.global::<ConversationUi>().invoke_confirm();
+    assert!(matches!(&commands.borrow()[4], Command::Confirm(origin)
+        if origin.character == CharacterId::Crazy && origin.selection_revision == 2));
+    window.hide().unwrap();
+}
+
+#[test]
+fn chat_copy_selection_dialog_scopes_text_to_active_character() {
+    use super::super::{runtime::Command, sandbox::bind_chat_actions, view::ConversationUi};
+    use neuromita::character::CharacterId;
+
+    slint::platform::set_platform(Box::new(TestPlatform)).unwrap();
+    let window = AppWindow::new().unwrap();
+    window.show().unwrap();
+    let commands = Rc::new(RefCell::new(Vec::<Command>::new()));
+    let collected = Rc::clone(&commands);
+    let revision = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    bind_chat_actions(
+        &window,
+        Rc::new(move |command| collected.borrow_mut().push(command)),
+        revision.clone(),
+    );
+    window.set_chat_character(CharacterId::Crazy.index() as i32);
+    window.invoke_chat_copy_message("visible text A".into());
+    assert!(window.global::<ConversationUi>().get_copy_open());
+    assert_eq!(
+        window.global::<ConversationUi>().get_copy_text(),
+        "visible text A"
+    );
+
+    window.invoke_chat_select_character(CharacterId::Kind.index() as i32);
+    assert!(!window.global::<ConversationUi>().get_copy_open());
+    assert_eq!(window.global::<ConversationUi>().get_copy_text(), "");
+    window.invoke_chat_select_character(CharacterId::Crazy.index() as i32);
+    assert_eq!(revision.load(std::sync::atomic::Ordering::Acquire), 2);
+    assert!(!window.global::<ConversationUi>().get_copy_open());
+
+    window.invoke_chat_copy_message("new selection text".into());
+    assert!(window.global::<ConversationUi>().get_copy_open());
+    assert_eq!(
+        window.global::<ConversationUi>().get_copy_text(),
+        "new selection text"
+    );
+    window.invoke_chat_copy_message("".into());
+    assert_eq!(
+        window.global::<ConversationUi>().get_copy_text(),
+        "new selection text"
+    );
+    assert_eq!(commands.borrow().len(), 2, "copy must not mutate Timeline");
+    window.hide().unwrap();
+}
+
+#[test]
+fn chat_composer_cancel_and_microphone_actions_follow_selection_and_speech_state() {
+    use super::super::{
+        runtime::{ChatOrigin, Command, Update},
+        sandbox,
+        view::AppWindow,
+    };
+    use neuromita::{
+        audio::controller::{SpeechSessionPhase, SpeechSessionSnapshot},
+        character::CharacterId,
+    };
+
+    slint::platform::set_platform(Box::new(TestPlatform)).unwrap();
+    let window = AppWindow::new().unwrap();
+    window.show().unwrap();
+    window.set_chat_character(CharacterId::Crazy.index() as i32);
+    window.set_core_connected(true);
+    window.set_chat_generation_ready(true);
+    let revision = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let commands = Rc::new(RefCell::new(Vec::new()));
+    let collected = commands.clone();
+    sandbox::bind_chat_actions(
+        &window,
+        Rc::new(move |command| collected.borrow_mut().push(command)),
+        revision.clone(),
+    );
+
+    let request_id = uuid::Uuid::new_v4();
+    window.set_chat_active_request_id(request_id.to_string().into());
+    window.invoke_chat_cancel(request_id.to_string().into());
+    window.invoke_chat_microphone_toggle(true);
+    let owner = ChatOrigin {
+        character: CharacterId::Crazy,
+        selection_revision: 0,
+    };
+    assert!(
+        matches!(&commands.borrow()[0], Command::Cancel(origin, id) if *origin == owner && id.0 == request_id)
+    );
+    assert!(
+        matches!(&commands.borrow()[1], Command::ChatSpeechToggle(origin, true) if *origin == owner)
+    );
+
+    let editor = std::sync::Arc::new(std::sync::Mutex::new(
+        super::super::memory::MemoryEditor::default(),
+    ));
+    sandbox::apply(
+        &window,
+        Update::SpeechSessionStatus(SpeechSessionSnapshot {
+            phase: SpeechSessionPhase::Starting,
+            last_error: None,
+        }),
+        &editor,
+        &revision,
+    );
+    assert_eq!(window.get_chat_microphone_phase(), 1);
+    sandbox::apply(
+        &window,
+        Update::SpeechSessionStatus(SpeechSessionSnapshot {
+            phase: SpeechSessionPhase::Listening,
+            last_error: None,
+        }),
+        &editor,
+        &revision,
+    );
+    assert_eq!(window.get_chat_microphone_phase(), 2);
+    window.invoke_chat_microphone_toggle(false);
+    assert!(
+        matches!(&commands.borrow()[2], Command::ChatSpeechToggle(origin, false) if *origin == owner)
+    );
+
+    window.invoke_chat_select_character(CharacterId::Kind.index() as i32);
+    assert_eq!(window.get_chat_active_request_id(), "");
+    assert!(
+        matches!(&commands.borrow()[3], Command::Select(origin) if origin.character == CharacterId::Kind && origin.selection_revision == 1)
+    );
+    window.invoke_chat_microphone_toggle(true);
+    assert!(
+        matches!(&commands.borrow()[4], Command::ChatSpeechToggle(origin, true) if origin.character == CharacterId::Kind && origin.selection_revision == 1)
+    );
+    window.hide().unwrap();
+}
+
+#[test]
+fn chat_retry_callback_preserves_original_request_identity_and_selection() {
+    use super::super::{
+        runtime::{ChatOrigin, Command},
+        sandbox,
+        view::AppWindow,
+    };
+    use neuromita::character::CharacterId;
+
+    slint::platform::set_platform(Box::new(TestPlatform)).unwrap();
+    let window = AppWindow::new().unwrap();
+    window.show().unwrap();
+    window.set_chat_character(CharacterId::Crazy.index() as i32);
+    let revision = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let recorded = Rc::new(RefCell::new(Vec::new()));
+    let commands = recorded.clone();
+    sandbox::bind_chat_actions(
+        &window,
+        Rc::new(move |cmd| commands.borrow_mut().push(cmd)),
+        revision.clone(),
+    );
+    let first = uuid::Uuid::new_v4();
+    window.invoke_chat_retry(first.to_string().into());
+    assert!(matches!(&recorded.borrow()[0], Command::Retry(origin, id)
+        if *origin == ChatOrigin{ character: CharacterId::Crazy, selection_revision: 0 } && id.0 == first));
+    window.invoke_chat_select_character(CharacterId::Kind.index() as i32);
+    window.invoke_chat_select_character(CharacterId::Crazy.index() as i32);
+    let new_attempt = uuid::Uuid::new_v4();
+    window.invoke_chat_retry(new_attempt.to_string().into());
+    assert!(matches!(&recorded.borrow()[3], Command::Retry(origin, id)
+        if *origin == ChatOrigin { character: CharacterId::Crazy, selection_revision: 2 } && id.0 == new_attempt));
+    window.hide().unwrap();
 }

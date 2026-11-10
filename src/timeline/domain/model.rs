@@ -75,8 +75,13 @@ pub enum EventKind {
     MessageRevised,
     MessageRestored,
     CharacterContextReset,
+    CharacterKnowledgeForgotten,
+    CharacterKnowledgeRevealed,
     Checkpoint,
     BranchCreated,
+    RegenerateAdmitted,
+    RegenerateAbandoned,
+    RegenerateMayHaveDispatched,
 }
 
 impl EventKind {
@@ -108,6 +113,7 @@ pub enum CausalRelation {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CausalLink {
     pub relation: CausalRelation,
     pub event_id: EventId,
@@ -123,6 +129,7 @@ pub trait Event {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EventDraft {
     pub id: EventId,
     pub kind: EventKind,
@@ -183,6 +190,7 @@ impl Event for EventDraft {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TimelineFact {
     pub session_id: SessionId,
     pub branch_id: BranchId,
@@ -212,6 +220,7 @@ pub struct KnownEvent {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BranchInfo {
     pub id: BranchId,
     pub session_id: SessionId,

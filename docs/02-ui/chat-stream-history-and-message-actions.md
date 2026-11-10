@@ -45,3 +45,84 @@ Context snapshots содержат фактические messages/prompt/respon
 Тесты по кейсам: async history snapshot с новым incoming message; переключение персонажа во время generation; stream mounted при reload; duplicate user/assistant message id; errored outgoing bubble после reload; deletion mid-stream; history page excludes persisted live row; >256 pending messages; invalid `ctx_...` missing; sample-id fallback; non-JSON context; multiple think/image blocks. Текущий исходник содержит тестовые файлы `src/utils/Testing/test_chat_presentation_coordinator.py`, `test_release_history_loading.py`, однако они здесь **не запускались**.
 
 **Незакрытый scope:** `message_renderer.py` full modality rendering, structured panel UI and all downstream ChatController action handlers; их следует проверить отдельным проходом. См. [chat composer](chat-composer-and-attachments.md), [Sandbox](sandbox-page-functional-contract.md), [history](../01-functional/history.md), [source traceability](../06-design-input/feature-traceability.md).
+
+## Rust Slint: B50 refresh/live projection (2026-11-07)
+
+The active Rust desktop chat uses a single authoritative `ConversationPresenter::snapshot` (Timeline's character-visible messages plus independently observed request states). The last 200 visible events and their current request previews are **a disposable UI projection**, not a second persistent history/cache. When a refresh or live request update arrives for the same `ChatOrigin`, the Slint renderer now reconciles rows in the existing `VecModel` by committed sequence or provisional `RequestId`, rather than assigning a new model for every snapshot. Unchanged rows produce no row update; text/status changes update the existing row; a committed event replaces the provisional request row exactly once; removing the oldest row at the 200-message window preserves the remaining rows and model identity. An unrelated selection/branch snapshot replaces its visible rows, without retaining hidden records in a UI cache.
+
+This is a narrower contract than the audited Python `HistoryLoadTicket` and `ChatPresentationCoordinator`. The Rust GUI still does **not** expose independent history page requests or their late-page ticket checks, a per-message edit/delete/regenerate menu, or ASR capture-start provenance. Those require separate acceptance and cannot be inferred from this refresh/live model reconciliation.
+
+## Rust Slint B51: per-message hide by immutable EventId
+
+A committed user/assistant message row now exposes a *hide for this character* action backed by its canonical Timeline `EventId`, never by a display sequence or provisional `RequestId`. The action first prepares a `ConversationChange::HideMessage(event_id)` against the selected character's immutable MitaView; an invisible/foreign/already-hidden target fails before opening a confirmation. The confirmation owner remains `ChatOrigin(character, selection_revision)` and the runtime's pending preview. On confirm, the presenter checks the saved `ContextAnchor` and `TimelineSelection` before atomically appending one character-observed `MessageHidden` fact; original events are immutable and other character views are unaffected. An in-flight selection A→B→A cannot confirm the old target. This is a narrow context-menu parity action, not physical deletion, edit, regeneration, or paginated history.
+
+## Rust Slint B52: bounded canonical older-page requests
+
+The Rust GUI exposes **Load 200 older messages** only when an active `ConversationSnapshot` has more observer-visible canonical rows than the current mounted window. The command carries a unique page ticket, `ChatOrigin(character, selection_revision)`, a fixed `ContextAnchor(branch_id, through)`, the exact `TimelineSelection(branch_id, generation)`, and an offset from the visible tail. `ConversationPresenter::history_page` reads a bounded typed `MitaView::message_page(200, offset)` and checks the anchor and selection both before and after the character context capture. A selection of the *same* branch with a new generation invalidates the old page, even if head/branch UUID are unchanged.
+
+The GUI only prepends a page if the ticket, owner, original offset, total count, anchor and selection generation all still match. A late A→B→A result, hidden/edited message changing Timeline head, branch change, repeated page, or mismatched total cannot resurrect older rows. The already-mounted Slint `VecModel` remains the only display buffer; request/streaming rows are preserved, no duplicated older `EventId` is appended, and subsequent live refreshes reconcile visible history from the canonical Timeline snapshot. The existing snapshot API still exposes all observer-visible messages (including those outside the mounted UI window); B52's separate page read is bounded but is **not yet a bounded initial backend snapshot** or durable history index.
+
+This only closes older-page load and late-page fencing. Copy/edit/regenerate/retry context actions, ASR capture-start provenance, and complete Python PyQt menu parity still require separate acceptance.
+
+## Rust Slint B53: edit one text-only canonical message
+
+A persisted message's **Edit** control opens a local text editor tied to its immutable Timeline `EventId`. The save action prepares `ConversationChange::ReviseMessage(event_id, content)` for the currently selected character and requires explicit confirmation. It refuses a foreign/invisible message, empty replacement, or a non-text (including mixed media) canonical `content` representation rather than discarding assets. As with B51 hide, pending preview is scoped to `ChatOrigin(character, selection_revision)`; the presenter pins the exact `ContextAnchor` and `TimelineSelection`, and the existing atomic `SessionTimeline::change_message` emits an observer-specific `MessageRevised` event on confirm. The original event and another character's history remain unchanged. Selecting A→B→A clears the editor and rejects old confirmation.
+
+This does **not** implement PyQt's delete-from-here flow or automatic regeneration of subsequent responses. A single-message revision is a distinct timeline semantics, not a replay of the original reply. Copy selection/all, retry, regenerate and request/response context still remain separate work.
+
+## Rust Slint B54: live-head history continuity and selection-copy panel
+
+The `HistoryPager` retains the number of loaded canonical rows when a new Timeline
+head is accepted **within the same character and selection generation**. A newly
+visible reply expands the mounted tail by the number of new canonical messages,
+so the oldest loaded page is not silently dropped on the next live refresh. The
+canonical `ConversationSnapshot` still rebuilds the visible projection from the
+current MitaView; an edit or hide reprojects the current window rather than
+replaying stale saved rows. Any head/total change cancels the pending older-page
+ticket. Character reselection, including A→B→A, or branch generation changes
+still reset the page window to the latest 200 rows.
+
+Each nonempty message text now exposes a **select and copy** action that opens a
+read-only Slint `TextInput` containing the visible text from the selected bubble.
+Users can select a substring and use the native `Ctrl+C` shortcut, or `Ctrl+A`
+followed by `Ctrl+C` to copy all text. This is deliberately a keyboard-driven
+copy surface, **not** an instantaneous platform clipboard write and not a claim
+that attached binary media or request diagnostics are copied. It has no backend
+command and cannot append Timeline facts. Switching characters closes the
+copy surface and discards its text; it is never stored as independent history.
+
+## Rust Slint B56: retry failed reply without a second user event
+
+The persistent Rust Timeline records the **player message before generation**, unlike
+some legacy PyQt failure paths where unsuccessful messages were not committed.
+Consequently, the Python `RetryLastChat` wording cannot be translated into a new
+`reply(text)` call: that would persist a duplicate player event. The real Rust
+**Retry** control is shown only on the latest failed or cancelled presenter-owned
+reply, and it sends the original request's `RequestId` as an operation token.
+`ConversationPresenter::retry_failed` resolves its `TurnIntent::Reply(EventId)`,
+requires that event to still be the most recent visible player message, and
+re-admits that same EventId with a **new** RequestId. The retry path never calls
+`publish_message` and never hides/revises historical messages.
+
+Retries are limited to one submission per failed attempt (with the new attempt's
+ID eligible for its own retry if it subsequently fails), and cannot be used for
+accepted responses, voice-only failures after text acceptance, foreign-character
+requests, older superseded requests, or non-reply intents. A typed
+`TimelineFence { at: ContextAnchor, selection: TimelineSelection }` is validated
+under the *actual request-admission Timeline lock* so branch changes, same-branch
+reselection and a new head are rejected without creating a queued request.
+An admission failure releases the retry claim; a successful registration claims
+only the previous request identity, not its user event. Backend acceptance and
+streaming continue to use existing request lifecycle ownership and cancellation.
+
+**PyQt evidence, not inferred UI parity:** `src/ui/widgets/chat_panel.py` on
+`Atm4x/NeuroMita/main` confirms the same fixed 42×42 Send/Stop button, a white
+rounded-square stop glyph and cancellation on click. The PyQt widget keeps the
+"typing" bar at the bottom of the *message scroll*, whereas the B55 Slint
+status is below the composer. The PyQt composer currently contains attach,
+text input, camera and Send/Stop; the microphone control is on the separate
+session panel. Slint B55 added a composer microphone by request, but this is
+**not** pixel-perfect PyQt composer parity. Actual capture amplitude and a
+hardware/Windows screenshot comparison remain unverified. Regenerate-from-here
+is **not** implemented by retry; its downstream history semantics must be
+handled in a separate atomic Timeline operation.

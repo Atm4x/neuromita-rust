@@ -51,7 +51,8 @@ use crate::{
     prompts::PromptCatalog,
     reminders::{ReminderConfig, ReminderService},
     request::{
-        ChatApiState, MessageHandler, RequestId, RequestIngress, RequestRegistry, SubmitError,
+        ChatApiState, MessageHandler, ProviderDispatchFence, RegenerateCancellation,
+        RegenerateProtocol, RequestId, RequestIngress, RequestRegistry, SubmitError,
     },
     runtime::{self, ApiBindings, RuntimeLease},
     server::{ServerConfig, ServerHandle, ServerLifecycle},
@@ -60,7 +61,8 @@ use crate::{
         SettingsError, SettingsLifecycle, SettingsSource, SettingsStartupMigration,
     },
     timeline::{
-        SessionTimeline, TimelineConfig, TimelineEvent,
+        RegenerateConfigurationReference, RegenerateRecoveryOutcome, RegenerateSource,
+        SameBranchRegenerateReceipt, SessionTimeline, TimelineConfig, TimelineEvent,
         conversation::ConversationMessage,
         domain::{BranchId, TimelineError, TimelineFact},
         ingress::SemanticBatch,
@@ -109,6 +111,7 @@ pub struct ApplicationConfig {
     pub ai_knowledge: Option<AiKnowledgeSelection>,
     pub settings: SettingsConfig,
     pub timeline: TimelineConfig,
+    pub timeline_assets: Option<Arc<crate::timeline::storage::assets::TimelineAssetStore>>,
     pub server: ServerConfig,
     pub game_link: Option<GameLinkConfig>,
     pub finetune: Option<FineTuneSettings>,
@@ -139,6 +142,7 @@ impl ApplicationConfig {
             server: ServerConfig::local_control(bind),
             game_link: None,
             timeline: TimelineConfig::Transient,
+            timeline_assets: None,
             presets,
             prompts: None,
             generator,
@@ -247,6 +251,12 @@ impl ApplicationConfig {
         config.timeline = TimelineConfig::Persistent {
             database: data_directory.join("timeline.sqlite3"),
         };
+        config.timeline_assets = Some(Arc::new(
+            crate::timeline::storage::assets::TimelineAssetStore::new(
+                data_directory.join("TimelineAssets"),
+                8 * 1024 * 1024,
+            )?,
+        ));
         let repository: Arc<dyn PresetRepository> = Arc::new(JsonPresetRepository::new(
             data_directory.join("presets.json"),
         ));
@@ -290,6 +300,8 @@ pub enum ApplicationError {
     #[error(transparent)]
     Timeline(#[from] TimelineError),
     #[error(transparent)]
+    Assets(#[from] crate::timeline::storage::assets::TimelineAssetError),
+    #[error(transparent)]
     Ai(#[from] AiApplicationError),
     #[error(transparent)]
     SpeechBinding(#[from] crate::ai_runtime::application::AiSpeechBindingError),
@@ -320,8 +332,196 @@ pub struct ApplicationLifecycle {
     completion: Option<oneshot::Receiver<Result<(), ApplicationError>>>,
 }
 
+/// The top-level owner samples Timeline after local notifications or an
+/// occasional idle poll. Notifications only schedule a read; a foreign SQLite
+/// writer never has to deliver them. No provider request is made here.
+fn reconcile_semantic_knowledge(
+    timeline: &Mutex<SessionTimeline>,
+    knowledge: &KnowledgeRetrieval,
+    character: CharacterId,
+) -> Result<(), String> {
+    let timeline = timeline.lock().map_err(|error| error.to_string())?;
+    let turn = timeline
+        .capture_turn(character, None, timeline.anchor())
+        .map_err(|error| error.to_string())?;
+    if !knowledge.needs_authoritative_refresh(character, turn) {
+        return Ok(());
+    }
+    let (_selection, anchor, world) = timeline
+        .selected_world_snapshot()
+        .map_err(|error| error.to_string())?;
+    if anchor.through != turn.context_head {
+        return Err("Timeline moved while reconciling knowledge".into());
+    }
+    let memories = crate::character::projection::character_memories_at(&world, character)
+        .map_err(|error| error.to_string())?
+        .all();
+    let after = timeline
+        .capture_turn(character, None, timeline.anchor())
+        .map_err(|error| error.to_string())?;
+    if turn != after {
+        return Err("Timeline advanced during knowledge reconciliation".into());
+    }
+    knowledge
+        .refresh_authoritative(character, turn, &memories)
+        .map_err(|error| error.to_string())
+}
+
+async fn run_semantic_knowledge_reconciler(
+    timeline: Arc<Mutex<SessionTimeline>>,
+    knowledge: Arc<KnowledgeRetrieval>,
+    character: CharacterId,
+    mut memories: tokio::sync::watch::Receiver<u64>,
+    mut context: tokio::sync::watch::Receiver<u64>,
+    stop: CancellationToken,
+) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            biased;
+            _ = stop.cancelled() => break,
+            changed = memories.changed() => if changed.is_err() { break; },
+            changed = context.changed() => if changed.is_err() { break; },
+            _ = interval.tick() => {},
+        }
+        if let Err(error) = reconcile_semantic_knowledge(&timeline, &knowledge, character) {
+            tracing::warn!(%character, %error, "authoritative semantic cache refresh deferred");
+        }
+    }
+}
+
 struct TimelineRequestIngress {
     timeline: Arc<Mutex<SessionTimeline>>,
+}
+
+impl ProviderDispatchFence for TimelineRequestIngress {
+    fn before_provider(
+        &self,
+        request: RequestId,
+        admission: TimelineAdmission,
+        protocol: Option<RegenerateProtocol>,
+    ) -> Result<(), String> {
+        if protocol.is_none() {
+            return Ok(());
+        }
+        let mut timeline = self
+            .timeline
+            .lock()
+            .map_err(|_| "timeline mutex poisoned".to_owned())?;
+        let child = admission.selection.branch_id;
+        if protocol == Some(RegenerateProtocol::SameBranch) {
+            return timeline
+                .permit_same_branch_regenerate_dispatch(child, request, admission.selection)
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+        }
+        let Some(receipt) = timeline
+            .regenerate_admission_receipt(child)
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(());
+        };
+        if receipt.request != request {
+            return Ok(());
+        }
+        timeline
+            .permit_regenerate_dispatch(child, request, admission.selection)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+}
+
+impl RegenerateCancellation for TimelineRequestIngress {
+    fn abandon_regenerate(
+        &self,
+        request: RequestId,
+        admission: TimelineAdmission,
+    ) -> Result<(), crate::timeline::domain::TimelineError> {
+        self.timeline
+            .lock()
+            .map_err(|_| {
+                crate::timeline::domain::TimelineError::Storage(
+                    "timeline mutex poisoned".to_owned(),
+                )
+            })?
+            .abandon_regenerate_request(admission.selection.branch_id, request, admission.selection)
+            .map(|_| ())
+    }
+    fn inspect_regenerate(
+        &self,
+        child: BranchId,
+        request: RequestId,
+    ) -> Result<crate::timeline::RegenerateRecoverySnapshot, crate::timeline::domain::TimelineError>
+    {
+        self.timeline
+            .lock()
+            .map_err(|_| TimelineError::Storage("timeline mutex poisoned".to_owned()))?
+            .reconcile_regenerate(child, request)
+    }
+
+    fn abandon_same_branch_regenerate(
+        &self,
+        request: RequestId,
+        admission: TimelineAdmission,
+    ) -> Result<(), TimelineError> {
+        self.timeline
+            .lock()
+            .map_err(|_| TimelineError::Storage("timeline mutex poisoned".to_owned()))?
+            .abandon_same_branch_regenerate_request(admission.selection.branch_id, request)
+            .map(|_| ())
+    }
+
+    fn inspect_same_branch_regenerate(
+        &self,
+        branch: BranchId,
+        request: RequestId,
+    ) -> Result<RegenerateRecoveryOutcome, TimelineError> {
+        self.timeline
+            .lock()
+            .map_err(|_| TimelineError::Storage("timeline mutex poisoned".to_owned()))?
+            .reconcile_same_branch_regenerate(branch, request)
+            .map(|snapshot| snapshot.outcome)
+    }
+
+    fn abandon_orphaned_same_branch_regenerate(
+        &self,
+        branch: BranchId,
+        request: RequestId,
+    ) -> Result<RegenerateRecoveryOutcome, TimelineError> {
+        let mut timeline = self
+            .timeline
+            .lock()
+            .map_err(|_| TimelineError::Storage("timeline mutex poisoned".to_owned()))?;
+        let current = timeline
+            .reconcile_same_branch_regenerate(branch, request)?
+            .outcome;
+        if matches!(
+            current,
+            RegenerateRecoveryOutcome::AcceptedReply(_) | RegenerateRecoveryOutcome::Abandoned(_)
+        ) {
+            return Ok(current);
+        }
+        match timeline.abandon_same_branch_regenerate_request(branch, request) {
+            Ok(event) => Ok(RegenerateRecoveryOutcome::Abandoned(event)),
+            Err(error) => {
+                if matches!(
+                    error,
+                    TimelineError::Conflict | TimelineError::ConcurrentWrite
+                ) && let Ok(snapshot) =
+                    timeline.reconcile_same_branch_regenerate(branch, request)
+                    && matches!(
+                        snapshot.outcome,
+                        RegenerateRecoveryOutcome::AcceptedReply(_)
+                            | RegenerateRecoveryOutcome::Abandoned(_)
+                    )
+                {
+                    return Ok(snapshot.outcome);
+                }
+                Err(error)
+            }
+        }
+    }
 }
 
 impl RequestIngress for TimelineRequestIngress {
@@ -363,6 +563,7 @@ impl RequestIngress for TimelineRequestIngress {
         &self,
         character: CharacterId,
         intent: TurnIntent,
+        fence: Option<crate::request::TimelineFence>,
     ) -> Result<TimelineAdmission, SubmitError> {
         let timeline = self
             .timeline
@@ -372,6 +573,11 @@ impl RequestIngress for TimelineRequestIngress {
         timeline
             .assert_selection(selection)
             .map_err(|_| SubmitError::TimelineUnavailable)?;
+        if fence.is_some_and(|expected| {
+            expected.selection != selection || expected.at != timeline.anchor()
+        }) {
+            return Err(SubmitError::StaleTimeline);
+        }
         if let TurnIntent::Reply(_) | TurnIntent::React(_) = intent {
             timeline
                 .reaction_cause_at(character, intent, timeline.anchor())
@@ -380,6 +586,86 @@ impl RequestIngress for TimelineRequestIngress {
         timeline
             .admission(character, selection)
             .map_err(|_| SubmitError::TimelineUnavailable)
+    }
+
+    fn admit_regenerate(
+        &self,
+        source: RegenerateSource,
+        fence: crate::request::TimelineFence,
+        child: BranchId,
+        receipt: &crate::timeline::RegenerateAdmissionReceipt,
+    ) -> Result<TimelineAdmission, SubmitError> {
+        let mut timeline = self
+            .timeline
+            .lock()
+            .map_err(|_| SubmitError::TimelineUnavailable)?;
+        if fence.at.branch_id != fence.selection.branch_id.0 {
+            return Err(SubmitError::StaleTimeline);
+        }
+        timeline
+            .fork_and_admit_regenerate_source(
+                source,
+                child,
+                fence.selection,
+                fence.at.through,
+                receipt,
+            )
+            .map_err(|error| match error {
+                TimelineError::ConcurrentWrite => SubmitError::StaleTimeline,
+                TimelineError::Invalid(_) | TimelineError::NotFound | TimelineError::Conflict => {
+                    SubmitError::InvalidTargetEvent
+                }
+                _ => SubmitError::TimelineUnavailable,
+            })
+    }
+
+    fn admit_same_branch_regenerate(
+        &self,
+        source: RegenerateSource,
+        fence: crate::request::TimelineFence,
+        request: RequestId,
+        configuration: RegenerateConfigurationReference,
+    ) -> Result<TimelineAdmission, SubmitError> {
+        let mut timeline = self
+            .timeline
+            .lock()
+            .map_err(|_| SubmitError::TimelineUnavailable)?;
+        if fence.selection.branch_id.0 != fence.at.branch_id {
+            return Err(SubmitError::StaleTimeline);
+        }
+        let plan = timeline
+            .plan_knowledge_regenerate(source, fence.selection, fence.at.through)
+            .map_err(|error| match error {
+                TimelineError::ConcurrentWrite => SubmitError::StaleTimeline,
+                TimelineError::Invalid(_) | TimelineError::NotFound | TimelineError::Conflict => {
+                    SubmitError::InvalidTargetEvent
+                }
+                _ => SubmitError::TimelineUnavailable,
+            })?;
+        let receipt = SameBranchRegenerateReceipt {
+            request,
+            accepted_request: source.accepted_request,
+            accepted_message: source.accepted_message,
+            original_input: source.original_input,
+            character: source.character,
+            branch: fence.selection.branch_id,
+            source_head: plan.head,
+            selection_generation: fence.selection.generation,
+            hide_operation: EventId::new(),
+            forget_operation: (!plan.forget_events.is_empty()).then(EventId::new),
+            hidden_messages: plan.hide_messages.clone(),
+            forgotten_events: plan.forget_events.clone(),
+            configuration,
+        };
+        timeline
+            .admit_same_branch_regenerate(&plan, &receipt, EventId::new())
+            .map_err(|error| match error {
+                TimelineError::ConcurrentWrite => SubmitError::StaleTimeline,
+                TimelineError::Invalid(_) | TimelineError::NotFound | TimelineError::Conflict => {
+                    SubmitError::InvalidTargetEvent
+                }
+                _ => SubmitError::TimelineUnavailable,
+            })
     }
 }
 
@@ -431,6 +717,7 @@ impl ApplicationLifecycle {
             ai_knowledge,
             settings,
             timeline,
+            timeline_assets,
             server,
             game_link,
             finetune,
@@ -597,7 +884,7 @@ impl ApplicationLifecycle {
         let (releases, release_lifecycle) = ReleasesPresenter::new(release_feed);
         let releases_task = tokio::spawn(release_lifecycle.run(presenter_stop.child_token()));
         let reminders_wake = Arc::new(tokio::sync::Notify::new());
-        let (characters, owners) = CharacterRegistry::spawn_with_reminders(
+        let (characters, mut owners) = CharacterRegistry::spawn_with_reminders(
             Arc::clone(&timeline),
             owners_stop.clone(),
             limits.character_commands.get(),
@@ -610,6 +897,23 @@ impl ApplicationLifecycle {
         let generator = Arc::new(generator);
         let knowledge = Arc::new(knowledge);
         let presets = Arc::new(presets);
+        for id in CharacterId::ALL {
+            let (memory_updates, context_updates) = {
+                let timeline = timeline.lock().expect("timeline lock poisoned");
+                (
+                    timeline.observe_memory_changes(id),
+                    timeline.observe_context_epoch(id),
+                )
+            };
+            owners.push(tokio::spawn(run_semantic_knowledge_reconciler(
+                Arc::clone(&timeline),
+                Arc::clone(&knowledge),
+                id,
+                memory_updates,
+                context_updates,
+                owners_stop.clone(),
+            )));
+        }
         let games = Arc::new(games);
         for id in CharacterId::ALL {
             characters
@@ -619,6 +923,10 @@ impl ApplicationLifecycle {
                 .await
                 .map_err(|error| ApplicationError::Task(error.to_string()))?;
         }
+        let shared_ingress = Arc::new(TimelineRequestIngress {
+            timeline: Arc::clone(&timeline),
+        });
+        let dispatch_fence: Arc<dyn ProviderDispatchFence> = shared_ingress.clone();
         let mut handlers = HashMap::new();
         let mut workers = Vec::new();
         for id in CharacterId::ALL {
@@ -641,14 +949,14 @@ impl ApplicationLifecycle {
                 selection_updates: selection_updates.clone(),
                 context_updates,
                 games: Arc::clone(&games),
+                assets: timeline_assets.clone(),
+                dispatch_fence: Arc::clone(&dispatch_fence),
             };
             workers.push(tokio::spawn(
                 worker.run_queue(receive, workers_stop.clone()),
             ));
         }
-        let ingress: Arc<dyn RequestIngress> = Arc::new(TimelineRequestIngress {
-            timeline: Arc::clone(&timeline),
-        });
+        let ingress: Arc<dyn RequestIngress> = shared_ingress;
         let api = Arc::new(ChatApiState::new(
             registry,
             handlers,
@@ -997,6 +1305,40 @@ impl ApplicationLifecycle {
             .publish_conversation_message(expected, message)
     }
 
+    /// Publish an attachment-bearing event only after verifying all binary
+    /// references, under the same Timeline selection lock as the canonical write.
+    /// An unsuccessful append may leave an orphan object; it never records a
+    /// receipt for an unavailable reference. The asset root is injected.
+    pub fn publish_attached_conversation_message(
+        &self,
+        expected: TimelineSelection,
+        message: ConversationMessage,
+        assets: &crate::timeline::storage::assets::TimelineAssetStore,
+    ) -> Result<TimelineFact, crate::timeline::storage::assets::TimelineAttachmentCommitError> {
+        use crate::timeline::{
+            domain::parse_message_content,
+            storage::assets::{TimelineAssetError, TimelineAttachmentCommitError},
+        };
+        let mut timeline = self
+            .timeline
+            .lock()
+            .map_err(|_| TimelineError::Storage("timeline lock poisoned".into()))?;
+        timeline.assert_selection(expected)?;
+        let parts = parse_message_content(&message.content)
+            .map_err(|_| TimelineAssetError::InvalidReference)?;
+        if !parts.iter().any(|part| part.asset().is_some()) {
+            return Err(TimelineAttachmentCommitError::Asset(
+                TimelineAssetError::InvalidReference,
+            ));
+        }
+        for part in parts {
+            if let Some(reference) = part.asset() {
+                assets.verify(reference)?;
+            }
+        }
+        Ok(timeline.publish_conversation_message(expected, message)?)
+    }
+
     /// Change the presentation of already known conversation messages for one character.
     /// The operation EventId must be preserved when retrying an uncertain write.
     pub fn change_message(
@@ -1258,3 +1600,11 @@ impl Lifecycle for ApplicationLifecycle {
         self.shutdown().await
     }
 }
+
+#[cfg(test)]
+#[path = "app/regenerate_admission_tests.rs"]
+mod regenerate_admission_tests;
+
+#[cfg(test)]
+#[path = "app/regenerate_b86_tests.rs"]
+mod regenerate_b86_tests;

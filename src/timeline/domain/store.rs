@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -7,21 +8,25 @@ use crate::identity::{CharacterId, EventId};
 
 use super::{
     index::{AppendIndex, WorldIndex, WorldLookup},
+    messages::CharacterMessageProjection,
     model::{
         BranchId, BranchInfo, CausalRelation, EventDraft, EventKind, KnownEvent, SessionId,
         TimelineError, TimelineFact,
     },
     projection::{character_view, present_characters},
+    provenance::SessionProvenance,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Receipt {
-    command: Value,
-    drafts: Vec<EventDraft>,
-    result: Vec<TimelineFact>,
+    pub(crate) command: Value,
+    pub(crate) drafts: Vec<EventDraft>,
+    pub(crate) result: Vec<TimelineFact>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Branch {
     pub(crate) info: BranchInfo,
     pub(crate) events: Vec<TimelineFact>,
@@ -32,6 +37,7 @@ pub(crate) struct Branch {
 pub struct TimelineStore {
     branches: HashMap<BranchId, Branch>,
     indexes: HashMap<BranchId, WorldIndex>,
+    provenance: HashMap<SessionId, SessionProvenance>,
 }
 
 impl Receipt {
@@ -64,14 +70,130 @@ impl TimelineStore {
         Self::default()
     }
 
-    #[cfg(feature = "sqlite-system")]
     pub(crate) fn persisted_branches(&self) -> Vec<Branch> {
         let mut branches: Vec<_> = self.branches.values().cloned().collect();
         branches.sort_by_key(|branch| branch.info.id.0);
         branches
     }
 
-    #[cfg(feature = "sqlite-system")]
+    pub fn session_provenance(&self, session: SessionId) -> Option<&SessionProvenance> {
+        self.provenance.get(&session)
+    }
+
+    pub(crate) fn load_persisted_with_provenance(
+        branches: Vec<Branch>,
+        provenance: Vec<(SessionId, SessionProvenance)>,
+    ) -> Result<Self, TimelineError> {
+        let mut store = Self::load_persisted(branches)?;
+        for (session, source) in provenance {
+            if store.provenance.insert(session, source).is_some() {
+                return Err(TimelineError::Storage(
+                    "duplicate session provenance".into(),
+                ));
+            }
+        }
+        store.validate_provenance()?;
+        Ok(store)
+    }
+
+    fn validate_provenance(&self) -> Result<(), TimelineError> {
+        let mut external_sessions = HashSet::new();
+        for (session, provenance) in &self.provenance {
+            if !external_sessions.insert((provenance.source, &provenance.external_session_id)) {
+                return Err(TimelineError::Storage(
+                    "external session identity collision".into(),
+                ));
+            }
+            if provenance.external_session_id.is_empty()
+                || provenance.external_session_id.trim() != provenance.external_session_id
+                || provenance
+                    .external_branches
+                    .values()
+                    .any(|id| id.is_empty() || id.trim() != id)
+                || provenance.external_events.values().any(|entry| {
+                    entry.external_event_id.is_empty()
+                        || entry.external_event_id.trim() != entry.external_event_id
+                })
+                || provenance
+                    .observer_bindings
+                    .keys()
+                    .any(|id| id.is_empty() || id.trim() != id)
+            {
+                return Err(TimelineError::Storage(
+                    "invalid external provenance identity".into(),
+                ));
+            }
+            let branches = self
+                .branches
+                .values()
+                .filter(|branch| branch.info.session_id == *session)
+                .collect::<Vec<_>>();
+            if branches.is_empty() {
+                return Err(TimelineError::Storage("provenance session missing".into()));
+            }
+            let root = branches
+                .iter()
+                .find(|branch| branch.info.parent.is_none())
+                .ok_or_else(|| TimelineError::Storage("provenance session root missing".into()))?;
+            if !provenance.external_branches.contains_key(&root.info.id.0) {
+                return Err(TimelineError::Storage("provenance root not mapped".into()));
+            }
+            let mut mapped_branches = 0;
+            let mut mapped_events = 0;
+            let mut branch_sources = HashSet::new();
+            for branch in branches {
+                if let Some(source) = provenance.external_branches.get(&branch.info.id.0) {
+                    mapped_branches += 1;
+                    if !branch_sources.insert(source) {
+                        return Err(TimelineError::Storage(
+                            "duplicate external branch identity".into(),
+                        ));
+                    }
+                }
+                for fact in &branch.events {
+                    let Some(entry) = provenance.external_events.get(&fact.draft.id.0) else {
+                        continue;
+                    };
+                    mapped_events += 1;
+                    let parsed =
+                        DateTime::<FixedOffset>::parse_from_rfc3339(&entry.occurred_at_iso8601)
+                            .map_err(|_| {
+                                TimelineError::Storage("invalid provenance time".into())
+                            })?;
+                    if parsed.timestamp_micros() != entry.occurred_at_unix_us
+                        || entry.occurred_at_unix_us < 0
+                        || (entry.occurred_at_unix_us as u64) / 1000
+                            != fact.draft.occurred_at_unix_ms
+                    {
+                        return Err(TimelineError::Storage(
+                            "provenance timestamp does not match fact".into(),
+                        ));
+                    }
+                }
+            }
+            let event_sources = provenance
+                .external_events
+                .values()
+                .map(|entry| &entry.external_event_id)
+                .collect::<HashSet<_>>();
+            if mapped_branches != provenance.external_branches.len()
+                || mapped_events != provenance.external_events.len()
+                || event_sources.len() != mapped_events
+                || provenance
+                    .observer_bindings
+                    .values()
+                    .collect::<HashSet<_>>()
+                    .len()
+                    != provenance.observer_bindings.len()
+            {
+                return Err(TimelineError::Storage(
+                    "duplicate external provenance mapping".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn load_persisted(branches: Vec<Branch>) -> Result<Self, TimelineError> {
         let mut map = HashMap::new();
         let mut roots = HashMap::new();
@@ -120,6 +242,7 @@ impl TimelineStore {
         let store = Self {
             branches: map,
             indexes: HashMap::new(),
+            provenance: HashMap::new(),
         };
         for info in store.branches.values().map(|branch| branch.info) {
             let mut visited = HashSet::new();
@@ -134,7 +257,202 @@ impl TimelineStore {
                     .and_then(|branch| branch.info.parent);
             }
         }
+        store.validate_regenerate_admissions()?;
         Ok(store)
+    }
+
+    /// Validate all durable child admissions after loading either SQLite or a
+    /// native archive. Old checkpoint/player forks without receipts are valid.
+    fn validate_regenerate_admissions(&self) -> Result<(), TimelineError> {
+        let mut requests = HashSet::new();
+        for branch in self.branches.values() {
+            let markers = branch
+                .events
+                .iter()
+                .filter(|fact| fact.draft.kind == EventKind::RegenerateAdmitted)
+                .collect::<Vec<_>>();
+            if !markers.is_empty() {
+                let world = self.world(branch.info.id)?;
+                for marker in markers {
+                    let receipt = crate::timeline::regenerate_receipt::SameBranchRegenerateReceipt::from_fact(&marker.draft)?;
+                    if !requests.insert((branch.info.session_id, receipt.request)) {
+                        return Err(TimelineError::Conflict);
+                    }
+                    let start = usize::try_from(receipt.source_head)
+                        .map_err(|_| TimelineError::Conflict)?;
+                    let count = usize::from(receipt.forget_operation.is_some()) + 2;
+                    if marker.sequence != receipt.source_head + count as u64
+                        || world.len() < start + count
+                    {
+                        return Err(TimelineError::Invalid(
+                            "invalid persisted admission sequence",
+                        ));
+                    }
+                    let drafts = world[start..start + count]
+                        .iter()
+                        .map(|fact| fact.draft.clone())
+                        .collect::<Vec<_>>();
+                    super::validate_same_branch_admission(
+                        branch.info.id,
+                        &world[..start],
+                        &drafts,
+                    )?;
+                }
+            }
+            let Some(parent) = branch.info.parent else {
+                continue;
+            };
+            let Some(marker) = branch.events.first() else {
+                return Err(TimelineError::Storage("missing branch marker".into()));
+            };
+            let Some(receipt) =
+                crate::timeline::RegenerateAdmissionReceipt::from_marker(&marker.draft.payload)?
+            else {
+                continue;
+            };
+            if marker.draft.kind != EventKind::BranchCreated
+                || branch.info.checkpoint != Some(receipt.original_input)
+                || marker
+                    .draft
+                    .payload
+                    .get("parent_branch_id")
+                    .and_then(Value::as_str)
+                    != Some(parent.0.to_string().as_str())
+                || marker
+                    .draft
+                    .payload
+                    .get("input_event_id")
+                    .and_then(Value::as_str)
+                    != Some(receipt.original_input.0.to_string().as_str())
+                || marker
+                    .draft
+                    .payload
+                    .get("character_id")
+                    .and_then(Value::as_str)
+                    != Some(receipt.character.to_string().as_str())
+                || !requests.insert((branch.info.session_id, receipt.request))
+            {
+                return Err(TimelineError::Invalid(
+                    "duplicate or invalid regenerate admission marker",
+                ));
+            }
+            receipt.validate(
+                self,
+                parent,
+                branch.info.id,
+                receipt.original_input,
+                receipt.character,
+            )?;
+            if self.event(parent, receipt.original_input)?.sequence != branch.info.fork_sequence {
+                return Err(TimelineError::Invalid(
+                    "regenerate fork does not preserve input anchor",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Replay imported receipts through the same domain append validator used
+    /// by live writes. Fork markers are canonical synthetic facts, not user
+    /// append operations; their shape is checked by the archive boundary.
+    pub(crate) fn validate_archive_receipts(branches: &[Branch]) -> Result<(), TimelineError> {
+        let world = Self::load_persisted(branches.to_vec())?;
+        for branch in branches {
+            let prefix = if let Some(parent) = branch.info.parent {
+                world
+                    .world(parent)?
+                    .into_iter()
+                    .take_while(|fact| fact.sequence <= branch.info.fork_sequence)
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            let mut replay = prefix.clone();
+            let mut index = WorldIndex::from_facts(&prefix)?;
+            let mut head = branch.info.fork_sequence;
+            if branch.info.parent.is_some() {
+                let marker = branch
+                    .events
+                    .first()
+                    .ok_or(TimelineError::Invalid("missing fork marker"))?;
+                index.extend(std::slice::from_ref(marker))?;
+                replay.push(marker.clone());
+                head += 1;
+            }
+            let mut receipts = branch.receipts.values().collect::<Vec<_>>();
+            receipts.sort_by_key(|receipt| {
+                receipt
+                    .result
+                    .first()
+                    .map(|fact| fact.sequence)
+                    .unwrap_or(u64::MAX)
+            });
+            for receipt in receipts {
+                let mut state = branch.info;
+                state.head_sequence = head;
+                super::validate_regenerate_transition(branch.info.id, &replay, &receipt.drafts)?;
+                let expected = Self::validate_batch(state, head, &receipt.drafts, &index)?;
+                if expected != receipt.result {
+                    return Err(TimelineError::Invalid(
+                        "imported receipt violates canonical append",
+                    ));
+                }
+                index.extend(&expected)?;
+                replay.extend(expected.iter().cloned());
+                head += expected.len() as u64;
+            }
+            if head != branch.info.head_sequence {
+                return Err(TimelineError::Invalid("imported branch sequence mismatch"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Install a fully validated detached session without partially mutating the
+    /// existing store. The caller owns archive-specific semantic validation.
+    pub(crate) fn install_archive_branches_with_provenance(
+        &mut self,
+        incoming: Vec<Branch>,
+        provenance: Option<SessionProvenance>,
+    ) -> Result<(), TimelineError> {
+        if incoming.is_empty() {
+            return Err(TimelineError::Invalid("archive has no branches"));
+        }
+        let imported_session = incoming[0].info.session_id;
+        if self
+            .branches
+            .values()
+            .any(|branch| branch.info.session_id == imported_session)
+        {
+            return Err(TimelineError::Conflict);
+        }
+        let existing_ids = self
+            .branches
+            .values()
+            .flat_map(|branch| branch.events.iter().map(|fact| fact.draft.id))
+            .collect::<HashSet<_>>();
+        if incoming
+            .iter()
+            .flat_map(|branch| branch.events.iter())
+            .any(|fact| existing_ids.contains(&fact.draft.id))
+        {
+            return Err(TimelineError::Conflict);
+        }
+        let mut candidate = self.persisted_branches();
+        candidate.extend(incoming);
+        let mut validated = Self::load_persisted(candidate)?;
+        validated.provenance = self.provenance.clone();
+        if let Some(provenance) = provenance
+            && validated
+                .provenance
+                .insert(imported_session, provenance)
+                .is_some()
+        {
+            return Err(TimelineError::Conflict);
+        }
+        validated.validate_provenance()?;
+        *self = validated;
+        Ok(())
     }
 
     pub fn create_session(
@@ -241,7 +559,12 @@ impl TimelineStore {
             .iter()
             .filter(|fact| {
                 fact.sequence <= ceiling
-                    && fact.draft.kind == EventKind::CharacterContextReset
+                    && matches!(
+                        fact.draft.kind,
+                        EventKind::CharacterContextReset
+                            | EventKind::CharacterKnowledgeForgotten
+                            | EventKind::CharacterKnowledgeRevealed
+                    )
                     && fact.draft.observers.contains(&character)
             })
             .map(|fact| fact.sequence)
@@ -308,6 +631,40 @@ impl TimelineStore {
         }
         if expected_head != branch.info.head_sequence {
             return Err(TimelineError::ConcurrentWrite);
+        }
+        if let Some(marker) = drafts
+            .iter()
+            .find(|draft| draft.kind == EventKind::RegenerateAdmitted)
+        {
+            let candidate =
+                crate::timeline::regenerate_receipt::SameBranchRegenerateReceipt::from_fact(
+                    marker,
+                )?;
+            if self.branches.values()
+                .filter(|other| other.info.session_id == branch.info.session_id)
+                .any(|other| other.events.iter().any(|fact| {
+                    if fact.draft.kind == EventKind::RegenerateAdmitted {
+                        crate::timeline::regenerate_receipt::SameBranchRegenerateReceipt::from_fact(&fact.draft)
+                            .is_ok_and(|receipt| receipt.request == candidate.request)
+                    } else if fact.draft.kind == EventKind::BranchCreated {
+                        crate::timeline::RegenerateAdmissionReceipt::from_marker(&fact.draft.payload)
+                            .ok().flatten().is_some_and(|receipt| receipt.request == candidate.request)
+                    } else { false }
+                })) {
+                return Err(TimelineError::Conflict);
+            }
+        }
+        if drafts.iter().any(|draft| {
+            matches!(
+                draft.kind,
+                EventKind::RegenerateAdmitted
+                    | EventKind::RegenerateAbandoned
+                    | EventKind::RegenerateMayHaveDispatched
+            ) || (draft.kind == EventKind::CharacterMessage
+                && draft.payload.contains_key("request_id"))
+        }) {
+            let world = self.world(branch_id)?;
+            super::validate_regenerate_transition(branch_id, &world, &drafts)?;
         }
         if !self.indexes.contains_key(&branch_id) {
             let world = self.world(branch_id)?;
@@ -376,9 +733,48 @@ impl TimelineStore {
         checkpoint_id: EventId,
         child_id: BranchId,
     ) -> Result<BranchInfo, TimelineError> {
+        self.fork_at(branch_id, checkpoint_id, child_id, None, None)
+    }
+
+    /// An immutable prefix that ends at the original player event, not at a
+    /// synthetic checkpoint and never at an accepted assistant message.
+    pub(crate) fn fork_at_regenerate_input(
+        &mut self,
+        branch_id: BranchId,
+        input: EventId,
+        character: CharacterId,
+        child_id: BranchId,
+        receipt: &crate::timeline::RegenerateAdmissionReceipt,
+    ) -> Result<BranchInfo, TimelineError> {
+        self.fork_at(branch_id, input, child_id, Some(character), Some(receipt))
+    }
+
+    pub fn fork_at_player_input(
+        &mut self,
+        branch_id: BranchId,
+        input: EventId,
+        character: CharacterId,
+        child_id: BranchId,
+    ) -> Result<BranchInfo, TimelineError> {
+        self.fork_at(branch_id, input, child_id, Some(character), None)
+    }
+
+    fn fork_at(
+        &mut self,
+        branch_id: BranchId,
+        anchor_id: EventId,
+        child_id: BranchId,
+        player_recipient: Option<CharacterId>,
+        admission: Option<&crate::timeline::RegenerateAdmissionReceipt>,
+    ) -> Result<BranchInfo, TimelineError> {
         if let Some(existing) = self.branches.get(&child_id) {
-            return if existing.info.parent == Some(branch_id)
-                && existing.info.checkpoint == Some(checkpoint_id)
+            return if player_recipient.is_none()
+                && existing.info.parent == Some(branch_id)
+                && existing.info.checkpoint == Some(anchor_id)
+                && existing
+                    .events
+                    .first()
+                    .is_some_and(|fact| fact.draft.payload.contains_key("checkpoint_id"))
             {
                 Ok(existing.info)
             } else {
@@ -386,32 +782,88 @@ impl TimelineStore {
             };
         }
         let parent = self.branch(branch_id)?;
-        let checkpoint = self.event(branch_id, checkpoint_id)?;
-        if checkpoint.draft.kind != EventKind::Checkpoint {
-            return Err(TimelineError::Invalid("fork requires a checkpoint"));
-        }
-        let marker_sequence = checkpoint
-            .sequence
-            .checked_add(1)
-            .ok_or(TimelineError::Invalid("sequence overflow"))?;
+        let anchor = self.event(branch_id, anchor_id)?;
         let mut payload = Map::new();
         payload.insert(
             "parent_branch_id".into(),
             Value::String(branch_id.0.to_string()),
         );
-        payload.insert(
-            "checkpoint_id".into(),
-            Value::String(checkpoint_id.0.to_string()),
-        );
+        match player_recipient {
+            None => {
+                if anchor.draft.kind != EventKind::Checkpoint {
+                    return Err(TimelineError::Invalid("fork requires a checkpoint"));
+                }
+                payload.insert(
+                    "checkpoint_id".into(),
+                    Value::String(anchor_id.0.to_string()),
+                );
+            }
+            Some(character) => {
+                if anchor.draft.kind != EventKind::PlayerMessage
+                    || anchor.draft.actor.as_deref() != Some("player")
+                    || !anchor.draft.observers.contains(&character)
+                {
+                    return Err(TimelineError::Invalid(
+                        "fork requires an addressed player input",
+                    ));
+                }
+                let mut projection = CharacterMessageProjection::new(character);
+                for known in self.view(branch_id, character, None)? {
+                    projection.observe(&known);
+                }
+                if !projection
+                    .messages()
+                    .iter()
+                    .any(|message| message.event_id == anchor_id)
+                {
+                    return Err(TimelineError::Invalid(
+                        "player input is not currently visible",
+                    ));
+                }
+                payload.insert(
+                    "input_event_id".into(),
+                    Value::String(anchor_id.0.to_string()),
+                );
+                payload.insert("character_id".into(), Value::String(character.to_string()));
+            }
+        }
+        if let Some(receipt) = admission {
+            let recipient = player_recipient.ok_or(TimelineError::Invalid(
+                "regenerate admission requires player input",
+            ))?;
+            receipt.validate(self, branch_id, child_id, anchor_id, recipient)?;
+            for existing in self.branches.values() {
+                if let Some(marker) = existing.events.first() {
+                    if crate::timeline::RegenerateAdmissionReceipt::from_marker(
+                        &marker.draft.payload,
+                    )?
+                    .is_some_and(|previous| previous.request == receipt.request)
+                    {
+                        return Err(TimelineError::Conflict);
+                    }
+                }
+            }
+            payload.insert(
+                crate::timeline::RegenerateAdmissionReceipt::KEY.into(),
+                serde_json::to_value(receipt)
+                    .map_err(|_| TimelineError::Invalid("invalid regenerate receipt encoding"))?,
+            );
+        }
+        let marker_sequence = anchor
+            .sequence
+            .checked_add(1)
+            .ok_or(TimelineError::Invalid("sequence overflow"))?;
         let mut marker = EventDraft::new(EventKind::BranchCreated);
         marker.payload = payload;
         let info = BranchInfo {
             id: child_id,
             session_id: parent.session_id,
             parent: Some(branch_id),
-            fork_sequence: checkpoint.sequence,
+            fork_sequence: anchor.sequence,
             head_sequence: marker_sequence,
-            checkpoint: Some(checkpoint_id),
+            // Historical storage column name; the event is a typed input anchor
+            // when the marker carries input_event_id rather than checkpoint_id.
+            checkpoint: Some(anchor_id),
         };
         let fact = TimelineFact {
             session_id: parent.session_id,
@@ -488,12 +940,47 @@ impl TimelineStore {
         if matches!(draft.kind, EventKind::CharacterContextReset) && draft.observers.is_empty() {
             return Err(TimelineError::Invalid("context reset requires an observer"));
         }
+        if matches!(
+            draft.kind,
+            EventKind::CharacterKnowledgeForgotten | EventKind::CharacterKnowledgeRevealed
+        ) {
+            if draft.observers.len() != 1
+                || draft.actor.is_some()
+                || !draft.links.is_empty()
+                || draft.external_message_id.is_some()
+                || draft.payload.len() != 1
+            {
+                return Err(TimelineError::Invalid(
+                    "knowledge control must be private and system-owned",
+                ));
+            }
+            let targets = super::knowledge::knowledge_targets(&draft.payload)
+                .filter(|ids| !ids.is_empty())
+                .ok_or(TimelineError::Invalid("knowledge control needs event_ids"))?;
+            let mut unique = HashSet::new();
+            for id in targets {
+                if !unique.insert(id) {
+                    return Err(TimelineError::Invalid("duplicate knowledge target"));
+                }
+                if index.kind(id)?.is_none() {
+                    return Err(TimelineError::NotFound);
+                }
+                if draft.kind == EventKind::CharacterKnowledgeForgotten
+                    && !index.knows(*draft.observers.iter().next().expect("one observer"), id)?
+                {
+                    return Err(TimelineError::Invalid("cannot forget unknown event"));
+                }
+            }
+        }
         if draft.kind == EventKind::Checkpoint
             && !draft.payload.get("snapshot").is_some_and(Value::is_object)
         {
             return Err(TimelineError::Invalid(
                 "checkpoint requires a snapshot object",
             ));
+        }
+        if draft.kind == EventKind::RegenerateAdmitted {
+            crate::timeline::regenerate_receipt::SameBranchRegenerateReceipt::from_fact(draft)?;
         }
         if draft.kind == EventKind::BranchCreated {
             return Err(TimelineError::Invalid("branch markers are created by fork"));
@@ -540,6 +1027,11 @@ impl TimelineStore {
                     return Err(TimelineError::Invalid("cannot modify unknown message"));
                 }
                 if draft.kind == EventKind::MessageRevised {
+                    if draft.payload.contains_key("content") {
+                        return Err(TimelineError::Invalid(
+                            "revision must use only nested message content",
+                        ));
+                    }
                     let replacement = draft
                         .payload
                         .get("message")

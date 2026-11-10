@@ -38,6 +38,15 @@ pub enum ToolOption {
     WebReader,
 }
 
+#[path = "chat_fence.rs"]
+pub mod chat_fence;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChatOrigin {
+    pub character: CharacterId,
+    pub selection_revision: u64,
+}
+
 pub enum Command {
     RefreshReleases,
     MemorySelect(CharacterId),
@@ -55,10 +64,10 @@ pub enum Command {
     ),
     GraphApply(uuid::Uuid, CharacterId),
     GraphAbort(uuid::Uuid),
-    Preview(ConversationChange),
-    Confirm,
-    Abort,
-    Diagnostics,
+    Preview(ChatOrigin, ConversationChange),
+    Confirm(ChatOrigin),
+    Abort(ChatOrigin),
+    Diagnostics(ChatOrigin),
     NewPreset,
     UpdatePreset(PresetId, neuromita::generation::PresetConnectionEdit),
     DeletePreset(PresetId),
@@ -85,12 +94,22 @@ pub enum Command {
     SetToolDepth(u8),
     SetMemoryDedupEnabled(bool),
     SetMemoryDedupThreshold(u16),
-    Select(CharacterId),
-    Send(String),
-    Cancel(RequestId),
+    Select(ChatOrigin),
+    Send(ChatOrigin, String),
+    AttachFile(ChatOrigin, String, String),
+    Cancel(ChatOrigin, RequestId),
+    Retry(ChatOrigin, RequestId),
     Refresh,
+    LoadOlder(
+        ChatOrigin,
+        u64,
+        neuromita::timeline::ContextAnchor,
+        neuromita::timeline::selection::TimelineSelection,
+        usize,
+    ),
     Volume(u8),
     SpeechSessionEnabled(bool),
+    ChatSpeechToggle(ChatOrigin, bool),
     SpeechPushToTalk(bool),
     MicrophoneTest(bool, String, String),
 }
@@ -116,6 +135,7 @@ pub enum Update {
     SpeechSessionStatus(SpeechSessionSnapshot),
     MicrophoneTestStatus(MonitorSnapshot),
     RecognizedText {
+        origin: ChatOrigin,
         text: String,
         auto_send_after: Option<Duration>,
         merge_with_draft: bool,
@@ -133,8 +153,9 @@ pub enum Update {
     GraphCapability(bool),
     GraphPreviewResult(uuid::Uuid, Result<GraphPreviewReport, String>),
     GraphApplyResult(uuid::Uuid, Result<(), String>),
-    Confirmation(Option<(ConversationChange, usize)>),
-    Diagnostics(String),
+    Confirmation(ChatOrigin, Option<(ConversationChange, usize)>),
+    Diagnostics(ChatOrigin, String),
+    ConversationError(ChatOrigin, String),
     Connections(std::sync::Arc<neuromita::server::ServerSnapshot>),
     Administration(Box<super::settings::AdministrationSnapshot>),
     CharacterDebug {
@@ -149,9 +170,16 @@ pub enum Update {
     Stopped,
     Connecting,
     Connected(String),
-    Snapshot(Box<ConversationSnapshot>),
-    Sent(String),
+    Snapshot(ChatOrigin, Box<ConversationSnapshot>),
+    OlderPage(
+        ChatOrigin,
+        u64,
+        Result<neuromita::presentation::ConversationHistoryPage, String>,
+    ),
+    Sent(ChatOrigin, String),
+    FileAttached(ChatOrigin, String, String),
     Error(String),
+    ChatError(ChatOrigin, String),
 }
 
 pub struct DesktopRuntime {
@@ -209,7 +237,20 @@ fn find_binary(directory: &std::path::Path, variable: &str, filename: &str) -> O
     .find(|path| path.is_absolute() && path.is_file())
 }
 
-struct DesktopTranscriptSink(mpsc::UnboundedSender<Transcript>);
+struct DesktopTranscriptSink {
+    send: mpsc::UnboundedSender<(ChatOrigin, Transcript)>,
+    origin: ChatOrigin,
+}
+
+fn speech_conversation(
+    send: &mpsc::UnboundedSender<(ChatOrigin, Transcript)>,
+    origin: ChatOrigin,
+) -> Arc<dyn SpeechConversation> {
+    Arc::new(DesktopTranscriptSink {
+        send: send.clone(),
+        origin,
+    })
+}
 
 impl SpeechConversation for DesktopTranscriptSink {
     fn reply<'a>(
@@ -217,8 +258,8 @@ impl SpeechConversation for DesktopTranscriptSink {
         transcript: &'a Transcript,
     ) -> SpeechFuture<'a, Option<neuromita::voice::AudioArtifact>> {
         Box::pin(async move {
-            self.0
-                .send(transcript.clone())
+            self.send
+                .send((self.origin, transcript.clone()))
                 .map_err(|_| SpeechSessionError::DispatchClosed)?;
             Ok(None)
         })
@@ -400,13 +441,15 @@ async fn observe(
     let mut connections = administration.connections.observe();
     let mut memories = MemoryWatch::start(administration, CharacterId::Crazy)?;
     let (recall_updates, mut recall_results) = mpsc::unbounded_channel();
-    let mut pending: Option<ConversationChangePreview> = None;
     let mut graph_pending: Option<(
         uuid::Uuid,
         CharacterId,
         neuromita::knowledge::maintenance::GraphMaintenancePreview,
     )> = None;
+    let mut pending: Option<(ChatOrigin, ConversationChangePreview)> = None;
     let mut character = CharacterId::Crazy;
+    let mut selection_revision = 0;
+    let mut speech_owner: Option<ChatOrigin> = None;
     let mut debug_character = CharacterId::Crazy;
     let mut requests = presenter.observe_requests();
     let mut settings = presenter.observe_settings().map_err(|e| e.to_string())?;
@@ -416,7 +459,6 @@ async fn observe(
     let mut speech_status = administration.speech.observe();
     let mut microphone_test = administration.audio_input.observe_test();
     let (transcripts, mut transcript_updates) = mpsc::unbounded_channel();
-    let transcript_sink: Arc<dyn SpeechConversation> = Arc::new(DesktopTranscriptSink(transcripts));
     let mut liveness = tokio::time::interval(Duration::from_secs(5));
     liveness.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut refresh_views = true;
@@ -449,8 +491,20 @@ async fn observe(
             }
             publish(character_debug_snapshot(administration, debug_character).await);
             match presenter.snapshot(character).await {
-                Ok(snapshot) => publish(Update::Snapshot(Box::new(snapshot))),
-                Err(error) => publish(Update::Error(error.to_string())),
+                Ok(snapshot) => publish(Update::Snapshot(
+                    ChatOrigin {
+                        character,
+                        selection_revision,
+                    },
+                    Box::new(snapshot),
+                )),
+                Err(error) => publish(Update::ChatError(
+                    ChatOrigin {
+                        character,
+                        selection_revision,
+                    },
+                    error.to_string(),
+                )),
             }
             publish(Update::RuntimeStatus(administration.ai_runtime.snapshot()));
             publish(Update::SpeechSessionStatus(
@@ -480,12 +534,59 @@ async fn observe(
                 },
                 Some(Command::SpeechSessionEnabled(enabled)) => {
                     let result = if enabled {
-                        enable_speech_session(app, directory, Arc::clone(&transcript_sink)).await
+                        enable_speech_session(app, directory, speech_conversation(&transcripts, ChatOrigin {
+                            character, selection_revision,
+                        })).await
                     } else {
                         app.stop_speech_capture().await;
                         Ok(())
                     };
+                    if result.is_ok() {
+                        speech_owner = enabled.then_some(ChatOrigin { character, selection_revision });
+                    }
                     if let Err(error) = result { publish(Update::AdminError(error)); }
+                    publish(Update::SpeechSessionStatus(administration.speech.snapshot()));
+                },
+                Some(Command::ChatSpeechToggle(origin, enabled)) => {
+                    if !chat_fence::accepts(
+                        origin.character.index() as i32,
+                        origin.selection_revision,
+                        character.index() as i32,
+                        selection_revision,
+                    ) {
+                        continue;
+                    }
+                    let result = if enabled {
+                        match enable_speech_session(
+                            app,
+                            directory,
+                            speech_conversation(&transcripts, origin),
+                        ).await {
+                            Ok(()) => {
+                                let mode = administration.settings.asr.preferences.get().input_mode;
+                                if matches!(mode.as_str(), "radio" | "push_to_talk") {
+                                    match app.press_speech_button(true).await {
+                                        Ok(()) => Ok(()),
+                                        Err(error) => {
+                                            app.stop_speech_capture().await;
+                                            Err(error.to_string())
+                                        }
+                                    }
+                                } else {
+                                    Ok(())
+                                }
+                            }
+                            Err(error) => Err(error),
+                        }
+                    } else {
+                        let _ = app.press_speech_button(false).await;
+                        app.stop_speech_capture().await;
+                        Ok(())
+                    };
+                    if result.is_ok() {
+                        speech_owner = enabled.then_some(origin);
+                    }
+                    if let Err(error) = result { publish(Update::ChatError(origin, error)); }
                     publish(Update::SpeechSessionStatus(administration.speech.snapshot()));
                 },
                 Some(Command::SpeechPushToTalk(pressed)) => {
@@ -605,38 +706,171 @@ async fn observe(
                         let _ = sender.send(Update::MemoryRecallResult(request_id, result));
                     });
                 },
-                Some(Command::Preview(operation)) => match presenter.preview_change(character, operation).await {
-                    Ok(preview) => { publish(Update::Confirmation(Some((preview.operation(), preview.message_count())))); pending = Some(preview); },
-                    Err(error) => publish(Update::Error(error.to_string())),
+                Some(Command::Preview(origin, operation)) => {
+                    if chat_fence::accepts(
+                        origin.character.index() as i32,
+                        origin.selection_revision,
+                        character.index() as i32,
+                        selection_revision,
+                    ) {
+                        pending = None;
+                        match presenter.preview_change(origin.character, operation).await {
+                            Ok(preview) => {
+                                publish(Update::Confirmation(origin, Some((preview.operation(), preview.message_count()))));
+                                pending = Some((origin, preview));
+                            }
+                            Err(error) => {
+                                publish(Update::Confirmation(origin, None));
+                                publish(Update::ConversationError(origin, error.to_string()));
+                            },
+                        }
+                    }
                 },
-                Some(Command::Confirm) => {
-                    if let Some(preview) = pending.take() && let Err(error) = presenter.apply_change(preview) { publish(Update::Error(error.to_string())); }
-                    publish(Update::Confirmation(None));
+                Some(Command::Confirm(origin)) => {
+                    if chat_fence::accepts(
+                        origin.character.index() as i32,
+                        origin.selection_revision,
+                        character.index() as i32,
+                        selection_revision,
+                    ) && pending.as_ref().is_some_and(|(owner, _)| *owner == origin) {
+                        if let Some((_, preview)) = pending.take()
+                            && let Err(error) = presenter.apply_change(preview)
+                        {
+                            publish(Update::ConversationError(origin, error.to_string()));
+                        }
+                        publish(Update::Confirmation(origin, None));
+                    }
                 },
-                Some(Command::Abort) => { pending = None; publish(Update::Confirmation(None)); },
-                Some(Command::Diagnostics) => {
-                    let model = administration.chat.snapshot();
-                    let trace = model.requests.iter().rev().find(|r| r.metadata.character_id == character).and_then(|r| administration.chat.trace(r.metadata.id));
-                    let text = match trace {
-                        Some(trace) => match trace.section_json(neuromita::request::DiagnosticSection::All) {
-                            Ok(text) => text,
-                            Err(error) => format!("Cannot export request diagnostics: {error}"),
-                        },
-                        None => "No retained request trace".into(),
-                    };
-                    publish(Update::Diagnostics(text));
+                Some(Command::Abort(origin)) => {
+                    if pending.as_ref().is_some_and(|(owner, _)| *owner == origin) {
+                        pending = None;
+                        publish(Update::Confirmation(origin, None));
+                    }
                 },
-                Some(Command::Select(id)) => { character = id; pending = None; publish(Update::Confirmation(None)); },
+                Some(Command::Diagnostics(origin)) => {
+                    if chat_fence::accepts(
+                        origin.character.index() as i32,
+                        origin.selection_revision,
+                        character.index() as i32,
+                        selection_revision,
+                    ) {
+                        let model = administration.chat.snapshot();
+                        let trace = model.requests.iter().rev().find(|r| r.metadata.character_id == origin.character).and_then(|r| administration.chat.trace(r.metadata.id));
+                        let text = match trace {
+                            Some(trace) => match trace.section_json(neuromita::request::DiagnosticSection::All) {
+                                Ok(text) => text,
+                                Err(error) => format!("Cannot export request diagnostics: {error}"),
+                            },
+                            None => "No retained request trace".into(),
+                        };
+                        publish(Update::Diagnostics(origin, text));
+                    }
+                },
+                Some(Command::Select(origin)) => {
+                    if speech_owner.is_some_and(|owner| owner != origin) {
+                        app.stop_speech_capture().await;
+                        speech_owner = None;
+                        publish(Update::SpeechSessionStatus(administration.speech.snapshot()));
+                    }
+                    character = origin.character;
+                    selection_revision = origin.selection_revision;
+                    pending = None;
+                    publish(Update::Confirmation(origin, None));
+                },
                 Some(Command::Refresh) => {},
-                Some(Command::Send(text)) => match presenter.reply(character, text.clone()) {
-                    Ok(_) => publish(Update::Sent(text)),
-                    Err(error) => publish(Update::Error(error.to_string())),
+                Some(Command::LoadOlder(origin, ticket, at, expected, offset)) => {
+                    if !chat_fence::accepts(
+                        origin.character.index() as i32,
+                        origin.selection_revision,
+                        character.index() as i32,
+                        selection_revision,
+                    ) {
+                        continue;
+                    }
+                    let page = presenter.history_page(origin.character, at, expected, offset)
+                        .await.map_err(|error| error.to_string());
+                    publish(Update::OlderPage(origin, ticket, page));
                 },
-                Some(Command::Cancel(id)) => match presenter.cancel(id) {
-                    Ok(CancelResult::Cancelled | CancelResult::Requested) => {},
-                    Ok(CancelResult::TooLate | CancelResult::AlreadyFinished) =>
-                        publish(Update::Error("The result has already been accepted; cancellation is too late".into())),
-                    Err(error) => publish(Update::Error(error.to_string())),
+                Some(Command::Send(origin, text)) => {
+                    if !chat_fence::accepts(
+                        origin.character.index() as i32,
+                        origin.selection_revision,
+                        character.index() as i32,
+                        selection_revision,
+                    ) {
+                        publish(Update::ChatError(origin, "Chat selection changed before send".into()));
+                    } else {
+                        match presenter.reply(origin.character, text.clone()) {
+                            Ok(_) => publish(Update::Sent(origin, text)),
+                            Err(error) => publish(Update::ChatError(origin, error.to_string())),
+                        }
+                    }
+                },
+                Some(Command::AttachFile(origin, text, source)) => {
+                    if !chat_fence::accepts(
+                        origin.character.index() as i32,
+                        origin.selection_revision,
+                        character.index() as i32,
+                        selection_revision,
+                    ) {
+                        publish(Update::ChatError(origin, "Chat selection changed before attachment".into()));
+                        continue;
+                    }
+                    let result = (|| -> Result<(), String> {
+                        use neuromita::timeline::{
+                            file_attachments::{compose_local_file_message, import_local_file},
+                            storage::assets::TimelineAssetStore,
+                        };
+                        let selection = app.timeline_selection();
+                        let assets = TimelineAssetStore::new(directory.join("TimelineAssets"), 8 * 1024 * 1024)
+                            .map_err(|error| error.to_string())?;
+                        let part = import_local_file(&assets, std::path::Path::new(&source))
+                            .map_err(|error| error.to_string())?;
+                        let message = compose_local_file_message(origin.character, text.clone(), part)
+                            .map_err(|error| error.to_string())?;
+                        app.publish_attached_conversation_message(selection, message, &assets)
+                            .map_err(|error| error.to_string())?;
+                        Ok(())
+                    })();
+                    match result {
+                        Ok(()) => publish(Update::FileAttached(origin, text, source)),
+                        Err(error) => publish(Update::ChatError(origin, error)),
+                    }
+                },
+                Some(Command::Cancel(origin, id)) => {
+                    if !chat_fence::accepts(
+                        origin.character.index() as i32,
+                        origin.selection_revision,
+                        character.index() as i32,
+                        selection_revision,
+                    ) {
+                        continue;
+                    }
+                    if !administration.chat.snapshot().requests.iter().any(|request| {
+                        request.metadata.id == id && request.metadata.character_id == origin.character
+                    }) {
+                        publish(Update::ChatError(origin, "Request is not owned by the selected character".into()));
+                        continue;
+                    }
+                    match presenter.cancel(id) {
+                        Ok(CancelResult::Cancelled | CancelResult::Requested) => {},
+                        Ok(CancelResult::TooLate | CancelResult::AlreadyFinished) =>
+                            publish(Update::ChatError(origin, "The result has already been accepted; cancellation is too late".into())),
+                        Err(error) => publish(Update::ChatError(origin, error.to_string())),
+                    }
+                },
+                Some(Command::Retry(origin, id)) => {
+                    if !chat_fence::accepts(
+                        origin.character.index() as i32,
+                        origin.selection_revision,
+                        character.index() as i32,
+                        selection_revision,
+                    ) {
+                        continue;
+                    }
+                    if let Err(error) = presenter.retry_failed(origin.character, id).await {
+                        publish(Update::ChatError(origin, error.to_string()));
+                    }
                 },
                 Some(Command::Volume(value)) => match Volume::new(value).and_then(|v| presenter.set_volume(v)) {
                     Ok(()) => {},
@@ -647,11 +881,20 @@ async fn observe(
                 if let Some(result) = result { publish(result); }
             },
             transcript = transcript_updates.recv() => {
-                if let Some(transcript) = transcript {
+                if let Some((origin, transcript)) = transcript {
+                    if !chat_fence::accepts(
+                        origin.character.index() as i32,
+                        origin.selection_revision,
+                        character.index() as i32,
+                        selection_revision,
+                    ) {
+                        continue;
+                    }
                     let text = transcript.text.trim();
                     if !text.is_empty() {
                         let preferences = administration.settings.asr.preferences.get();
                         publish(Update::RecognizedText {
+                            origin,
                             text: text.to_owned(),
                             auto_send_after: dispatch_policy(&preferences),
                             merge_with_draft: preferences.merge_chat,
@@ -823,13 +1066,25 @@ mod speech_dispatch_tests {
     #[tokio::test]
     async fn speech_sink_only_delivers_transcripts() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let sink = DesktopTranscriptSink(tx);
+        let captured = ChatOrigin {
+            character: CharacterId::Crazy,
+            selection_revision: 4,
+        };
+        let sink = speech_conversation(&tx, captured);
         sink.reply(&Transcript {
             text: "spoken words".into(),
             language: None,
         })
         .await
         .unwrap();
-        assert_eq!(rx.recv().await.unwrap().text, "spoken words");
+        let (origin, transcript) = rx.recv().await.unwrap();
+        assert_eq!(transcript.text, "spoken words");
+        assert_eq!(origin, captured);
+        assert!(!chat_fence::accepts(
+            origin.character.index() as i32,
+            origin.selection_revision,
+            CharacterId::Crazy.index() as i32,
+            6,
+        ));
     }
 }

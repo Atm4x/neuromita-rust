@@ -113,7 +113,7 @@ impl RegistryInner {
         let records = self.records.lock().expect("registry mutex poisoned");
         let mut errors: Vec<_> = records
             .values()
-            .filter(|record| record.snapshot().state.is_terminal())
+            .filter(|record| record.snapshot().is_resolved())
             .filter_map(|record| record.trace())
             .filter(|trace| scope.allows(trace.metadata.character_id, trace.metadata.source))
             .filter_map(|trace| trace.error_history_entry())
@@ -198,6 +198,7 @@ impl RequestRegistry {
         self.register_with_configuration(message, id, admission, None, None, None)
     }
 
+    #[cfg(test)]
     pub(crate) fn register_with_configuration(
         &self,
         message: Box<dyn GenerationCommand>,
@@ -207,7 +208,47 @@ impl RequestRegistry {
         preset: Option<crate::generation::GenerationPreset>,
         prompt: Option<Arc<crate::prompts::PromptSetSnapshot>>,
     ) -> RequestHandle {
-        let record = RequestRecord::new(
+        self.register_with_regenerate_cancellation(
+            message, id, admission, settings, preset, prompt, None,
+        )
+    }
+
+    pub(crate) fn register_with_regenerate_cancellation(
+        &self,
+        message: Box<dyn GenerationCommand>,
+        id: RequestId,
+        admission: TimelineAdmission,
+        settings: Option<Arc<crate::settings::SettingsSnapshot>>,
+        preset: Option<crate::generation::GenerationPreset>,
+        prompt: Option<Arc<crate::prompts::PromptSetSnapshot>>,
+        cancel_ingress: Option<Arc<dyn super::RegenerateCancellation>>,
+    ) -> RequestHandle {
+        self.register_with_regenerate_protocol(
+            message,
+            id,
+            admission,
+            settings,
+            preset,
+            prompt,
+            cancel_ingress
+                .as_ref()
+                .map(|_| RegenerateProtocol::LegacyFork),
+            cancel_ingress,
+        )
+    }
+
+    pub(crate) fn register_with_regenerate_protocol(
+        &self,
+        message: Box<dyn GenerationCommand>,
+        id: RequestId,
+        admission: TimelineAdmission,
+        settings: Option<Arc<crate::settings::SettingsSnapshot>>,
+        preset: Option<crate::generation::GenerationPreset>,
+        prompt: Option<Arc<crate::prompts::PromptSetSnapshot>>,
+        protocol: Option<RegenerateProtocol>,
+        cancel_ingress: Option<Arc<dyn super::RegenerateCancellation>>,
+    ) -> RequestHandle {
+        let record = RequestRecord::new_with_protocol(
             message,
             id,
             admission,
@@ -215,6 +256,8 @@ impl RequestRegistry {
             preset,
             prompt,
             Arc::downgrade(&self.inner),
+            cancel_ingress,
+            protocol,
         );
         let handle = record.handle();
         let mut records = self.inner.records.lock().expect("registry mutex poisoned");
@@ -257,7 +300,7 @@ impl RequestRegistry {
             .subscribe();
         let active = records
             .values()
-            .filter(|record| !record.snapshot().state.is_terminal())
+            .filter(|record| !record.snapshot().is_resolved())
             .map(|record| record.handle())
             .collect();
         RequestDiscovery { active, accepted }
@@ -281,6 +324,35 @@ impl RequestRegistry {
         }
     }
 
+    /// Explicit repair pass for records whose terminal Timeline append failed.
+    /// Only a copied set of records is held while entering the Timeline owner.
+    pub(crate) fn reconcile_pending_terminals(
+        &self,
+    ) -> Vec<(
+        RequestId,
+        Result<super::RegenerateTerminalReconciliation, String>,
+    )> {
+        let records: Vec<_> = self
+            .inner
+            .records
+            .lock()
+            .expect("registry mutex poisoned")
+            .values()
+            .cloned()
+            .collect();
+        records
+            .into_iter()
+            .filter_map(|record| {
+                let request = record.snapshot().metadata.id;
+                match record.reconcile_pending_terminal() {
+                    Ok(None) => None,
+                    Ok(Some(status)) => Some((request, Ok(status))),
+                    Err(error) => Some((request, Err(error))),
+                }
+            })
+            .collect()
+    }
+
     pub(crate) fn close(&self) {
         self.inner
             .accepted
@@ -295,7 +367,7 @@ impl RequestRegistry {
             .lock()
             .expect("registry mutex poisoned")
             .values()
-            .filter(|record| !record.snapshot().state.is_terminal())
+            .filter(|record| !record.snapshot().is_resolved())
             .count()
     }
 }
@@ -333,6 +405,7 @@ mod tests {
             None,
             None,
             std::sync::Weak::new(),
+            None,
         );
         registry
             .inner

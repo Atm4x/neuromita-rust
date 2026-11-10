@@ -385,3 +385,146 @@ async fn web_reader_denies_internal_target_without_followup_or_effects() {
     );
     app.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn changed_selection_before_tool_completion_never_reaches_followup_provider() {
+    let _serial = SERIAL.lock().await;
+    let (app, mut rx) = start().await;
+    SettingsApi::edit::<ToolSettings>(|tools| {
+        tools.enabled = true;
+        tools.calculator = true;
+    })
+    .unwrap();
+    let before = CharacterApi::get(CharacterId::Crazy)
+        .unwrap()
+        .state()
+        .await
+        .unwrap()
+        .accepted_replies;
+    let request = reply();
+    let first = receive(&mut rx).await;
+    first
+        .respond
+        .send(call("calculator", serde_json::json!({"expression":"1+2"})))
+        .unwrap();
+    let selected = app.timeline_selection();
+    app.select_timeline_branch(selected.branch_id, selected)
+        .unwrap();
+    let snapshot = finished(&request).await;
+    assert!(matches!(snapshot.state, RequestState::Cancelled));
+    assert_eq!(
+        snapshot.cancel_reason,
+        Some(neuromita::request::CancelReason::SelectionChanged)
+    );
+    assert!(snapshot.tool_activity.is_none());
+    assert!(snapshot.streamed_json.is_none());
+    assert!(snapshot.streamed_text.is_none());
+    assert!(
+        rx.try_recv().is_err(),
+        "stale tool follow-up was dispatched"
+    );
+    assert_eq!(
+        CharacterApi::get(CharacterId::Crazy)
+            .unwrap()
+            .state()
+            .await
+            .unwrap()
+            .accepted_replies,
+        before
+    );
+    app.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn context_reset_before_tool_completion_never_reaches_followup_provider() {
+    let _serial = SERIAL.lock().await;
+    let (app, mut rx) = start().await;
+    SettingsApi::edit::<ToolSettings>(|tools| {
+        tools.enabled = true;
+        tools.calculator = true;
+    })
+    .unwrap();
+    let request = reply();
+    let first = receive(&mut rx).await;
+    first
+        .respond
+        .send(call("calculator", serde_json::json!({"expression":"3+4"})))
+        .unwrap();
+    let selected = app.timeline_selection();
+    let operation = neuromita::timeline::EventId::new();
+    assert_eq!(
+        app.reset_character_context(selected, CharacterId::Crazy, operation),
+        Ok(operation)
+    );
+    let snapshot = finished(&request).await;
+    assert!(matches!(snapshot.state, RequestState::Cancelled));
+    assert_eq!(
+        snapshot.cancel_reason,
+        Some(neuromita::request::CancelReason::ContextChanged)
+    );
+    assert!(snapshot.tool_activity.is_none());
+    assert!(snapshot.streamed_json.is_none());
+    assert!(snapshot.streamed_text.is_none());
+    assert!(
+        rx.try_recv().is_err(),
+        "reset context leaked a tool follow-up"
+    );
+    assert_eq!(
+        CharacterApi::get(CharacterId::Crazy)
+            .unwrap()
+            .state()
+            .await
+            .unwrap()
+            .accepted_replies,
+        0
+    );
+    app.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn selection_change_while_tool_followup_is_awaited_drops_late_answer() {
+    let _serial = SERIAL.lock().await;
+    let (app, mut rx) = start().await;
+    SettingsApi::edit::<ToolSettings>(|tools| {
+        tools.enabled = true;
+        tools.calculator = true;
+    })
+    .unwrap();
+    let request = reply();
+    receive(&mut rx)
+        .await
+        .respond
+        .send(call("calculator", serde_json::json!({"expression":"5+6"})))
+        .unwrap();
+    let delayed = receive(&mut rx).await;
+    assert_eq!(delayed.input.tool_history.len(), 2);
+    assert!(request.snapshot().tool_activity.is_some());
+    let selected = app.timeline_selection();
+    app.select_timeline_branch(selected.branch_id, selected)
+        .unwrap();
+    let snapshot = finished(&request).await;
+    assert!(matches!(snapshot.state, RequestState::Cancelled));
+    assert_eq!(
+        snapshot.cancel_reason,
+        Some(neuromita::request::CancelReason::SelectionChanged)
+    );
+    assert!(snapshot.tool_activity.is_none());
+    assert!(snapshot.streamed_json.is_none());
+    assert!(snapshot.streamed_text.is_none());
+    assert!(
+        delayed
+            .respond
+            .send(StructuredResponse::spoken("late stale answer"))
+            .is_err()
+    );
+    assert_eq!(
+        CharacterApi::get(CharacterId::Crazy)
+            .unwrap()
+            .state()
+            .await
+            .unwrap()
+            .accepted_replies,
+        0
+    );
+    app.shutdown().await.unwrap();
+}

@@ -11,7 +11,10 @@ use crate::{
     generation::GenerationError,
     identity::RequestId,
     interaction::TurnIntent,
-    timeline::{ContextPosition, EventId, conversation::ConversationAudience},
+    timeline::{
+        ContextAnchor, ContextPosition, EventId, conversation::ConversationAudience,
+        selection::TimelineSelection,
+    },
     voice::VoiceError,
 };
 
@@ -21,6 +24,12 @@ pub enum RequestSource {
     Scheduler,
     Client(Uuid),
     Game(Uuid),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RegenerateProtocol {
+    LegacyFork,
+    SameBranch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,15 +48,25 @@ pub trait GenerationCommand: Send + Sync + fmt::Debug {
     fn intent(&self) -> TurnIntent;
     fn at(&self) -> ContextPosition;
     fn audience(&self) -> &ConversationAudience;
+    fn timeline_fence(&self) -> Option<TimelineFence> {
+        None
+    }
     fn game_context(&self) -> Option<&GameRuntimeContext> {
         None
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimelineFence {
+    pub at: ContextAnchor,
+    pub selection: TimelineSelection,
 }
 
 #[derive(Debug)]
 pub struct ReplyRequest {
     character_id: CharacterId,
     message: EventId,
+    fence: Option<TimelineFence>,
     source: RequestSource,
     at: ContextPosition,
     audience: ConversationAudience,
@@ -59,6 +78,7 @@ impl ReplyRequest {
         Self {
             character_id,
             message,
+            fence: None,
             source,
             at: ContextPosition::Latest,
             audience: ConversationAudience::private_to(character_id),
@@ -67,6 +87,11 @@ impl ReplyRequest {
     }
     pub fn at(mut self, at: ContextPosition) -> Self {
         self.at = at;
+        self
+    }
+    pub fn expect_timeline(mut self, fence: TimelineFence) -> Self {
+        self.at = ContextPosition::At(fence.at);
+        self.fence = Some(fence);
         self
     }
     pub fn with_audience(mut self, audience: ConversationAudience) -> Self {
@@ -85,6 +110,9 @@ impl GenerationCommand for ReplyRequest {
     }
     fn guidance(&self) -> &str {
         ""
+    }
+    fn timeline_fence(&self) -> Option<TimelineFence> {
+        self.fence
     }
     fn source(&self) -> RequestSource {
         self.source
@@ -315,9 +343,20 @@ pub struct RequestSnapshot {
     pub state: RequestState,
     pub dataset: DatasetCapture,
     pub cancel_reason: Option<CancelReason>,
+    /// Durable acceptance by another Timeline owner. This is not an AcceptedResponse.
+    pub durable_resolution: Option<DurableRequestResolution>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DurableRequestResolution {
+    AcceptedElsewhere(EventId),
 }
 
 impl RequestSnapshot {
+    pub fn is_resolved(&self) -> bool {
+        self.state.is_terminal() || self.durable_resolution.is_some()
+    }
+
     pub fn provisional_text(&self) -> Option<&str> {
         match &self.state {
             RequestState::Processing(
@@ -330,15 +369,16 @@ impl RequestSnapshot {
     }
 
     pub fn can_cancel(&self) -> bool {
-        matches!(
-            self.state,
-            RequestState::Pending
-                | RequestState::Processing(
-                    ProcessingStage::GeneratingText
-                        | ProcessingStage::TextReady { .. }
-                        | ProcessingStage::GeneratingVoice { .. }
-                )
-        )
+        self.durable_resolution.is_none()
+            && matches!(
+                self.state,
+                RequestState::Pending
+                    | RequestState::Processing(
+                        ProcessingStage::GeneratingText
+                            | ProcessingStage::TextReady { .. }
+                            | ProcessingStage::GeneratingVoice { .. }
+                    )
+            )
     }
 }
 
@@ -378,10 +418,14 @@ pub enum SubmitError {
     PromptUnavailable(String),
     #[error("target event is not observable or not a message when replying")]
     InvalidTargetEvent,
+    #[error("timeline changed before retry could be admitted")]
+    StaleTimeline,
 }
 
 #[derive(Debug, Error)]
 pub enum ObserveError {
     #[error("request observation closed before completion")]
     ClosedBeforeCompletion,
+    #[error("request reply was durably accepted by another Timeline owner at event {0:?}")]
+    DurablyAcceptedElsewhere(EventId),
 }

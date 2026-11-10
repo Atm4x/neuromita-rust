@@ -19,8 +19,8 @@ pub(crate) use chat::PresenterRunner;
 pub use chat::{ChatModel, ChatPresenter, PresenterError, RequestView};
 pub use connections::ConnectionsPresenter;
 pub use conversation::{
-    ConversationChange, ConversationChangePreview, ConversationError, ConversationPresenter,
-    ConversationSnapshot,
+    ConversationChange, ConversationChangePreview, ConversationError, ConversationHistoryPage,
+    ConversationPresenter, ConversationSnapshot, RegeneratePreview,
 };
 pub use presets::{
     PresetParameterOption, PresetView, PresetsApi, PresetsPresenter, PresetsView, ProviderOption,

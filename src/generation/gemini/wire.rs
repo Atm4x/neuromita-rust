@@ -9,6 +9,7 @@ use crate::{
         GenerationError, PreparedPrompt, PromptMessage, PromptRole, ProviderUsage,
         conversation::{LlmConversation, LlmRole},
         structured::StructuredResponse,
+        transforms::{TrackedPrompt, apply_tracked_transforms},
     },
     knowledge::history_window::HistoryWindow,
 };
@@ -112,16 +113,27 @@ pub(super) fn encode_with_memory(
         memory,
         None,
         None,
-        &[],
-        &[],
-        &super::super::ToolSettings::default(),
+        WireTools {
+            history: &[],
+            native_history: &[],
+            settings: &super::super::ToolSettings::default(),
+        },
+        None,
     )
+    .expect("test fixture uses only text messages")
     .body
 }
 
 pub(super) struct EncodedRequest {
     pub(super) body: GenerateContent,
     pub(super) prompt: Vec<PromptMessage>,
+    pub(super) media_present: bool,
+}
+
+pub(super) struct WireTools<'a> {
+    pub(super) history: &'a [PromptMessage],
+    pub(super) native_history: &'a [super::super::provider::NativeToolExchange],
+    pub(super) settings: &'a super::super::ToolSettings,
 }
 
 pub(super) fn encode_observed(
@@ -130,11 +142,16 @@ pub(super) fn encode_observed(
     memory: &Option<String>,
     history_window: Option<&HistoryWindow>,
     prepared: Option<&PreparedPrompt>,
-    tool_history: &[PromptMessage],
-    native_history: &[super::super::provider::NativeToolExchange],
-    tools: &super::super::ToolSettings,
-) -> EncodedRequest {
+    tools: WireTools<'_>,
+    assets: Option<&crate::timeline::storage::assets::TimelineAssetStore>,
+) -> Result<EncodedRequest, GenerationError> {
     let conversation = LlmConversation::from_context_with_window(&context, memory, history_window);
+    let media = super::super::live_multimodal::LiveMedia::prepare(
+        &conversation,
+        &context.view,
+        assets,
+        super::super::live_multimodal::LiveDialect::Gemini,
+    )?;
     let mut prompt = conversation
         .system_segments(&context, prepared)
         .into_iter()
@@ -143,6 +160,8 @@ pub(super) fn encode_observed(
             text: Arc::from(text),
         })
         .collect::<Vec<_>>();
+    let mut origins = vec![None; prompt.len()];
+    origins.extend(conversation.messages.iter().map(|message| message.source));
     prompt.extend(conversation.messages.iter().map(|message| PromptMessage {
         role: match message.role {
             LlmRole::User => PromptRole::User,
@@ -150,8 +169,10 @@ pub(super) fn encode_observed(
         },
         text: Arc::from(message.text.as_str()),
     }));
-    prompt.extend_from_slice(tool_history);
-    if let Some(instructions) = super::super::tools::advertisement(tools) {
+    prompt.extend_from_slice(tools.history);
+    origins.extend(std::iter::repeat_n(None, tools.history.len()));
+    if let Some(instructions) = super::super::tools::advertisement(tools.settings) {
+        origins.insert(0, None);
         prompt.insert(
             0,
             PromptMessage {
@@ -160,15 +181,42 @@ pub(super) fn encode_observed(
             },
         );
     }
-    encode_prompt(prompt, template, native_history, tools)
+    encode_prompt_with_media(
+        prompt,
+        origins,
+        template,
+        tools.native_history,
+        tools.settings,
+        media.as_ref(),
+    )
 }
 
+#[cfg(test)]
 fn encode_prompt(
-    mut prompt: Vec<PromptMessage>,
+    prompt: Vec<PromptMessage>,
     template: &GeminiTemplate,
     native_history: &[super::super::provider::NativeToolExchange],
     tools: &super::super::ToolSettings,
 ) -> EncodedRequest {
+    encode_prompt_with_media(
+        prompt.clone(),
+        vec![None; prompt.len()],
+        template,
+        native_history,
+        tools,
+        None,
+    )
+    .expect("text-only Gemini serialization cannot fail")
+}
+
+fn encode_prompt_with_media(
+    mut prompt: Vec<PromptMessage>,
+    mut origins: Vec<Option<crate::identity::EventId>>,
+    template: &GeminiTemplate,
+    native_history: &[super::super::provider::NativeToolExchange],
+    tools: &super::super::ToolSettings,
+    media: Option<&super::super::live_multimodal::LiveMedia>,
+) -> Result<EncodedRequest, GenerationError> {
     let declarations = super::super::tools::native_definitions(tools);
     let native_tools = !declarations.is_empty();
     if !template.options().structured_output || native_tools {
@@ -176,6 +224,7 @@ fn encode_prompt(
             .iter()
             .take_while(|m| m.role == PromptRole::System)
             .count();
+        origins.insert(index, None);
         prompt.insert(
             index,
             PromptMessage {
@@ -188,37 +237,56 @@ fn encode_prompt(
             },
         );
     }
-    let prompt = crate::generation::apply_message_transforms(prompt, template.transforms());
-    let mut prompt = crate::generation::apply_message_transforms(
-        prompt,
+    assert_eq!(
+        prompt.len(),
+        origins.len(),
+        "prompt lineage must cover every input"
+    );
+    let mut tracked = apply_tracked_transforms(
+        prompt
+            .into_iter()
+            .zip(origins)
+            .map(|(m, source)| TrackedPrompt::new(m, source))
+            .collect(),
+        template.transforms(),
+    );
+    tracked = apply_tracked_transforms(
+        tracked,
         &[crate::generation::MessageTransform::SystemMessagesToUser {
             tag: "[SYSTEM INFO]".into(),
         }],
     );
     if let super::SystemInstructionMode::UserPrefix { tag } = &template.options().system_instruction
     {
-        let instructions = prompt
+        let instructions = tracked
             .iter()
             .filter(|m| m.role == PromptRole::System)
-            .map(|m| m.text.as_ref())
+            .map(TrackedPrompt::text)
             .collect::<Vec<_>>()
             .join("\n");
-        prompt.retain(|m| m.role != PromptRole::System);
+        tracked.retain(|m| m.role != PromptRole::System);
         if !instructions.trim().is_empty() {
             let prefix = format!("{tag}\n{}\n\n", instructions.trim());
-            if let Some(message) = prompt.iter_mut().find(|m| m.role == PromptRole::User) {
-                message.text = format!("{prefix}{}", message.text).into();
+            if let Some(message) = tracked.iter_mut().find(|m| m.role == PromptRole::User) {
+                message.prepend(prefix);
             } else {
-                prompt.insert(
+                tracked.insert(
                     0,
-                    PromptMessage {
-                        role: PromptRole::User,
-                        text: prefix.into(),
-                    },
+                    TrackedPrompt::new(
+                        PromptMessage {
+                            role: PromptRole::User,
+                            text: prefix.into(),
+                        },
+                        None,
+                    ),
                 );
             }
         }
     }
+    let prompt = tracked
+        .iter()
+        .map(TrackedPrompt::message)
+        .collect::<Vec<_>>();
     let instructions = prompt
         .iter()
         .filter(|m| m.role == PromptRole::System && !m.text.trim().is_empty())
@@ -227,7 +295,7 @@ fn encode_prompt(
             thought: None,
         })
         .collect::<Vec<_>>();
-    let body = GenerateContent {
+    let mut body = GenerateContent {
         system_instruction: (!instructions.is_empty()).then_some(Content {
             role: None,
             parts: instructions,
@@ -290,7 +358,18 @@ fn encode_prompt(
         }),
         tool_config: native_tools.then(|| json!({"functionCallingConfig":{"mode":"AUTO"}})),
     };
-    EncodedRequest { body, prompt }
+    if let Some(media) = media {
+        media.attach_tracked(
+            &tracked,
+            &mut body.contents,
+            super::super::live_multimodal::LiveDialect::Gemini,
+        )?;
+    }
+    Ok(EncodedRequest {
+        body,
+        prompt,
+        media_present: media.is_some(),
+    })
 }
 
 #[derive(Deserialize)]

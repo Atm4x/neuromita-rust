@@ -210,6 +210,7 @@ pub(crate) async fn select_semantic_generation(
     query: &str,
     config: HistorySearchConfig,
     history_fusion: bool,
+    turn: crate::timeline::selection::TimelineTurn,
 ) -> Result<Option<String>, GenerationFusionError> {
     if view.character() != character || !window.matches(view) {
         return Err(GenerationFusionError::StaleSelection);
@@ -233,7 +234,7 @@ pub(crate) async fn select_semantic_generation(
         .map(|record| (*record).clone())
         .collect::<Vec<_>>();
     let (space, memory_scores, history_scores, cost) = retriever
-        .score_joint_generation(character, &admitted, &messages, query)
+        .score_joint_generation(character, &admitted, &messages, query, turn)
         .await?;
     let mut ranked_facts = facts.iter().copied().zip(memory_scores).collect::<Vec<_>>();
     ranked_facts.sort_by(|(a, a_score), (b, b_score)| {

@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex},
+};
 
 use thiserror::Error;
 use tokio::{
@@ -11,8 +14,9 @@ use crate::{
     character::CharacterId,
     request::{
         CancelResult, ChatApiState, DiscoveryError, InitiateRequest, InputError, ReactRequest,
-        ReplyRequest, RequestDiscovery, RequestHandle, RequestId, RequestMetadata, RequestSnapshot,
-        RequestSource, SubmitError, UserInput,
+        ReplyRequest, RequestDiscovery, RequestHandle, RequestId, RequestMetadata, RequestOutcome,
+        RequestSnapshot, RequestSource, RequestState, SubmitError, TimelineFence, TurnIntent,
+        UserInput,
     },
     settings::SettingsError,
     timeline::{ContextPosition, EventId},
@@ -41,6 +45,10 @@ pub enum PresenterError {
     Submit(#[from] SubmitError),
     #[error("request is no longer active")]
     NotActive,
+    #[error("retry is only available for the latest failed or cancelled presenter reply")]
+    RetryUnavailable,
+    #[error("this request has already been retried")]
+    RetryAlreadyUsed,
     #[error(transparent)]
     Settings(#[from] SettingsError),
 }
@@ -49,6 +57,7 @@ pub enum PresenterError {
 pub struct ChatPresenter {
     api: Arc<ChatApiState>,
     model: watch::Receiver<Arc<ChatModel>>,
+    retry_claims: Arc<Mutex<HashSet<RequestId>>>,
 }
 
 impl ChatPresenter {
@@ -92,6 +101,57 @@ impl ChatPresenter {
         let event = self.api.publish_message(character, UserInput::new(text)?)?;
         let request = ReplyRequest::new(character, event, RequestSource::Presenter).at(at);
         Ok(self.api.send(request)?)
+    }
+
+    /// Returns the failed input event without producing a new Timeline message.
+    /// Retry is deliberately restricted to the latest request for this character:
+    /// the UI cannot implicitly discard later turns or regenerate accepted text.
+    pub(crate) fn retry_target(
+        &self,
+        character: CharacterId,
+        source: RequestId,
+    ) -> Result<crate::timeline::EventId, PresenterError> {
+        let model = self.model.borrow();
+        let latest = model
+            .requests
+            .iter()
+            .rev()
+            .find(|row| row.metadata.character_id == character)
+            .ok_or(PresenterError::RetryUnavailable)?;
+        if latest.metadata.id != source || latest.metadata.source != RequestSource::Presenter {
+            return Err(PresenterError::RetryUnavailable);
+        }
+        let target = match latest.metadata.intent {
+            TurnIntent::Reply(event) => event,
+            _ => return Err(PresenterError::RetryUnavailable),
+        };
+        match latest.snapshot.state {
+            RequestState::Cancelled
+            | RequestState::Finished(RequestOutcome::TextGenerationFailed(_))
+            | RequestState::Finished(RequestOutcome::InternalError(_)) => Ok(target),
+            _ => Err(PresenterError::RetryUnavailable),
+        }
+    }
+
+    pub(crate) fn retry_failed_at(
+        &self,
+        character: CharacterId,
+        source: RequestId,
+        fence: TimelineFence,
+    ) -> Result<RequestHandle, PresenterError> {
+        let mut claimed = self
+            .retry_claims
+            .lock()
+            .expect("retry claims mutex poisoned");
+        if claimed.contains(&source) {
+            return Err(PresenterError::RetryAlreadyUsed);
+        }
+        let event = self.retry_target(character, source)?;
+        let handle = self.api.send(
+            ReplyRequest::new(character, event, RequestSource::Presenter).expect_timeline(fence),
+        )?;
+        claimed.insert(source);
+        Ok(handle)
     }
 
     pub fn cancel(&self, id: RequestId) -> Result<CancelResult, PresenterError> {
@@ -145,6 +205,7 @@ impl PresenterRunner {
         let presenter = ChatPresenter {
             api: Arc::clone(&api),
             model: receive_model,
+            retry_claims: Arc::new(Mutex::new(HashSet::new())),
         };
         let runner = Self {
             api,

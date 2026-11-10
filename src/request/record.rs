@@ -4,9 +4,10 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use super::{registry::RegistryInner, *};
-use crate::timeline::selection::TimelineAdmission;
+use crate::identity::EventId;
 #[cfg(test)]
 use crate::timeline::selection::TimelineSelection;
+use crate::timeline::{RegenerateRecoveryOutcome, selection::TimelineAdmission};
 
 pub(crate) struct RequestRecord {
     inner: Mutex<Execution>,
@@ -17,6 +18,8 @@ pub(crate) struct RequestRecord {
     settings_snapshot: Option<Arc<crate::settings::SettingsSnapshot>>,
     admitted_preset: Option<crate::generation::GenerationPreset>,
     admitted_prompt: Option<Arc<crate::prompts::PromptSetSnapshot>>,
+    cancel_ingress: Option<Arc<dyn super::RegenerateCancellation>>,
+    regenerate_protocol: Option<RegenerateProtocol>,
 }
 
 struct Execution {
@@ -27,6 +30,19 @@ struct Execution {
     message: Option<Box<dyn GenerationCommand>>,
     trace: Option<RequestTrace>,
     draft_text: Option<Arc<str>>,
+    pending_terminal: Option<PendingTerminal>,
+}
+
+#[derive(Clone)]
+enum PendingTerminal {
+    Failure(RequestOutcome),
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RegenerateTerminalReconciliation {
+    Abandoned,
+    AcceptedElsewhere(EventId),
 }
 
 #[derive(Clone)]
@@ -65,7 +81,7 @@ impl RequestHandle {
     pub async fn wait(&self) -> Result<Arc<RequestSnapshot>, ObserveError> {
         let mut observer = self.observe();
         while let Some(snapshot) = observer.next().await? {
-            if snapshot.state.is_terminal() {
+            if snapshot.is_resolved() {
                 return Ok(snapshot);
             }
         }
@@ -92,7 +108,12 @@ impl RequestObserver {
         }
         self.initial = false;
         let snapshot = Arc::clone(&self.updates.borrow_and_update());
-        self.finished = snapshot.state.is_terminal();
+        self.finished = snapshot.is_resolved();
+        if let Some(DurableRequestResolution::AcceptedElsewhere(event)) =
+            snapshot.durable_resolution
+        {
+            return Err(ObserveError::DurablyAcceptedElsewhere(event));
+        }
         Ok(Some(snapshot))
     }
 }
@@ -106,6 +127,31 @@ impl RequestRecord {
         admitted_preset: Option<crate::generation::GenerationPreset>,
         admitted_prompt: Option<Arc<crate::prompts::PromptSetSnapshot>>,
         registry: Weak<RegistryInner>,
+        cancel_ingress: Option<Arc<dyn super::RegenerateCancellation>>,
+    ) -> Arc<Self> {
+        Self::new_with_protocol(
+            message,
+            id,
+            admission,
+            settings_snapshot,
+            admitted_preset,
+            admitted_prompt,
+            registry,
+            cancel_ingress,
+            None,
+        )
+    }
+
+    pub(crate) fn new_with_protocol(
+        message: Box<dyn GenerationCommand>,
+        id: RequestId,
+        admission: TimelineAdmission,
+        settings_snapshot: Option<Arc<crate::settings::SettingsSnapshot>>,
+        admitted_preset: Option<crate::generation::GenerationPreset>,
+        admitted_prompt: Option<Arc<crate::prompts::PromptSetSnapshot>>,
+        registry: Weak<RegistryInner>,
+        cancel_ingress: Option<Arc<dyn super::RegenerateCancellation>>,
+        regenerate_protocol: Option<RegenerateProtocol>,
     ) -> Arc<Self> {
         let snapshot = Arc::new(RequestSnapshot {
             metadata: RequestMetadata {
@@ -121,6 +167,7 @@ impl RequestRecord {
             tool_activity: None,
             dataset: DatasetCapture::default(),
             cancel_reason: None,
+            durable_resolution: None,
         });
         let (updates, _) = watch::channel(Arc::clone(&snapshot));
         let diagnostics_limits = registry
@@ -142,6 +189,7 @@ impl RequestRecord {
                 message: Some(message),
                 trace: Some(trace),
                 draft_text: None,
+                pending_terminal: None,
             }),
             updates,
             cancellation: CancellationToken::new(),
@@ -150,6 +198,8 @@ impl RequestRecord {
             settings_snapshot,
             admitted_preset,
             admitted_prompt,
+            cancel_ingress,
+            regenerate_protocol,
         })
     }
 
@@ -172,6 +222,7 @@ impl RequestRecord {
             tool_activity: None,
             dataset: inner.dataset.clone(),
             cancel_reason: inner.cancel_reason,
+            durable_resolution: inner.snapshot.durable_resolution,
         });
         inner.snapshot = Arc::clone(&snapshot);
         let phase = inner.phase;
@@ -214,9 +265,47 @@ impl RequestRecord {
         self.admission
     }
 
+    pub(crate) fn regenerate_protocol(&self) -> Option<RegenerateProtocol> {
+        self.regenerate_protocol
+    }
+
+    fn abandon_durable(
+        &self,
+        ingress: &dyn super::RegenerateCancellation,
+        request: RequestId,
+    ) -> Result<(), crate::timeline::domain::TimelineError> {
+        match self
+            .regenerate_protocol
+            .unwrap_or(RegenerateProtocol::LegacyFork)
+        {
+            RegenerateProtocol::LegacyFork => ingress.abandon_regenerate(request, self.admission),
+            RegenerateProtocol::SameBranch => {
+                ingress.abandon_same_branch_regenerate(request, self.admission)
+            }
+        }
+    }
+
+    fn inspect_durable(
+        &self,
+        ingress: &dyn super::RegenerateCancellation,
+        request: RequestId,
+    ) -> Result<RegenerateRecoveryOutcome, crate::timeline::domain::TimelineError> {
+        match self
+            .regenerate_protocol
+            .unwrap_or(RegenerateProtocol::LegacyFork)
+        {
+            RegenerateProtocol::LegacyFork => ingress
+                .inspect_regenerate(self.admission.selection.branch_id, request)
+                .map(|v| v.outcome),
+            RegenerateProtocol::SameBranch => {
+                ingress.inspect_same_branch_regenerate(self.admission.selection.branch_id, request)
+            }
+        }
+    }
+
     pub(crate) fn try_start(&self) -> Option<Box<dyn GenerationCommand>> {
         let mut inner = self.inner.lock().expect("request mutex poisoned");
-        if !matches!(inner.snapshot.state, RequestState::Pending) {
+        if inner.snapshot.is_resolved() || !matches!(inner.snapshot.state, RequestState::Pending) {
             return None;
         }
         let message = inner.message.take()?;
@@ -235,14 +324,47 @@ impl RequestRecord {
     }
 
     pub(crate) fn cancel_with_reason(&self, reason: CancelReason) -> CancelResult {
+        if let Some(ingress) = &self.cancel_ingress {
+            {
+                let inner = self.inner.lock().expect("request mutex poisoned");
+                if inner.snapshot.is_resolved() {
+                    return CancelResult::AlreadyFinished;
+                }
+                if inner.phase == EffectPhase::Applied {
+                    return CancelResult::TooLate;
+                }
+            }
+            let request = self.snapshot().metadata.id;
+            if let Err(error) = self.abandon_durable(ingress.as_ref(), request) {
+                if matches!(
+                    error,
+                    crate::timeline::domain::TimelineError::Storage(_)
+                        | crate::timeline::domain::TimelineError::ConcurrentWrite
+                ) {
+                    let mut inner = self.inner.lock().expect("request mutex poisoned");
+                    if !inner.snapshot.is_resolved() && inner.phase != EffectPhase::Applied {
+                        inner.pending_terminal = Some(PendingTerminal::Cancelled);
+                    }
+                }
+                self.observe_external_acceptance(ingress.as_ref(), request);
+                tracing::warn!(%request, %error, "durable regenerate abandonment refused");
+                return CancelResult::TooLate;
+            }
+        }
         let mut inner = self.inner.lock().expect("request mutex poisoned");
-        if inner.snapshot.state.is_terminal() {
+        if inner.snapshot.is_resolved() {
             return CancelResult::AlreadyFinished;
         }
-        if matches!(inner.phase, EffectPhase::Accepting | EffectPhase::Applied) {
+        if self.cancel_ingress.is_none()
+            && matches!(inner.phase, EffectPhase::Accepting | EffectPhase::Applied)
+        {
+            return CancelResult::TooLate;
+        }
+        if inner.phase == EffectPhase::Applied {
             return CancelResult::TooLate;
         }
         inner.cancel_reason.get_or_insert(reason);
+        inner.pending_terminal = None;
         self.cancellation.cancel();
         if matches!(inner.snapshot.state, RequestState::Pending) {
             inner.phase = EffectPhase::Discarded;
@@ -259,7 +381,8 @@ impl RequestRecord {
     pub(crate) fn begin_accepting(&self) -> bool {
         let mut inner = self.inner.lock().expect("request mutex poisoned");
         if inner.phase != EffectPhase::Working
-            || inner.snapshot.state.is_terminal()
+            || inner.snapshot.is_resolved()
+            || inner.pending_terminal.is_some()
             || self.cancellation.is_cancelled()
         {
             return false;
@@ -278,22 +401,167 @@ impl RequestRecord {
         true
     }
 
-    pub(crate) fn mark_applied(&self) {
+    pub(crate) fn mark_applied(&self) -> bool {
         let mut inner = self.inner.lock().expect("request mutex poisoned");
+        if matches!(
+            inner.snapshot.durable_resolution,
+            Some(DurableRequestResolution::AcceptedElsewhere(_))
+        ) {
+            return false;
+        }
         assert_eq!(inner.phase, EffectPhase::Accepting);
         inner.phase = EffectPhase::Applied;
         let snapshot = Arc::clone(&inner.snapshot);
         if let Some(trace) = &mut inner.trace {
             trace.push_transition(snapshot.revision, EffectPhase::Applied, &snapshot.state);
         }
+        true
+    }
+
+    fn observe_external_acceptance(
+        &self,
+        ingress: &dyn super::RegenerateCancellation,
+        request: RequestId,
+    ) -> Option<EventId> {
+        let RegenerateRecoveryOutcome::AcceptedReply(event) =
+            self.inspect_durable(ingress, request).ok()?
+        else {
+            return None;
+        };
+        self.seal_external_acceptance(event);
+        Some(event)
+    }
+
+    fn seal_external_acceptance(&self, event: EventId) {
+        let mut inner = self.inner.lock().expect("request mutex poisoned");
+        if inner.snapshot.is_resolved() || inner.phase == EffectPhase::Applied {
+            return;
+        }
+        inner.pending_terminal = None;
+        inner.phase = EffectPhase::Applied;
+        inner.message.take();
+        let snapshot = Arc::new(RequestSnapshot {
+            metadata: inner.snapshot.metadata.clone(),
+            revision: inner.snapshot.revision + 1,
+            state: inner.snapshot.state.clone(),
+            streamed_json: None,
+            streamed_text: None,
+            tool_activity: None,
+            cancel_reason: inner.cancel_reason,
+            dataset: inner.dataset.clone(),
+            durable_resolution: Some(DurableRequestResolution::AcceptedElsewhere(event)),
+        });
+        inner.snapshot = Arc::clone(&snapshot);
+        if let Some(trace) = &mut inner.trace {
+            trace.accepted_elsewhere(event, snapshot.revision);
+            trace.finished();
+        }
+        self.updates.send_replace(snapshot);
+        drop(inner);
+        self.cancellation.cancel();
+        self.retire();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn externally_accepted(&self) -> Option<EventId> {
+        let inner = self.inner.lock().expect("request mutex poisoned");
+        match inner.snapshot.durable_resolution {
+            Some(DurableRequestResolution::AcceptedElsewhere(event)) => Some(event),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn reconcile_pending_terminal(
+        &self,
+    ) -> Result<Option<RegenerateTerminalReconciliation>, String> {
+        let pending = {
+            let inner = self.inner.lock().expect("request mutex poisoned");
+            inner.pending_terminal.clone()
+        };
+        let Some(pending) = pending else {
+            return Ok(None);
+        };
+        let Some(ingress) = &self.cancel_ingress else {
+            return Ok(None);
+        };
+        let request = self.snapshot().metadata.id;
+        match self.abandon_durable(ingress.as_ref(), request) {
+            Ok(()) => {
+                match pending {
+                    PendingTerminal::Failure(outcome) => self.finish_volatile(outcome),
+                    PendingTerminal::Cancelled => self.finish_cancelled_volatile(),
+                }
+                Ok(Some(RegenerateTerminalReconciliation::Abandoned))
+            }
+            Err(error) => {
+                if let Some(event) = self.observe_external_acceptance(ingress.as_ref(), request) {
+                    return Ok(Some(RegenerateTerminalReconciliation::AcceptedElsewhere(
+                        event,
+                    )));
+                }
+                Err(error.to_string())
+            }
+        }
     }
 
     pub(crate) fn finish(&self, outcome: RequestOutcome) {
-        let mut inner = self.inner.lock().expect("request mutex poisoned");
-        if inner.snapshot.state.is_terminal() {
+        if self.snapshot().is_resolved() {
             return;
         }
-        let cancelled = inner.phase == EffectPhase::Working && self.cancellation.is_cancelled();
+        if self
+            .inner
+            .lock()
+            .expect("request mutex poisoned")
+            .pending_terminal
+            .is_some()
+        {
+            if let Err(error) = self.reconcile_pending_terminal() {
+                tracing::warn!(%error, "regenerate terminal still requires reconciliation");
+            }
+            return;
+        }
+        if matches!(
+            outcome,
+            RequestOutcome::TextGenerationFailed(_) | RequestOutcome::InternalError(_)
+        ) && let Some(ingress) = &self.cancel_ingress
+        {
+            let request = self.snapshot().metadata.id;
+            let should_abandon = {
+                let inner = self.inner.lock().expect("request mutex poisoned");
+                !inner.snapshot.is_resolved() && inner.phase != EffectPhase::Applied
+            };
+            if !should_abandon {
+                if self
+                    .observe_external_acceptance(ingress.as_ref(), request)
+                    .is_some()
+                {
+                    return;
+                }
+            } else if let Err(error) = self.abandon_durable(ingress.as_ref(), request) {
+                if self
+                    .observe_external_acceptance(ingress.as_ref(), request)
+                    .is_some()
+                {
+                    return;
+                }
+                let mut inner = self.inner.lock().expect("request mutex poisoned");
+                if !inner.snapshot.is_resolved() && inner.phase != EffectPhase::Applied {
+                    inner.pending_terminal = Some(PendingTerminal::Failure(outcome));
+                }
+                tracing::warn!(%request, %error, "regenerate failure remains pending durable reconciliation");
+                return;
+            }
+        }
+        self.finish_volatile(outcome);
+    }
+
+    fn finish_volatile(&self, outcome: RequestOutcome) {
+        let mut inner = self.inner.lock().expect("request mutex poisoned");
+        if inner.snapshot.is_resolved() {
+            return;
+        }
+        inner.pending_terminal = None;
+        let cancelled = inner.phase != EffectPhase::Applied && self.cancellation.is_cancelled();
         if inner.phase != EffectPhase::Applied {
             inner.phase = if matches!(
                 outcome,
@@ -323,14 +591,47 @@ impl RequestRecord {
     }
 
     pub(crate) fn finish_cancelled(&self) {
+        {
+            let inner = self.inner.lock().expect("request mutex poisoned");
+            if inner.snapshot.is_resolved()
+                || inner.phase == EffectPhase::Applied
+                || (inner.phase == EffectPhase::Accepting && !self.cancellation.is_cancelled())
+            {
+                return;
+            }
+        }
+        if let Some(ingress) = &self.cancel_ingress {
+            let request = self.snapshot().metadata.id;
+            if let Err(error) = self.abandon_durable(ingress.as_ref(), request) {
+                if self
+                    .observe_external_acceptance(ingress.as_ref(), request)
+                    .is_some()
+                {
+                    return;
+                }
+                let mut inner = self.inner.lock().expect("request mutex poisoned");
+                if !inner.snapshot.is_resolved() && inner.phase != EffectPhase::Applied {
+                    inner.pending_terminal = Some(PendingTerminal::Cancelled);
+                }
+                tracing::warn!(%request, %error, "regenerate cancellation remains pending durable reconciliation");
+                return;
+            }
+        }
+        self.finish_cancelled_volatile();
+    }
+
+    fn finish_cancelled_volatile(&self) {
         let mut inner = self.inner.lock().expect("request mutex poisoned");
-        if inner.snapshot.state.is_terminal()
-            || matches!(inner.phase, EffectPhase::Accepting | EffectPhase::Applied)
+        if inner.snapshot.is_resolved()
+            || inner.phase == EffectPhase::Applied
+            || (inner.phase == EffectPhase::Accepting && !self.cancellation.is_cancelled())
         {
             return;
         }
+        inner.pending_terminal = None;
         inner.phase = EffectPhase::Discarded;
         inner.message.take();
+        self.cancellation.cancel();
         if let Some(trace) = &mut inner.trace {
             trace.cancelled();
             trace.finished();
@@ -362,6 +663,7 @@ impl RequestRecord {
             tool_activity: inner.snapshot.tool_activity.clone(),
             cancel_reason: inner.cancel_reason,
             dataset: inner.dataset.clone(),
+            durable_resolution: inner.snapshot.durable_resolution,
         });
         inner.snapshot = Arc::clone(&snapshot);
         self.updates.send_replace(snapshot);
@@ -470,6 +772,13 @@ impl RequestRecord {
         combined.push_str(delta);
         let mut snapshot = (*inner.snapshot).clone();
         snapshot.revision += 1;
+        if snapshot
+            .tool_activity
+            .as_ref()
+            .is_some_and(|activity| !activity.executing)
+        {
+            snapshot.tool_activity = None;
+        }
         snapshot.streamed_text = super::stream_preview::spoken_prefix(&combined).map(Arc::from);
         snapshot.streamed_json = Some(Arc::from(combined));
         inner.snapshot = Arc::new(snapshot);
@@ -533,7 +842,7 @@ impl RequestRecord {
 
     pub(crate) fn tool_finished(&self) {
         let mut inner = self.inner.lock().expect("request mutex poisoned");
-        if self.cancellation.is_cancelled() || inner.snapshot.state.is_terminal() {
+        if self.cancellation.is_cancelled() || inner.snapshot.is_resolved() {
             return;
         }
         let mut snapshot = (*inner.snapshot).clone();
@@ -551,7 +860,7 @@ impl RequestRecord {
 
     pub(crate) fn stream_reset(&self) {
         let mut inner = self.inner.lock().expect("request mutex poisoned");
-        if self.cancellation.is_cancelled() || inner.snapshot.state.is_terminal() {
+        if self.cancellation.is_cancelled() || inner.snapshot.is_resolved() {
             return;
         }
         let mut snapshot = (*inner.snapshot).clone();
@@ -776,6 +1085,50 @@ mod tests {
         let terminal = handle.snapshot();
         assert!(matches!(terminal.state, RequestState::Cancelled));
         assert!(terminal.tool_activity.is_none());
+    }
+
+    #[test]
+    fn completed_tool_activity_does_not_shadow_follow_up_stream_preview() {
+        let registry = RequestRegistry::new(4);
+        let handle = registry.register(
+            Box::new(request()),
+            RequestId::new(),
+            TimelineAdmission {
+                selection: selection(),
+                context_epoch: 0,
+            },
+        );
+        let record = Arc::clone(&handle.record);
+        assert!(record.try_start().is_some());
+        let args = serde_json::json!({"expression": "2+3"});
+        record.tool_started("calculator", args.as_object().unwrap(), "Проверяю");
+        record.tool_finished();
+        record.stream_reset();
+        let waiting = handle.snapshot();
+        assert_eq!(
+            waiting.tool_activity.as_ref().unwrap().name.as_ref(),
+            "calculator"
+        );
+        assert!(!waiting.tool_activity.as_ref().unwrap().executing);
+        assert_eq!(waiting.streamed_text.as_deref(), Some("Проверяю"));
+
+        record.stream_delta("{\"segments\":[{\"text\":\"Новый ответ\"}]}");
+        let resumed = handle.snapshot();
+        assert_eq!(resumed.streamed_text.as_deref(), Some("Новый ответ"));
+        assert!(
+            resumed.tool_activity.is_none(),
+            "finished tool must not shadow a new answer"
+        );
+        assert!(matches!(
+            resumed.state,
+            RequestState::Processing(ProcessingStage::GeneratingText)
+        ));
+        assert_eq!(handle.cancel(), CancelResult::Requested);
+        record.finish_cancelled();
+        let cancelled = handle.snapshot();
+        assert!(cancelled.tool_activity.is_none());
+        assert!(cancelled.streamed_json.is_none());
+        assert!(cancelled.streamed_text.is_none());
     }
 
     #[test]

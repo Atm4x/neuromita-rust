@@ -5,8 +5,9 @@ use serde_json::{Map, Value};
 use crate::identity::{CharacterId, EventId, RequestId};
 
 use super::{
-    character_view,
+    TimelineMessagePart, character_view,
     model::{EventKind, KnownEvent, TimelineFact},
+    parse_message_content,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +32,27 @@ pub struct ProjectedMessage {
     pub speaker: Option<String>,
     pub content: String,
     pub fields: Map<String, Value>,
+}
+
+fn projected_text(content: &Value) -> String {
+    if let Some(text) = crate::timeline::conversation::spoken_text(content) {
+        return text;
+    }
+    parse_message_content(content)
+        .ok()
+        .map(|parts| {
+            parts
+                .into_iter()
+                .filter_map(|part| match part {
+                    TimelineMessagePart::Text { text } => Some(text),
+                    _ => None,
+                })
+                .map(|text| text.trim().to_owned())
+                .filter(|text| !text.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default()
 }
 
 fn record(known: &KnownEvent, character: CharacterId) -> Option<ProjectedMessage> {
@@ -80,7 +102,7 @@ fn record(known: &KnownEvent, character: CharacterId) -> Option<ProjectedMessage
     };
     let content = fields
         .get("content")
-        .and_then(crate::timeline::conversation::spoken_text)
+        .map(projected_text)
         .unwrap_or_default();
     Some(ProjectedMessage {
         event_id: draft.id,
@@ -110,6 +132,8 @@ pub struct CharacterMessageProjection {
     seen: HashSet<EventId>,
     known: HashMap<EventId, ProjectedMessage>,
     visible: HashMap<EventId, ProjectedMessage>,
+    hidden: HashSet<EventId>,
+    revisions: HashMap<EventId, Map<String, Value>>,
 }
 
 impl CharacterMessageProjection {
@@ -119,6 +143,8 @@ impl CharacterMessageProjection {
             seen: HashSet::new(),
             known: HashMap::new(),
             visible: HashMap::new(),
+            hidden: HashSet::new(),
+            revisions: HashMap::new(),
         }
     }
 
@@ -130,17 +156,32 @@ impl CharacterMessageProjection {
             self.seen.clear();
             self.known.clear();
             self.visible.clear();
+            self.hidden.clear();
+            self.revisions.clear();
         }
         if !self.seen.insert(draft.id) {
             return;
         }
-        if let Some(entry) = record(item, self.character) {
+        if let Some(mut entry) = record(item, self.character) {
+            if let Some(changes) = self.revisions.get(&draft.id) {
+                for (field, value) in changes {
+                    entry.fields.insert(field.clone(), value.clone());
+                }
+                entry.content = entry
+                    .fields
+                    .get("content")
+                    .map(projected_text)
+                    .unwrap_or_default();
+            }
             self.known.insert(draft.id, entry.clone());
-            self.visible.insert(draft.id, entry);
+            if !self.hidden.contains(&draft.id) {
+                self.visible.insert(draft.id, entry);
+            }
         } else if direct && draft.kind == EventKind::MessageHidden {
             if let Some(ids) = draft.payload.get("event_ids").and_then(Value::as_array) {
                 for id in ids {
                     if let Some(id) = id.as_str().and_then(|id| uuid::Uuid::parse_str(id).ok()) {
+                        self.hidden.insert(EventId(id));
                         self.visible.remove(&EventId(id));
                     }
                 }
@@ -155,22 +196,30 @@ impl CharacterMessageProjection {
                 .get("event_id")
                 .and_then(Value::as_str)
                 .and_then(|id| uuid::Uuid::parse_str(id).ok())
-            && let Some(original) = self.known.get_mut(&EventId(target))
         {
+            let target = EventId(target);
             if draft.kind == EventKind::MessageRevised
                 && let Some(changes) = draft.payload.get("message").and_then(Value::as_object)
             {
-                for (field, value) in changes {
-                    original.fields.insert(field.clone(), value.clone());
+                self.revisions
+                    .entry(target)
+                    .or_default()
+                    .extend(changes.clone());
+                if let Some(original) = self.known.get_mut(&target) {
+                    for (field, value) in changes {
+                        original.fields.insert(field.clone(), value.clone());
+                    }
+                    original.content = original
+                        .fields
+                        .get("content")
+                        .map(projected_text)
+                        .unwrap_or_default();
                 }
-                original.content = original
-                    .fields
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
             }
-            self.visible.insert(EventId(target), original.clone());
+            self.hidden.remove(&target);
+            if let Some(original) = self.known.get(&target) {
+                self.visible.insert(target, original.clone());
+            }
         }
     }
 
@@ -178,6 +227,10 @@ impl CharacterMessageProjection {
         let mut messages: Vec<_> = self.visible.values().collect();
         messages.sort_by_key(|item| (item.learned_at, item.sequence));
         messages
+    }
+
+    pub fn observer(&self) -> CharacterId {
+        self.character
     }
 
     pub fn count(&self) -> usize {
