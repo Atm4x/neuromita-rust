@@ -57,8 +57,8 @@ fn persistent_core_owns_exclusive_preset_lease_until_catalog_is_dropped() {
     assert!(!root.0.join(".preset-activation-journal").exists());
     assert!(matches!(
         config(&root),
-        Err(neuromita::app::ApplicationError::PresetActivation(
-            PresetActivationError::StorageBusy
+        Err(neuromita::app::ApplicationError::Settings(
+            neuromita::settings::SettingsError::Storage(_)
         ))
     ));
     drop(first);

@@ -420,8 +420,13 @@ fn concurrent_writers_publish_whole_documents_only() {
     };
     let left_results = left_thread.join().unwrap();
     let right_results = right_thread.join().unwrap();
-    assert!(left_results.iter().any(|saved| *saved));
-    assert!(right_results.iter().any(|saved| *saved));
+    // Writers may fail fast while the other owner holds the portable-root lease.
+    assert!(
+        left_results
+            .iter()
+            .chain(&right_results)
+            .any(|saved| *saved)
+    );
 
     let final_store = JsonSettingsRepository::new(store_path);
     let loaded = final_store.load().unwrap();

@@ -329,12 +329,16 @@ mod tests {
                 expected_revision: 17
             })
         );
+        let receipt = std::env::temp_dir().join("receipt with spaces.json");
         assert_eq!(
-            parse("/documents activate Kind 9 \"/tmp/receipt with spaces.json\""),
+            parse(&format!(
+                "/documents activate Kind 9 \"{}\"",
+                receipt.display()
+            )),
             Ok(DocumentsCommand::Activate {
                 character: CharacterId::Kind,
                 expected_revision: 9,
-                receipt_path: PathBuf::from("/tmp/receipt with spaces.json")
+                receipt_path: receipt
             })
         );
         for invalid in [
@@ -450,8 +454,11 @@ mod lifecycle_tests {
         }
     }
 
+    static CORE_TEST_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[tokio::test]
     async fn real_terminal_operator_activates_persists_inspects_and_deactivates_after_restart() {
+        let _serial = CORE_TEST_MUTEX.lock().await;
         let folder = std::env::temp_dir().join(format!("nm-doc-operator-{}", uuid::Uuid::new_v4()));
         let crazy = folder.join("crazy");
         let kind = folder.join("kind");
@@ -633,6 +640,7 @@ mod lifecycle_tests {
 
     #[tokio::test]
     async fn failed_durable_write_requires_explicit_cas_guarded_retry() {
+        let _serial = CORE_TEST_MUTEX.lock().await;
         let folder =
             std::env::temp_dir().join(format!("nm-doc-operator-fault-{}", uuid::Uuid::new_v4()));
         let source = folder.join("documents");

@@ -1740,6 +1740,7 @@ mod tests {
 
     #[test]
     fn installed_speech_is_explicit_and_cannot_be_duplicated() {
+        let root = std::env::temp_dir().join("neuromita-opt-in-test");
         let required = [
             "--model",
             "gemini-2.5-flash",
@@ -1748,7 +1749,7 @@ mod tests {
             "--listen",
             "127.0.0.1:0",
             "--data-dir",
-            "/tmp/neuromita-opt-in-test",
+            root.to_str().unwrap(),
         ];
         let parse = |extra: &[&str]| {
             Options::parse_args(required.iter().chain(extra).map(|arg| (*arg).to_owned()))

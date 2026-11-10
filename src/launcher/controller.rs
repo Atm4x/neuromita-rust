@@ -237,7 +237,10 @@ mod tests {
         })
         .unwrap();
         owner.submit(LauncherCommand::Toggle).unwrap();
+        let started = receive.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(started.busy);
         let update = receive.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(!update.busy);
         assert!(update.error.is_some());
         assert_eq!(update.state, OwnedProcessState::Idle);
         owner.shutdown().unwrap();
