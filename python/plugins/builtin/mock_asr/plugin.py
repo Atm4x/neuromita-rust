@@ -1,11 +1,17 @@
 """Deterministic ASR fixture for IPC and shared-worker contract tests."""
 
-from neuromita_ai_sdk import InstallPlan
+from neuromita_ai_sdk import InstallPlan, ModelDescriptor, InstallVerification
 
 
 class Plugin:
     def describe(self):
         return {"kind": "asr", "languages": ["en", "ru"]}
+
+    def list_models(self):
+        return (ModelDescriptor("mock_asr", "Mock ASR", languages=("en", "ru")),)
+
+    def verify_install(self):
+        return InstallVerification(installed=True, verified=True)
 
     def install_plan(self):
         return InstallPlan(supported_backends=("remote-api",))

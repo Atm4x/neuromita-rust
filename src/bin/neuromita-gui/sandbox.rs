@@ -234,6 +234,7 @@ pub fn attach(
     super::ai_engine::bind(window, dispatch.clone());
     super::voice::bind(window, dispatch.clone());
     super::asr::bind(window, dispatch.clone());
+    super::ai_hub::bind(window, dispatch.clone());
     super::releases::bind(window, dispatch.clone());
     super::memory::bind(window, dispatch.clone(), &memory_editor);
     bind_chat_actions(window, dispatch.clone(), selection_revision.clone());
@@ -601,11 +602,52 @@ pub(super) fn apply_with_pager(
             super::voice::runtime_status(window, &snapshot);
             super::asr::runtime_status(window, &snapshot);
             super::ai_engine::runtime_status(window, &snapshot);
+            super::ai_hub::runtime_status(window, &snapshot);
         }
         Update::CharacterCatalog(catalog) => render_catalog(window, catalog),
+        Update::AiHubInstallOperation {
+            operation_id,
+            category,
+            id,
+            stage,
+            summary,
+        } => super::ai_hub::install_operation(window, operation_id, category, id, stage, summary),
+        Update::AiHubInstallPreview {
+            category,
+            id,
+            token,
+            summary,
+            error,
+            stage,
+            can_install,
+            operation_id,
+        } => {
+            super::ai_hub::install_preview(
+                window,
+                category,
+                id,
+                token,
+                summary,
+                error,
+                stage,
+                can_install,
+                operation_id,
+            );
+        }
+        Update::NativeModels(snapshot) => super::ai_hub::native_models(window, *snapshot),
+        Update::NativeReleaseCatalog(releases, overview) => {
+            super::ai_hub::native_release_catalog(window, releases, overview)
+        }
+        Update::NativeError(error) => super::ai_hub::native_error(window, error),
+        Update::NativeDownloadStatus {
+            summary,
+            percent,
+            active,
+        } => super::ai_hub::native_download_status(window, summary, percent, active),
         Update::SpeechInventory(catalog, devices) => {
             super::voice::inventory(window, &catalog);
             super::asr::inventory(window, &catalog, &devices);
+            super::ai_hub::inventory(window, &catalog);
         }
         Update::Releases(snapshot) => super::releases::render(window, &snapshot),
         Update::ReleaseError(error) => window.set_release_error(error.into()),
@@ -692,6 +734,7 @@ pub(super) fn apply_with_pager(
         Update::AdminSaved => super::settings::saved(window, None),
         Update::PresetSaved(id) => super::settings::saved(window, Some(id)),
         Update::Stopped => {
+            super::ai_hub::stopped(window);
             let stopped = neuromita::ai_runtime::runtime_status::RuntimeSnapshot::default();
             super::voice::runtime_status(window, &stopped);
             super::asr::runtime_status(window, &stopped);

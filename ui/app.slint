@@ -5,6 +5,9 @@ import { Theme, Icons } from "theme.slint";
 import { Label, ActionSurface } from "components/controls.slint";
 import { Sidebar, PageId } from "components/sidebar.slint";
 import { HomePage, ComponentCard, ReleaseItem } from "pages/home.slint";
+import { AiHubPage } from "pages/ai-hub.slint";
+import { HubModel, HubModelIdentity, HubInstallPreview, HubInstallOperation } from "ai-hub/components.slint";
+import { NativeRevisionRow, NativeReleaseRow } from "ai-hub/native.slint";
 import { SettingsPage, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, AiEngineUi, AiHardwareDevice } from "pages/settings.slint";
 import { VoiceUi } from "pages/voice.slint";
 import { AsrUi } from "pages/asr.slint";
@@ -15,7 +18,7 @@ import { SandboxPage, ChatRow, ChatStatus } from "pages/sandbox.slint";
 import { ReleasesPage, ReleaseEntry } from "pages/releases.slint";
 import { AboutPage } from "pages/about.slint";
 
-export { AiEngineUi, AiHardwareDevice, VoiceUi, AsrUi, CharacterCatalog, MemoryUi, MemoryItem, ConversationUi, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, PageId, ComponentCard, ReleaseItem, ReleaseEntry, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus }
+export { NativeRevisionRow, NativeReleaseRow, HubModel, AiEngineUi, AiHardwareDevice, VoiceUi, AsrUi, CharacterCatalog, MemoryUi, MemoryItem, ConversationUi, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, PageId, ComponentCard, ReleaseItem, ReleaseEntry, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus }
 
 export component AppWindow inherits Window {
     title: I18n.i18n("app.window.title", "Чат с NeuroMita");
@@ -26,6 +29,7 @@ export component AppWindow inherits Window {
     default-font-family: Theme.font-family;
     default-font-size: Theme.body-size;
     in property <PageId> page: home;
+    private property <bool> ai-hub-open: false;
     in property <string> version;
     in property <string> page-title;
     in property <ComponentCard> backend;
@@ -64,6 +68,35 @@ export component AppWindow inherits Window {
     in property <int> chat-active;
     in property <int> chat-volume;
     in property <bool> chat-voice;
+    in property <[HubModel]> ai-hub-entries;
+    in property <[NativeRevisionRow]> native-revisions;
+    in property <[NativeReleaseRow]> native-releases;
+    in property <bool> native-has-active: false;
+    in property <string> native-status;
+    in property <string> native-error;
+    in property <bool> native-download-configured: false;
+    in property <bool> native-download-active: false;
+    in property <string> native-download-summary;
+    in property <int> native-download-progress: -1;
+    callback native-download(string, string, string);
+    callback native-cancel-download();
+    callback native-refresh();
+    callback native-select(string, string, string);
+    callback native-activate(string);
+    callback native-stop();
+    in property <[int]> ai-hub-category-counts;
+    in property <bool> ai-hub-can-refresh: false;
+    in property <int> ai-hub-discovery-warning-count: 0;
+    in property <string> ai-hub-loaded-tts-id: "";
+    in property <string> ai-hub-loaded-asr-id: "";
+    in-out property <int> ai-hub-review-token: 0;
+    in property <HubInstallPreview> ai-hub-install-preview;
+    in property <HubInstallOperation> ai-hub-install-operation;
+    in-out property <string> ai-hub-dismissed-operation-id: "";
+    callback ai-hub-preview-install(HubModelIdentity, int);
+    callback ai-hub-confirm-install(HubModelIdentity, int);
+    callback ai-hub-refresh();
+    callback ai-hub-find-selection-index(HubModelIdentity) -> int;
     in property <string> chat-attitude: "—";
     in property <string> chat-boredom: "—";
     in property <string> chat-stress: "—";
@@ -96,17 +129,51 @@ export component AppWindow inherits Window {
     callback releases-refresh();
     callback external-link(string);
     HorizontalLayout {
+        width: 100%; height: 100%;
         padding: 0px; spacing: 0px;
         Sidebar {
-            current-page: root.page; version: root.version;
-            navigate(page) => { root.navigate(page); }
+            current-page: root.page; version: root.version; ai-hub-open: root.ai-hub-open;
+            open-ai-hub => { root.ai-hub-open = true; }
+            navigate(page) => { root.ai-hub-open = false; root.navigate(page); }
             language-selected(code) => { root.language-selected(code); }
             reload-translations => { root.reload-translations(); }
             social-selected(name) => { root.social-selected(name); }
         }
         Rectangle {
-            horizontal-stretch: 1; min-width: 0px; clip: true;
-            if root.page == PageId.home: HomePage {
+            horizontal-stretch: 1; min-width: 0px; max-width: 10000px; clip: true;
+            if root.ai-hub-open: AiHubPage {
+                width: parent.width; height: parent.height;
+                entries: root.ai-hub-entries;
+                native-revisions: root.native-revisions;
+                native-releases: root.native-releases;
+                native-has-active: root.native-has-active;
+                native-status: root.native-status;
+                native-error: root.native-error;
+                native-download-configured: root.native-download-configured;
+                native-download-active: root.native-download-active;
+                native-download-summary: root.native-download-summary;
+                native-download-progress: root.native-download-progress;
+                native-download-requested(id, sha, backend) => { root.native-download(id, sha, backend); }
+                native-cancel-download-requested => { root.native-cancel-download(); }
+                native-refresh-requested => { root.native-refresh(); }
+                native-select-requested(id, sha, backend) => { root.native-select(id, sha, backend); }
+                native-activate-requested(id) => { root.native-activate(id); }
+                native-stop-requested => { root.native-stop(); }
+                category-counts: root.ai-hub-category-counts;
+                can-refresh: root.ai-hub-can-refresh;
+                discovery-warning-count: root.ai-hub-discovery-warning-count;
+                loaded-tts-id: root.ai-hub-loaded-tts-id;
+                loaded-asr-id: root.ai-hub-loaded-asr-id;
+                review-token <=> root.ai-hub-review-token;
+                install-preview: root.ai-hub-install-preview;
+                install-operation: root.ai-hub-install-operation;
+                dismissed-operation-id <=> root.ai-hub-dismissed-operation-id;
+                preview-install-requested(identity, token) => { root.ai-hub-preview-install(identity, token); }
+                confirm-install-requested(identity, token) => { root.ai-hub-confirm-install(identity, token); }
+                refresh-requested => { root.ai-hub-refresh(); }
+                find-selection-index(identity) => { root.ai-hub-find-selection-index(identity) }
+            }
+            if !root.ai-hub-open && root.page == PageId.home: HomePage {
                 width: parent.width; height: parent.height;
                 backend: { title: I18n.i18n("launcher.core.title", "Ядро Rust"), value: root.core-connected ? I18n.i18n("launcher.core.running", "Работает") : root.core-connecting ? I18n.i18n("launcher.core.starting", "Запускается…") : I18n.i18n("launcher.core.stopped", "Не запущен"), update: "" };
                 client: { title: root.client.title, value: !root.launcher-inspected ? I18n.i18n("launcher.install.checking", "Проверяется…") : root.unity-installed ? I18n.i18n("launcher.install.detected", "Установка обнаружена") : I18n.i18n("launcher.install.missing", "Не установлен"), update: "" };
@@ -118,7 +185,7 @@ export component AppWindow inherits Window {
                 menu-action(action) => { root.launcher-action(action); }
                 open-releases => { root.navigate(PageId.releases); }
             }
-            if root.page == PageId.sandbox: SandboxPage {
+            if !root.ai-hub-open && root.page == PageId.sandbox: SandboxPage {
                 width: parent.width; height: parent.height;
                 clients: root.chat-clients; server-running: root.chat-server-running;
                 messages: root.chat-messages; has-older: root.chat-has-older; older-loading: root.chat-older-loading; connected: root.core-connected; connecting: root.core-connecting;
@@ -147,25 +214,25 @@ export component AppWindow inherits Window {
                 settings => { root.navigate(PageId.settings); }
                 open-memory(id) => { SettingsUi.section = 2; SettingsUi.selected-character = id; MemoryUi.open = true; MemoryUi.select(id); SettingsUi.character-debug-select(id); root.navigate(PageId.settings); }
             }
-            if root.page == PageId.settings: SettingsPage {
+            if !root.ai-hub-open && root.page == PageId.settings: SettingsPage {
                 width: parent.width; height: parent.height; connected: root.core-connected; connecting: root.core-connecting;
                 home => { root.navigate(PageId.home); }
                 wiki => { root.navigate(PageId.wiki); }
                 guide => { root.external-link("https://github.com/Atm4x/NeuroMita/wiki"); }
                 language-selected(code) => { root.language-selected(code); }
             }
-            if root.page == PageId.releases: ReleasesPage {
+            if !root.ai-hub-open && root.page == PageId.releases: ReleasesPage {
                 width: parent.width; height: parent.height;
                 prereleases: root.release-prereleases; releases: root.release-releases;
                 loading: root.release-loading; error: root.release-error; repository: root.release-repository;
                 refresh => { root.releases-refresh(); }
                 open-url(url) => { root.external-link(url); }
             }
-            if root.page == PageId.about: AboutPage {
+            if !root.ai-hub-open && root.page == PageId.about: AboutPage {
                 width: parent.width; height: parent.height; version: root.version;
                 open-url(url) => { root.external-link(url); }
             }
-            if root.page != PageId.home && root.page != PageId.sandbox && root.page != PageId.releases && root.page != PageId.about && root.page != PageId.settings: PlaceholderPage {
+            if !root.ai-hub-open && root.page != PageId.home && root.page != PageId.sandbox && root.page != PageId.releases && root.page != PageId.about && root.page != PageId.settings: PlaceholderPage {
                 width: parent.width; height: parent.height;
                 title: root.page-title;
                 icon: root.page == PageId.settings ? Icons.settings : root.page == PageId.sandbox ? Icons.sandbox : root.page == PageId.releases ? Icons.releases : root.page == PageId.gallery ? Icons.gallery : root.page == PageId.wiki ? Icons.wiki : Icons.logs;

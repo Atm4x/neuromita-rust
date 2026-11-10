@@ -1,3 +1,11 @@
+pub mod ai_hub_catalog;
+pub mod ai_install_operation;
+pub mod native_download;
+pub mod native_hub;
+pub mod native_model;
+pub mod native_release_catalog;
+pub mod native_revisions;
+pub use ai_install_operation::AiInstallOperationPresenter;
 mod audio_input;
 mod characters;
 pub use audio_input::AudioInputPresenter;

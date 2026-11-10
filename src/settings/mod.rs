@@ -1,3 +1,4 @@
+mod instance_lease;
 mod migration;
 mod model;
 mod speech;
@@ -5,14 +6,19 @@ mod storage;
 mod transfer;
 
 pub use crate::generation::PresetId;
+pub(crate) use instance_lease::SettingsInstanceLease;
 pub(crate) use migration::SettingsStartupMigration;
 pub use migration::{PythonSettingsMigration, RustSettingsMigration};
 pub use model::*;
 pub use speech::*;
+pub(crate) use storage::LeasedJsonSettingsRepository;
 pub use storage::*;
 pub use transfer::{SettingsImportFormat, SettingsTransfer, SettingsTransferError};
 
-use std::sync::{Arc, Mutex};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use thiserror::Error;
 use tokio::sync::{Notify, watch};
@@ -29,6 +35,10 @@ pub enum SettingsError {
     Uninitialized,
     #[error("settings are stopping")]
     Stopped,
+    #[error("settings are frozen for a maintenance inspection")]
+    MaintenanceActive,
+    #[error("maintenance requires the current settings revision to be durably saved")]
+    MaintenanceUnpersisted,
     #[error("settings conflict: expected {expected}, actual {actual}")]
     Conflict { expected: u64, actual: u64 },
     #[error("invalid settings: {0}")]
@@ -72,14 +82,82 @@ struct State {
     snapshot: Arc<SettingsSnapshot>,
     closed: bool,
     save_generation: u64,
+    maintenance_active: bool,
 }
 pub(crate) struct SettingsOwner {
+    owned_root: Option<PathBuf>,
     state: Mutex<State>,
     updates: watch::Sender<Arc<SettingsSnapshot>>,
     save: Notify,
 }
 
+/// Holds the current persisted settings revision stable while a caller performs
+/// a read-only maintenance inspection. Does not authorize removing any layer.
+pub(crate) struct SettingsMaintenanceGuard<'a> {
+    owner: &'a SettingsOwner,
+    snapshot: Arc<SettingsSnapshot>,
+}
+
+impl SettingsMaintenanceGuard<'_> {
+    pub(crate) fn snapshot(&self) -> &SettingsSnapshot {
+        &self.snapshot
+    }
+}
+
+impl Drop for SettingsMaintenanceGuard<'_> {
+    fn drop(&mut self) {
+        let mut state = self.owner.state.lock().expect("settings mutex poisoned");
+        state.maintenance_active = false;
+    }
+}
+
 impl SettingsOwner {
+    /// Freezes settings writes at an already-persisted revision. No async lock
+    /// is retained: every mutating entry point checks this flag under `state`.
+    pub(crate) fn freeze_persisted(&self) -> Result<SettingsMaintenanceGuard<'_>, SettingsError> {
+        let mut state = self.state.lock().expect("settings mutex poisoned");
+        if state.closed {
+            return Err(SettingsError::Stopped);
+        }
+        if state.maintenance_active {
+            return Err(SettingsError::MaintenanceActive);
+        }
+        let snapshot = Arc::clone(&state.snapshot);
+        if snapshot.persisted_revision != Some(snapshot.revision)
+            || snapshot.persistence != PersistenceState::Saved(snapshot.revision)
+        {
+            return Err(SettingsError::MaintenanceUnpersisted);
+        }
+        state.maintenance_active = true;
+        Ok(SettingsMaintenanceGuard {
+            owner: self,
+            snapshot,
+        })
+    }
+
+    /// Binds this settings freeze to the *application-owned* repository for
+    /// the same portable data root. In-memory and ad-hoc repositories are not
+    /// acceptable evidence for inspecting an installed revision.
+    pub(crate) fn freeze_persisted_for_root(
+        &self,
+        root: &SettingsInstanceLease,
+    ) -> Result<SettingsMaintenanceGuard<'_>, SettingsError> {
+        let owned = self.owned_root.as_ref().ok_or_else(|| {
+            SettingsError::Storage(
+                "maintenance requires an application-owned settings repository".into(),
+            )
+        })?;
+        if !root
+            .matches_root(owned)
+            .map_err(|error| SettingsError::Storage(error.to_string()))?
+        {
+            return Err(SettingsError::Storage(
+                "settings owner and revision root disagree".into(),
+            ));
+        }
+        self.freeze_persisted()
+    }
+
     pub(crate) fn subscribe(&self) -> watch::Receiver<Arc<SettingsSnapshot>> {
         self.updates.subscribe()
     }
@@ -185,6 +263,9 @@ impl SettingsOwner {
         if state.closed {
             return Err(SettingsError::Stopped);
         }
+        if state.maintenance_active {
+            return Err(SettingsError::MaintenanceActive);
+        }
         state.save_generation = state
             .save_generation
             .checked_add(1)
@@ -204,6 +285,9 @@ impl SettingsOwner {
         let mut state = self.state.lock().expect("settings mutex poisoned");
         if state.closed {
             return Err(SettingsError::Stopped);
+        }
+        if state.maintenance_active {
+            return Err(SettingsError::MaintenanceActive);
         }
         if let Some(expected) = expected
             && expected != state.snapshot.revision
@@ -274,6 +358,18 @@ impl SettingsLifecycle {
             }
         };
         stored.settings.validate()?;
+        let owned_root = if config.repository.has_application_root_owner() {
+            Some(
+                config
+                    .repository
+                    .lifecycle_root()
+                    .ok_or_else(|| SettingsError::Storage("owned repository has no root".into()))?
+                    .canonicalize()
+                    .map_err(|error| SettingsError::Storage(error.to_string()))?,
+            )
+        } else {
+            None
+        };
         let snapshot = Arc::new(SettingsSnapshot {
             closed: false,
             revision: stored.revision,
@@ -284,10 +380,12 @@ impl SettingsLifecycle {
         let (updates, _) = watch::channel(Arc::clone(&snapshot));
         Ok(Self {
             owner: Arc::new(SettingsOwner {
+                owned_root,
                 state: Mutex::new(State {
                     snapshot,
                     closed: false,
                     save_generation: 0,
+                    maintenance_active: false,
                 }),
                 updates,
                 save: Notify::new(),
@@ -410,6 +508,86 @@ mod tests {
         assert_eq!(
             lifecycle.owner.state.lock().unwrap().snapshot.persistence,
             PersistenceState::Pending
+        );
+    }
+    #[tokio::test]
+    async fn maintenance_freeze_requires_a_durably_saved_revision() {
+        let lifecycle = SettingsLifecycle::prepare(SettingsConfig {
+            source: SettingsSource::initial(AppSettings::initial_profile()),
+            repository: Arc::new(MemorySettingsRepository::new()),
+        })
+        .await
+        .unwrap();
+        let owner = lifecycle.owner();
+        assert!(matches!(
+            owner.freeze_persisted(),
+            Err(SettingsError::MaintenanceUnpersisted)
+        ));
+        lifecycle.persist().await.unwrap();
+        let guard = owner.freeze_persisted().unwrap();
+        assert_eq!(guard.snapshot().persisted_revision, Some(0));
+        assert!(matches!(
+            owner.freeze_persisted(),
+            Err(SettingsError::MaintenanceActive)
+        ));
+        assert_eq!(owner.request_save(), Err(SettingsError::MaintenanceActive));
+        assert!(matches!(
+            owner.edit::<SpeechSettings>(|speech| speech.tts.enabled = !speech.tts.enabled),
+            Err(SettingsError::MaintenanceActive)
+        ));
+        assert!(matches!(
+            owner.replace(0, SpeechSettings::default()),
+            Err(SettingsError::MaintenanceActive)
+        ));
+        let transfer = owner.export().unwrap();
+        assert!(matches!(
+            owner.import(0, transfer),
+            Err(SettingsError::MaintenanceActive)
+        ));
+        assert_eq!(
+            owner.snapshot_all().unwrap().revision,
+            guard.snapshot().revision
+        );
+        drop(guard);
+        owner
+            .edit::<SpeechSettings>(|speech| speech.tts.enabled = !speech.tts.enabled)
+            .unwrap();
+        assert!(matches!(
+            owner.freeze_persisted(),
+            Err(SettingsError::MaintenanceUnpersisted)
+        ));
+        lifecycle.persist().await.unwrap();
+        assert_eq!(owner.freeze_persisted().unwrap().snapshot().revision, 1);
+    }
+
+    #[tokio::test]
+    async fn maintenance_freeze_is_race_free_against_parallel_settings_edits() {
+        let lifecycle = SettingsLifecycle::prepare(SettingsConfig {
+            source: SettingsSource::initial(AppSettings::initial_profile()),
+            repository: Arc::new(MemorySettingsRepository::new()),
+        })
+        .await
+        .unwrap();
+        lifecycle.persist().await.unwrap();
+        let owner = lifecycle.owner();
+        let guard = owner.freeze_persisted().unwrap();
+        let attempt = std::thread::spawn({
+            let owner = Arc::clone(&owner);
+            move || owner.edit::<SpeechSettings>(|speech| speech.tts.enabled = !speech.tts.enabled)
+        });
+        assert!(matches!(
+            attempt.join().unwrap(),
+            Err(SettingsError::MaintenanceActive)
+        ));
+        assert_eq!(
+            guard.snapshot().revision,
+            owner.snapshot_all().unwrap().revision
+        );
+        drop(guard);
+        assert!(
+            owner
+                .edit::<SpeechSettings>(|speech| speech.tts.enabled = !speech.tts.enabled)
+                .is_ok()
         );
     }
 }

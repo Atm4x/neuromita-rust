@@ -8,7 +8,10 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use super::{
-    layer::{LayerError, LayerInstaller, valid_segment, validate_lock},
+    layer::{
+        LayerError, LayerInstaller, reject_symlinked_layer_components, reject_unsafe_layer_receipt,
+        valid_segment, validate_lock,
+    },
     overlay::LockedPackage,
 };
 
@@ -147,7 +150,10 @@ pub fn load_installed_backend(
         return Err(LayerError::Invalid("invalid backend revision".into()));
     }
     let path = backends_directory.join(kind.directory()).join(revision);
+    reject_symlinked_layer_components(&path)?;
+    let _reader = super::revision_lease::RevisionLease::shared(&path)?;
     let marker = path.join(".neuromita-backend.json");
+    reject_unsafe_layer_receipt(&marker)?;
     let bytes = std::fs::read(&marker).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             LayerError::NotInstalled(path.display().to_string())
@@ -260,6 +266,116 @@ mod tests {
         assert!(spec.validate().is_err());
         spec.packages.clear();
         assert!(spec.validate().is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_backend_rejects_managed_symlink_parent_and_marker() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!("nm-backend-read-{}", Uuid::new_v4()));
+        let foreign = root.join("foreign");
+        let external_revision = foreign.join("rev1");
+        std::fs::create_dir_all(&external_revision).unwrap();
+        let spec = plan();
+        let marker = external_revision.join(".neuromita-backend.json");
+        std::fs::write(&marker, serde_json::to_vec(&spec).unwrap()).unwrap();
+
+        for component in ["revision", "kind", "root"] {
+            let managed = root.join(format!("managed-{component}"));
+            let kind_dir = managed.join(spec.kind.directory());
+            match component {
+                "revision" => {
+                    std::fs::create_dir_all(&kind_dir).unwrap();
+                    symlink(&external_revision, kind_dir.join("rev1")).unwrap();
+                }
+                "kind" => {
+                    std::fs::create_dir_all(&managed).unwrap();
+                    symlink(&foreign, &kind_dir).unwrap();
+                }
+                "root" => {
+                    let outside_backends = root.join("external-backends");
+                    std::fs::create_dir_all(outside_backends.join(spec.kind.directory())).unwrap();
+                    std::fs::create_dir_all(
+                        outside_backends.join(spec.kind.directory()).join("rev1"),
+                    )
+                    .unwrap();
+                    std::fs::copy(
+                        &marker,
+                        outside_backends
+                            .join(spec.kind.directory())
+                            .join("rev1/.neuromita-backend.json"),
+                    )
+                    .unwrap();
+                    symlink(&outside_backends, &managed).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let result = load_installed_backend(&managed, spec.kind, &spec.revision);
+            assert!(
+                matches!(result, Err(LayerError::Invalid(_))),
+                "{component}: {result:?}"
+            );
+        }
+
+        let ordinary = root.join("ordinary");
+        let ordinary_revision = ordinary.join(spec.kind.directory()).join("rev1");
+        std::fs::create_dir_all(&ordinary_revision).unwrap();
+        symlink(&marker, ordinary_revision.join(".neuromita-backend.json")).unwrap();
+        assert!(matches!(
+            load_installed_backend(&ordinary, spec.kind, &spec.revision),
+            Err(LayerError::Conflict)
+        ));
+        std::fs::remove_file(ordinary_revision.join(".neuromita-backend.json")).unwrap();
+        std::fs::write(
+            ordinary_revision.join(".neuromita-backend.json"),
+            serde_json::to_vec(&spec).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            load_installed_backend(&ordinary, spec.kind, &spec.revision)
+                .unwrap()
+                .0,
+            spec
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn simultaneous_identical_layer_installers_reuse_one_revision() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!("nm-backend-race-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let uv = root.join("uv");
+        let entered = root.join("entered");
+        let script = format!(
+            "#!/bin/sh\ntarget=''\nprev=''\nfor arg do if [ \"$prev\" = --target ]; then target=\"$arg\"; fi; prev=\"$arg\"; done\nprintf 'started\\n' >> '{}'\nwhile [ \"$(wc -l < '{}')\" -lt 2 ]; do sleep 0.02; done\nmkdir -p \"$target/onnxruntime_directml-1.22.0.dist-info\"\nprintf 'Name: onnxruntime-directml\\nVersion: 1.22.0\\n' > \"$target/onnxruntime_directml-1.22.0.dist-info/METADATA\"\n",
+            entered.display(),
+            entered.display()
+        );
+        std::fs::write(&uv, script).unwrap();
+        std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let python = root.join("python");
+        std::fs::write(&python, "fake").unwrap();
+        let installer = BackendInstaller {
+            uv_executable: uv,
+            python_executable: python,
+            backends_directory: root.join("backends"),
+            cache_directory: root.join("cache"),
+            timeout: Duration::from_secs(8),
+        };
+        let spec = plan();
+        let (first, second) = tokio::time::timeout(Duration::from_secs(12), async {
+            tokio::join!(installer.install(&spec), installer.install(&spec))
+        })
+        .await
+        .expect("both concurrent installs should finish");
+        let first = first.unwrap();
+        assert_eq!(first, second.unwrap());
+        assert!(installer.installed(&spec).await.unwrap());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]

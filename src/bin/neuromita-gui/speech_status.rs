@@ -23,8 +23,23 @@ pub fn describe(status: &ServiceRuntimeStatus) -> String {
     } else {
         text
     };
-    if let Some(error) = &status.last_error {
+    let text = if let Some(error) = &status.last_error {
         format!("{text}; ошибка: {error}")
+    } else {
+        text
+    };
+    if let Some(recovery) = &status.recovery {
+        if recovery.exhausted {
+            format!(
+                "{text}; автоматическое восстановление исчерпано ({}/{})",
+                recovery.attempted, recovery.maximum
+            )
+        } else {
+            format!(
+                "{text}; попыток восстановления: {}/{}",
+                recovery.attempted, recovery.maximum
+            )
+        }
     } else {
         text
     }
@@ -33,7 +48,8 @@ pub fn describe(status: &ServiceRuntimeStatus) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use neuromita::ai_runtime::runtime_status::LoadedModel;
+    use neuromita::ai_runtime::runtime_status::{LoadedModel, RecoveryAttempts};
+    use uuid::Uuid;
 
     #[test]
     fn never_calls_running_worker_a_loaded_model() {
@@ -56,5 +72,25 @@ mod tests {
         assert!(message.contains("f5_tts"));
         assert!(message.contains("new_tts"));
         assert!(message.contains("candidate failed"));
+    }
+
+    #[test]
+    fn failed_worker_shows_retry_exhaustion_without_hiding_original_failure() {
+        let generation = Uuid::new_v4();
+        let state = ServiceRuntimeStatus {
+            phase: RuntimePhase::Failed,
+            generation: Some(generation),
+            last_error: Some("Python worker exited".into()),
+            recovery: Some(RecoveryAttempts {
+                generation,
+                attempted: 2,
+                maximum: 2,
+                exhausted: true,
+            }),
+            ..Default::default()
+        };
+        let output = describe(&state);
+        assert!(output.contains("Python worker exited"));
+        assert!(output.contains("восстановление исчерпано (2/2)"));
     }
 }

@@ -2,6 +2,21 @@ use std::{num::NonZeroUsize, path::PathBuf, sync::Arc, thread, time::Duration};
 
 use neuromita::{
     ai_runtime::{
+        install_admission::{
+            ApprovedInstall, InstallAction, InstallActionReview, InstallApprovalGate,
+            install_reviewed_overlay, install_reviewed_wheel_stage, preview_install_action,
+        },
+        install_review::{InstallPlanReview, InstallPreviewError, InstallReviewFence},
+        native_download_operation::{
+            NativeDownloadEvent, NativeDownloadOperation, NativeDownloadSelection,
+        },
+        native_https::{NativeHttpsOrigin, NativeTransferPhase},
+        native_model::NativeBackend,
+        native_revisions::{NativeRevisionOverview, NativeRevisionStore},
+        native_trust::{
+            NativeAuthorizedRelease, NativePolicyPin, NativeReleaseTrust, NativeTrustError,
+        },
+        native_workflow::{NativeModelWorkflow, NativeWorkflowSnapshot},
         runtime_status::{RuntimePhase, RuntimeSnapshot},
         speech::Transcript,
         speech_catalog::{SpeechInventory, SpeechModelCatalog},
@@ -21,7 +36,7 @@ use neuromita::{
     },
     presentation::{
         ConversationChange, ConversationChangePreview, ConversationSnapshot, GuiPresenter,
-        PresetSlot,
+        PresetSlot, native_download::NativeDownloadPresenter,
     },
     request::{CancelResult, RequestId},
     settings::{AsrPreferences, PresetId, PresetSelection, TtsPreferences, Volume},
@@ -86,6 +101,32 @@ pub enum Command {
     SaveAsr(AsrPreferences, Option<String>),
     SelectAsrRecognizer(String),
     RefreshSpeechInventory,
+    RefreshNativeModels,
+    SelectNativeRevision {
+        model_id: String,
+        manifest_sha256: String,
+        backend: String,
+    },
+    ActivateNativeModel {
+        model_id: String,
+    },
+    StopNativeModel,
+    InstallNativePackage {
+        model_id: String,
+        manifest_sha256: String,
+        backend: String,
+    },
+    CancelNativePackageInstall,
+    PreviewAiHubInstall {
+        category: String,
+        id: String,
+        token: i32,
+    },
+    ConfirmAiHubInstall {
+        category: String,
+        id: String,
+        token: i32,
+    },
     RefreshHardware,
     SectionVisibility(neuromita::settings::SettingsArea, bool),
     HidePrivate(bool),
@@ -143,6 +184,31 @@ pub enum Update {
     Hardware(neuromita::presentation::hardware::HardwareView),
     CharacterCatalog(Vec<neuromita::character::CharacterDefinition>),
     SpeechInventory(Box<SpeechInventory>, Vec<AudioInputDevice>),
+    NativeModels(Box<NativeWorkflowSnapshot>),
+    NativeReleaseCatalog(Vec<NativeAuthorizedRelease>, NativeRevisionOverview),
+    NativeError(String),
+    NativeDownloadStatus {
+        summary: String,
+        percent: i32,
+        active: bool,
+    },
+    AiHubInstallOperation {
+        operation_id: String,
+        category: String,
+        id: String,
+        stage: String,
+        summary: String,
+    },
+    AiHubInstallPreview {
+        category: String,
+        id: String,
+        token: i32,
+        summary: String,
+        error: String,
+        stage: String,
+        can_install: bool,
+        operation_id: String,
+    },
     Releases(Arc<neuromita::presentation::ReleasesSnapshot>),
     ReleaseError(String),
     Memory(Box<neuromita::presentation::MemoryListPage>),
@@ -382,6 +448,47 @@ async fn start(
         .map_err(|e| e.to_string())
 }
 
+fn summarize_ai_hub_review(review: &InstallPlanReview) -> String {
+    let mut lines = vec![
+        format!(
+            "Python: {} · SDK и источник проверены",
+            review.identity.python_version
+        ),
+        format!("Backend: {}", review.backend_options.join(", ")),
+        format!(
+            "Пакетов: {} · требований: {}",
+            review.packages.len(),
+            review.requirements.len()
+        ),
+        format!(
+            "Файлов моделей: обязательных {}, дополнительных {}",
+            review.required_assets.len(),
+            review.optional_assets.len()
+        ),
+        format!(
+            "Действий с отдельным подтверждением: {} · hooks: {}",
+            review.actions.len(),
+            review.asset_hooks.len()
+        ),
+        format!(
+            "Build-stage: {} (без автоматического исполнения)",
+            review.build_stages.len()
+        ),
+        format!("Отпечаток плана: {}", &review.fingerprint[..16]),
+        "План проверен, но установка ещё не разрешена и не запускалась.".to_owned(),
+    ];
+    if !review.required_backends.is_empty() {
+        lines.insert(
+            2,
+            format!(
+                "Дополнительные backend: {}",
+                review.required_backends.join(", ")
+            ),
+        );
+    }
+    lines.join("\n")
+}
+
 async fn run(
     directory: PathBuf,
     initial_model: Option<String>,
@@ -403,13 +510,17 @@ async fn run(
     publish(Update::GraphCapability(
         neuromita::api::GraphMaintenanceApi::reindex_available().unwrap_or(false),
     ));
-    match app.presenter().audio_input.devices().await {
-        Ok(devices) => publish(Update::SpeechInventory(
-            Box::new(catalog.snapshot().await),
-            devices,
-        )),
-        Err(error) => publish(Update::AdminError(error.to_string())),
-    }
+    let devices = match app.presenter().audio_input.devices().await {
+        Ok(devices) => devices,
+        Err(error) => {
+            publish(Update::AdminError(error.to_string()));
+            Vec::new()
+        }
+    };
+    publish(Update::SpeechInventory(
+        Box::new(catalog.snapshot().await),
+        devices,
+    ));
     if let Some(problem) = app.speech_startup_warning() {
         publish(Update::AdminError(format!("Speech runtime: {problem}")));
     }
@@ -425,6 +536,176 @@ async fn run(
     }
     publish(Update::GraphCapability(false));
     publish(Update::Stopped);
+}
+
+fn native_policy_pin() -> Result<Option<NativePolicyPin>, String> {
+    option_env!("NEUROMITA_NATIVE_PUBLISHER_POLICY_SHA256")
+        .map(NativePolicyPin::from_sha256_hex)
+        .transpose()
+        .map_err(|error| error.to_string())
+}
+
+pub fn native_download_configured() -> bool {
+    native_policy_pin().is_ok_and(|pin| pin.is_some())
+        && option_env!("NEUROMITA_NATIVE_PACKAGE_ORIGIN")
+            .is_some_and(|origin| NativeHttpsOrigin::parse(origin).is_ok())
+}
+
+fn ensure_native_storage(path: &std::path::Path) -> Result<(), String> {
+    for part in path.ancestors() {
+        if let Ok(meta) = std::fs::symlink_metadata(part) {
+            if meta.file_type().is_symlink() || !meta.is_dir() {
+                return Err("Нативное хранилище содержит небезопасный каталог".into());
+            }
+        }
+    }
+    std::fs::create_dir_all(path).map_err(|error| error.to_string())
+}
+
+fn start_native_download(
+    directory: &std::path::Path,
+    request: NativeDownloadSelection,
+    events: mpsc::UnboundedSender<NativeDownloadEvent>,
+) -> Result<NativeDownloadOperation, String> {
+    let origin = option_env!("NEUROMITA_NATIVE_PACKAGE_ORIGIN")
+        .ok_or_else(|| "Источник нативных пакетов не закреплён в сборке".to_owned())
+        .and_then(|value| NativeHttpsOrigin::parse(value).map_err(|error| error.to_string()))?;
+    let pin = native_policy_pin()?.ok_or("В сборке отсутствует доверенная политика издателей")?;
+    let trust = NativeReleaseTrust::new(
+        directory.join("Config/native-publisher-keys.json"),
+        directory.join("AIData/NativeApprovals"),
+        Some(pin),
+    );
+    trust
+        .verify_hex(&request.model_id, &request.manifest_sha256)
+        .map_err(|error| error.to_string())?;
+    let revisions = directory.join("AIData/NativeModels/revisions");
+    let runtime = directory.join("AIData/NativeRuntime");
+    let staging = directory.join("AIData/NativeDownloads");
+    for path in [&revisions, &runtime, &staging] {
+        ensure_native_storage(path)?;
+    }
+    NativeDownloadOperation::start(
+        NativeRevisionStore::new(revisions, runtime),
+        trust,
+        origin,
+        request,
+        staging,
+        Duration::from_secs(3600),
+        events,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn open_native_workflow(
+    directory: &std::path::Path,
+) -> Result<Option<NativeModelWorkflow>, String> {
+    let native = directory.join("AIData/NativeModels/revisions");
+    let runtime = directory.join("AIData/NativeRuntime");
+    let native_exists = native.try_exists().map_err(|error| error.to_string())?;
+    let runtime_exists = runtime.try_exists().map_err(|error| error.to_string())?;
+    if !native_exists && !runtime_exists {
+        return Ok(None);
+    }
+    if !native_exists || !runtime_exists {
+        return Err("Нативное хранилище установлено не полностью".into());
+    }
+    let policy_pin = native_policy_pin()?;
+    let workflow = NativeModelWorkflow::with_trust(
+        NativeRevisionStore::new(native, runtime),
+        NativeReleaseTrust::new(
+            directory.join("Config/native-publisher-keys.json"),
+            directory.join("AIData/NativeApprovals"),
+            policy_pin,
+        ),
+    );
+    workflow.snapshot().map_err(|error| error.to_string())?;
+    Ok(Some(workflow))
+}
+
+fn publish_native_release_catalog(
+    directory: &std::path::Path,
+    workflow: &Option<NativeModelWorkflow>,
+    publish: &impl Fn(Update),
+) {
+    let trust = match native_policy_pin() {
+        Ok(pin) => NativeReleaseTrust::new(
+            directory.join("Config/native-publisher-keys.json"),
+            directory.join("AIData/NativeApprovals"),
+            pin,
+        ),
+        Err(error) => {
+            publish(Update::NativeError(format!(
+                "Недействительная закреплённая политика: {error}"
+            )));
+            return;
+        }
+    };
+    let overview = match workflow.as_ref() {
+        Some(workflow) => match workflow.snapshot() {
+            Ok(snapshot) => snapshot.inventory,
+            Err(error) => {
+                publish(Update::NativeReleaseCatalog(
+                    vec![],
+                    NativeRevisionOverview {
+                        revisions: vec![],
+                        selections: vec![],
+                    },
+                ));
+                publish(Update::NativeError(format!(
+                    "Каталог установленных ревизий отклонён: {error}"
+                )));
+                return;
+            }
+        },
+        None => NativeRevisionOverview {
+            revisions: vec![],
+            selections: vec![],
+        },
+    };
+    match trust.available_releases() {
+        Ok(releases) => publish(Update::NativeReleaseCatalog(releases, overview)),
+        Err(NativeTrustError::NotAuthorized) => {
+            publish(Update::NativeReleaseCatalog(vec![], overview))
+        }
+        Err(error) => {
+            publish(Update::NativeReleaseCatalog(vec![], overview));
+            publish(Update::NativeError(format!(
+                "Каталог подписанных релизов отклонён: {error}"
+            )));
+        }
+    }
+}
+
+fn publish_native(workflow: &Option<NativeModelWorkflow>, publish: &impl Fn(Update)) {
+    let snapshot = match workflow.as_ref() {
+        Some(workflow) => workflow.snapshot().map_err(|error| error.to_string()),
+        None => Ok(NativeWorkflowSnapshot {
+            trust: Vec::new(),
+            inventory: NativeRevisionOverview {
+                revisions: Vec::new(),
+                selections: Vec::new(),
+            },
+            active_revision: None,
+            worker: None,
+        }),
+    };
+    match snapshot {
+        Ok(snapshot) => publish(Update::NativeModels(Box::new(snapshot))),
+        Err(_) => publish(Update::NativeError(
+            "Не удалось прочитать каталог нативных ревизий".into(),
+        )),
+    }
+}
+
+fn native_backend(value: &str) -> Option<NativeBackend> {
+    match value {
+        "cpu" => Some(NativeBackend::Cpu),
+        "cuda" => Some(NativeBackend::Cuda),
+        "wgpu" => Some(NativeBackend::Wgpu),
+        "onnx" => Some(NativeBackend::Onnx),
+        _ => None,
+    }
 }
 
 async fn observe(
@@ -458,9 +739,42 @@ async fn observe(
     let mut runtime_status = administration.ai_runtime.observe();
     let mut speech_status = administration.speech.observe();
     let mut microphone_test = administration.audio_input.observe_test();
+    let (plan_results, mut plan_updates) = mpsc::unbounded_channel::<(
+        u64,
+        u64,
+        String,
+        String,
+        i32,
+        Result<InstallActionReview, InstallPreviewError>,
+    )>();
+    let mut plan_fence = InstallReviewFence::default();
+    let mut active_install_preview: Option<tokio::task::AbortHandle> = None;
+    let mut approvals = InstallApprovalGate::default();
+    let (install_results, mut install_updates) = mpsc::unbounded_channel::<(
+        uuid::Uuid,
+        String,
+        String,
+        i32,
+        InstallAction,
+        Result<std::path::PathBuf, InstallPreviewError>,
+    )>();
+    let mut active_install: Option<uuid::Uuid> = None;
+    let (native_download_events, mut native_download_updates) =
+        mpsc::unbounded_channel::<NativeDownloadEvent>();
+    let mut active_native_download: Option<NativeDownloadOperation> = None;
     let (transcripts, mut transcript_updates) = mpsc::unbounded_channel();
     let mut liveness = tokio::time::interval(Duration::from_secs(5));
     liveness.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let initial_native = open_native_workflow(directory);
+    let native_error = initial_native.is_err();
+    let mut native_workflow = initial_native.unwrap_or(None);
+    publish_native(&native_workflow, publish);
+    publish_native_release_catalog(directory, &native_workflow, publish);
+    if native_error {
+        publish(Update::NativeError(
+            "Ошибка при обнаружении нативных моделей".into(),
+        ));
+    }
     let mut refresh_views = true;
     loop {
         if refresh_views {
@@ -514,7 +828,18 @@ async fn observe(
         refresh_views = true;
         tokio::select! {
             biased;
-            _ = stop.cancelled() => return Ok(()),
+            _ = stop.cancelled() => {
+                if let Some(mut download) = active_native_download.take() {
+                    download.cancel();
+                    download.join().await;
+                }
+                if let Some(workflow) = native_workflow.as_mut() {
+                    if workflow.snapshot().ok().and_then(|snapshot| snapshot.worker).is_some() {
+                        let _ = workflow.deactivate().await;
+                    }
+                }
+                return Ok(());
+            },
             command = receive.recv() => match command {
                 Some(command @ Command::UpdatePreset(id, _)) => {
                     match super::settings::execute(administration, command) {
@@ -602,6 +927,95 @@ async fn observe(
                     };
                     if let Err(error) = result { publish(Update::AdminError(error.to_string())); }
                 },
+                Some(Command::RefreshNativeModels) => {
+                    let mut failed = false;
+                    if native_workflow.is_none() {
+                        match open_native_workflow(directory) {
+                            Ok(workflow) => native_workflow = workflow,
+                            Err(_) => failed = true,
+                        }
+                    }
+                    publish_native(&native_workflow, publish);
+                    publish_native_release_catalog(directory, &native_workflow, publish);
+                    if failed {
+                        publish(Update::NativeError("Ошибка при обнаружении нативных моделей".into()));
+                    }
+                    refresh_views = false;
+                },
+                Some(Command::SelectNativeRevision { model_id, manifest_sha256, backend }) => {
+                    let result = match (native_workflow.as_ref(), native_backend(&backend)) {
+                        (Some(workflow), Some(backend)) => workflow.select_trusted(&model_id, &manifest_sha256, backend).map_err(|_| "Выбор отклонён: необходимы подтверждённая подпись издателя и целостный совместимый пакет"),
+                        _ => Err("Нативная ревизия или backend недоступны"),
+                    };
+                    publish_native(&native_workflow, publish);
+                    if let Err(error) = result { publish(Update::NativeError(error.into())); }
+                    refresh_views = false;
+                },
+                Some(Command::ActivateNativeModel { model_id }) => {
+                    let result = match native_workflow.as_mut() {
+                        Some(workflow) => workflow.activate_selected(&model_id, Duration::from_secs(30)).await.map(|_| ()),
+                        None => Err(neuromita::ai_runtime::native_workflow::NativeWorkflowError::NotSelected),
+                    };
+                    publish_native(&native_workflow, publish);
+                    if result.is_err() { publish(Update::NativeError("Запуск отклонён: подпись издателя, выбранная ревизия, файлы или ответ worker не подтверждены".into())); }
+                    refresh_views = false;
+                },
+                Some(Command::StopNativeModel) => {
+                    let result = match native_workflow.as_mut() {
+                        Some(workflow) => workflow.deactivate().await,
+                        None => Err(neuromita::ai_runtime::native_workflow::NativeWorkflowError::NotActive),
+                    };
+                    publish_native(&native_workflow, publish);
+                    if result.is_err() { publish(Update::NativeError("Завершение нативного worker не подтверждено".into())); }
+                    refresh_views = false;
+                },
+                Some(Command::InstallNativePackage { model_id, manifest_sha256, backend }) => {
+                    if active_native_download.is_some() {
+                        publish(Update::NativeDownloadStatus {
+                            summary: "Установка уже выполняется; сначала завершите или отмените её".into(),
+                            percent: -1,
+                            active: true,
+                        });
+                    } else if let Some(backend) = native_backend(&backend) {
+                        match start_native_download(
+                            directory,
+                            NativeDownloadSelection { model_id, manifest_sha256, backend },
+                            native_download_events.clone(),
+                        ) {
+                            Ok(operation) => {
+                                active_native_download = Some(operation);
+                                publish(Update::NativeDownloadStatus {
+                                    summary: "Проверка подписи пройдена. Подключение к доверенному HTTPS-источнику…".into(),
+                                    percent: -1,
+                                    active: true,
+                                });
+                            },
+                            Err(error) => publish(Update::NativeDownloadStatus {
+                                summary: format!("Установка отклонена: {error}"),
+                                percent: -1,
+                                active: false,
+                            }),
+                        }
+                    } else {
+                        publish(Update::NativeDownloadStatus {
+                            summary: "Неизвестный native backend".into(),
+                            percent: -1,
+                            active: false,
+                        });
+                    }
+                    refresh_views = false;
+                },
+                Some(Command::CancelNativePackageInstall) => {
+                    if let Some(operation) = active_native_download.as_ref() {
+                        operation.cancel();
+                        publish(Update::NativeDownloadStatus {
+                            summary: "Отмена запрошена. Начатая атомарная публикация может завершиться целиком".into(),
+                            percent: -1,
+                            active: true,
+                        });
+                    }
+                    refresh_views = false;
+                },
                 Some(Command::RefreshPromptCatalog) => {},
                 Some(Command::DebugSelect(id)) => { debug_character = id; },
                 Some(Command::OpenPromptFolder(character)) => {
@@ -627,11 +1041,126 @@ async fn observe(
                     }
                 },
                 Some(Command::RefreshHardware) => publish(hardware_snapshot().await),
-                Some(Command::RefreshSpeechInventory) => {
-                    match administration.audio_input.devices().await {
-                        Ok(devices) => publish(Update::SpeechInventory(Box::new(catalog.snapshot().await), devices)),
-                        Err(error) => publish(Update::AdminError(error.to_string())),
+                Some(Command::PreviewAiHubInstall { category, id, token }) => {
+                    if let Some(handle) = active_install_preview.take() { handle.abort(); }
+                    approvals.invalidate();
+                    let (request, generation) = plan_fence.begin();
+                    let service = match category.as_str() {
+                        "tts" => Some(neuromita::ai_runtime::AiService::Tts),
+                        "asr" => Some(neuromita::ai_runtime::AiService::Asr),
+                        _ => None,
+                    };
+                    let available = if let Some(service) = service {
+                        let snapshot = catalog.snapshot().await;
+                        let matching = match service {
+                            neuromita::ai_runtime::AiService::Tts => &snapshot.tts,
+                            neuromita::ai_runtime::AiService::Asr => &snapshot.asr,
+                            _ => unreachable!(),
+                        };
+                        matching.iter().filter(|model| model.id == id).count() == 1
+                    } else {
+                        false
+                    };
+                    if let Some(service) = service.filter(|_| available) {
+                        let send = plan_results.clone();
+                        let data_directory = directory.to_path_buf();
+                        let model_id = id.clone();
+                        let task = tokio::spawn(async move {
+                            let result = preview_install_action(&data_directory, service, &model_id).await;
+                            let _ = send.send((request, generation, category, id, token, result));
+                        });
+                        active_install_preview = Some(task.abort_handle());
+                    } else {
+                        publish(Update::AiHubInstallPreview {
+                            category, id, token, summary: String::new(),
+                            error: "Модель отсутствует или неоднозначна в актуальном каталоге".into(),
+                            stage: "failed".into(), can_install: false, operation_id: String::new(),
+                        });
                     }
+                },
+                Some(Command::ConfirmAiHubInstall { category, id, token }) => {
+                    if active_install.is_some() {
+                        publish(Update::AiHubInstallPreview { category, id, token,
+                            summary: String::new(), error: "Установка уже выполняется".into(),
+                            stage: "failed".into(), can_install: false, operation_id: String::new() });
+                        continue;
+                    }
+                    let service = match category.as_str() {
+                        "tts" => Some(neuromita::ai_runtime::AiService::Tts),
+                        "asr" => Some(neuromita::ai_runtime::AiService::Asr),
+                        _ => None,
+                    };
+                    let Some(ApprovedInstall { review, action }) =
+                        service.and_then(|service| approvals.consume_action(token, service, &id)) else {
+                        publish(Update::AiHubInstallPreview { category, id, token,
+                            summary: String::new(), error: "План не подтверждён или устарел".into(),
+                            stage: "failed".into(), can_install: false, operation_id: String::new() });
+                        continue;
+                    };
+                    if matches!(action, InstallAction::Overlay) && !review.eligible_overlay_install() {
+                        publish(Update::AiHubInstallPreview { category, id, token,
+                            summary: String::new(), error: "Выбранная модель или план изменились".into(),
+                            stage: "failed".into(), can_install: false, operation_id: String::new() });
+                        continue;
+                    }
+                    let service = review.identity.service;
+                    let inventory = catalog.snapshot().await;
+                    let matches = match service {
+                        neuromita::ai_runtime::AiService::Tts => &inventory.tts,
+                        neuromita::ai_runtime::AiService::Asr => &inventory.asr,
+                        _ => unreachable!(),
+                    }.iter().filter(|item| item.id == id).count();
+                    if matches != 1 {
+                        publish(Update::AiHubInstallPreview { category, id, token,
+                            summary: String::new(), error: "Модель исчезла из актуального каталога".into(),
+                            stage: "failed".into(), can_install: false, operation_id: String::new() });
+                        continue;
+                    }
+                    let operation = uuid::Uuid::new_v4();
+                    active_install = Some(operation);
+                    let (operation_summary, preview_summary) = match &action {
+                        InstallAction::Overlay => (
+                            "Публикация проверенного plugin overlay",
+                            "Установка plugin overlay выполняется. Worker не запускается.",
+                        ),
+                        InstallAction::Wheel { .. } => (
+                            "Установка одного проверенного wheel-stage",
+                            "Устанавливается один wheel-stage. Модель и worker не активируются.",
+                        ),
+                    };
+                    publish(Update::AiHubInstallOperation {
+                        operation_id: operation.to_string(),
+                        category: category.clone(), id: id.clone(),
+                        stage: "installing".into(), summary: operation_summary.into(),
+                    });
+                    publish(Update::AiHubInstallPreview { category: category.clone(), id: id.clone(), token,
+                        summary: preview_summary.into(), error: String::new(),
+                        stage: "installing".into(), can_install: false,
+                        operation_id: operation.to_string() });
+                    let sender = install_results.clone();
+                    let path = directory.to_path_buf();
+                    tokio::spawn(async move {
+                        let result = match &action {
+                            InstallAction::Overlay => install_reviewed_overlay(&path, &review).await,
+                            InstallAction::Wheel { stage_id, backend } =>
+                                install_reviewed_wheel_stage(&path, &review, stage_id, backend).await,
+                        };
+                        let _ = sender.send((operation, category, id, token, action, result));
+                    });
+                },
+                Some(Command::RefreshSpeechInventory) => {
+                    approvals.invalidate();
+                    plan_fence.catalog_replaced();
+                    if let Some(handle) = active_install_preview.take() { handle.abort(); }
+
+                    let devices = match administration.audio_input.devices().await {
+                        Ok(devices) => devices,
+                        Err(error) => {
+                            publish(Update::AdminError(error.to_string()));
+                            Vec::new()
+                        }
+                    };
+                    publish(Update::SpeechInventory(Box::new(catalog.snapshot().await), devices));
                 },
                 Some(Command::RefreshReleases) => { if let Err(error) = administration.releases.refresh() { publish(Update::ReleaseError(error.to_string())); } },
                 None => return Ok(()),
@@ -880,6 +1409,75 @@ async fn observe(
             result = recall_results.recv() => {
                 if let Some(result) = result { publish(result); }
             },
+            installed = install_updates.recv() => {
+                if let Some((operation, category, id, token, action, result)) = installed
+                    && active_install == Some(operation)
+                {
+                    active_install = None;
+                    let (summary, error, stage): (String, String, String) = match result {
+                        Ok(_) => match action {
+                            InstallAction::Overlay => ("Plugin overlay установлен и проверен. Worker не запущен, model assets не установлены.".into(), String::new(), "installed".into()),
+                            InstallAction::Wheel { .. } => ("Один wheel-stage установлен и проверен. Это не готовность backend, модели или worker.".into(), String::new(), "wheel-installed".into()),
+                        },
+                        Err(InstallPreviewError::ReviewChanged) => (String::new(), "Исходный план изменился после подтверждения — установка остановлена.".into(), "failed".into()),
+                        Err(InstallPreviewError::UnsupportedInstall) => (String::new(), "Этот план требует дополнительного подтверждения backend или файлов модели.".into(), "failed".into()),
+                        Err(_) => (String::new(), "Core не смог завершить установку. Подробности доступны в диагностике установщика.".into(), "failed".into()),
+                    };
+                    publish(Update::AiHubInstallOperation {
+                        operation_id: operation.to_string(),
+                        category: category.clone(), id: id.clone(),
+                        stage: stage.clone(),
+                        summary: if error.is_empty() { summary.clone() } else { error.clone() },
+                    });
+                    publish(Update::AiHubInstallPreview { category, id, token,
+                        summary, error, stage, can_install: false, operation_id: operation.to_string() });
+                }
+            },
+            reviewed = plan_updates.recv() => {
+                if let Some((request, generation, category, id, token, result)) = reviewed
+                    && plan_fence.accepts(request, generation)
+                {
+                    active_install_preview = None;
+                    let (summary, error, can_install, stage) = match result {
+                        Ok(InstallActionReview { review, action }) => {
+                            let mut summary = summarize_ai_hub_review(&review);
+                            let (permitted, review_stage) = match action {
+                                Some(InstallAction::Overlay) if active_install.is_none() =>
+                                    (approvals.offer(token, review), "review"),
+                                Some(InstallAction::Wheel { stage_id, backend }) if active_install.is_none() => {
+                                    summary.push_str(&format!(
+                                        "\nДоступен проверенный wheel-stage: {stage_id} · {backend}. Установится только этот пакет, не модель.",
+                                    ));
+                                    (approvals.offer_wheel(token, review, &stage_id, &backend), "wheel-review")
+                                },
+                                _ => {
+                                    summary.push_str("\nИсполнение недоступно: нет единственного проверенного и локально доступного wheel-stage либо необходимы другие установочные этапы.");
+                                    (false, "review")
+                                },
+                            };
+                            (summary, String::new(), permitted, review_stage.to_owned())
+                        },
+                        Err(InstallPreviewError::InvalidSelection) => (String::new(),
+                            "Модель недоступна или исходник не прошёл проверку безопасности.".into(), false, "failed".into()),
+                        Err(InstallPreviewError::Sdk(_)) => (String::new(),
+                            "Для проверки необходимы установленные в UserData проверенный SDK и код плагина.".into(), false, "failed".into()),
+                        Err(InstallPreviewError::PythonVersion | InstallPreviewError::Python(_)) => (String::new(),
+                            "Managed CPython 3.12.x ещё не подготовлен либо не прошёл проверку версии.".into(), false, "failed".into()),
+                        Err(InstallPreviewError::Plan(_)) => (String::new(),
+                            "Установочный скрипт не предоставил допустимый план. Установка не запускалась.".into(), false, "failed".into()),
+                        Err(InstallPreviewError::InvalidPlan(_)) => (String::new(),
+                            "Полученный план не прошёл проверку зависимостей, backend или путей.".into(), false, "failed".into()),
+                        Err(InstallPreviewError::ReviewChanged) => (String::new(),
+                            "План или исходник изменился во время проверки.".into(), false, "failed".into()),
+                        Err(InstallPreviewError::UnsupportedInstall) => (String::new(),
+                            "Для этого плана пока не поддерживается установка.".into(), false, "failed".into()),
+                        Err(InstallPreviewError::WheelPin | InstallPreviewError::WheelExecution) => (String::new(),
+                            "Проверенный wheel-stage недоступен или не смог завершиться; установка модели не запускалась.".into(), false, "failed".into()),
+                    };
+                    publish(Update::AiHubInstallPreview { category, id, token, summary, error,
+                        stage, can_install, operation_id: String::new() });
+                }
+            },
             transcript = transcript_updates.recv() => {
                 if let Some((origin, transcript)) = transcript {
                     if !chat_fence::accepts(
@@ -926,9 +1524,71 @@ async fn observe(
             } => {
                 if result.is_err() { runtime_status = None; }
             },
+            event = native_download_updates.recv() => {
+                if let Some(event) = event {
+                    let matching = active_native_download.as_ref().is_some_and(|op| op.id() == event.id());
+                    if matching {
+                        match event {
+                            NativeDownloadEvent::Progress { progress, .. } => {
+                                let view = NativeDownloadPresenter::project(progress);
+                                let summary = match view.phase {
+                                    NativeTransferPhase::Manifest => "Загрузка подписанного manifest…".to_owned(),
+                                    NativeTransferPhase::Downloading => format!(
+                                        "Загружено {} / {} МиБ. Пакет пока не установлен",
+                                        view.transferred_bytes / (1024 * 1024),
+                                        view.planned_bytes.unwrap_or(0) / (1024 * 1024),
+                                    ),
+                                    NativeTransferPhase::Publishing => "Повторная проверка и атомарная публикация…".to_owned(),
+                                };
+                                publish(Update::NativeDownloadStatus {
+                                    summary,
+                                    percent: view.percent.map_or(-1, i32::from),
+                                    active: true,
+                                });
+                            },
+                            NativeDownloadEvent::Finished { result, .. } => {
+                                if let Some(mut operation) = active_native_download.take() {
+                                    operation.join().await;
+                                }
+                                match result {
+                                    Ok(installed) => {
+                                        if native_workflow.is_none() {
+                                            match open_native_workflow(directory) {
+                                                Ok(workflow) => native_workflow = workflow,
+                                                Err(error) => publish(Update::NativeError(error)),
+                                            }
+                                        }
+                                        publish_native(&native_workflow, publish);
+                                        publish_native_release_catalog(directory, &native_workflow, publish);
+                                        publish(Update::NativeDownloadStatus {
+                                            summary: format!("Пакет {} опубликован (повторное использование: {})",
+                                                installed.model_id, installed.reused_package),
+                                            percent: 100,
+                                            active: false,
+                                        });
+                                    },
+                                    Err(error) => publish(Update::NativeDownloadStatus {
+                                        summary: format!("Установка не выполнена: {error}"),
+                                        percent: -1,
+                                        active: false,
+                                    }),
+                                }
+                            },
+                        }
+                    }
+                }
+                refresh_views = false;
+            },
             _ = liveness.tick() => {
                 let status = administration.ai_runtime.refresh_status().await;
                 publish(Update::RuntimeStatus(status));
+                if let Some(workflow) = native_workflow.as_mut() {
+                    let lost = workflow.refresh_worker().await.is_err();
+                    publish_native(&native_workflow, publish);
+                    if lost {
+                        publish(Update::NativeError("Связь с нативным worker прервана".into()));
+                    }
+                }
             },
         }
     }

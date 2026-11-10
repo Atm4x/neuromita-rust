@@ -325,7 +325,10 @@ struct CommandCorrelation {
 fn settings_code(error: &SettingsError) -> ErrorCode {
     match error {
         SettingsError::Validation(_) => ErrorCode::InvalidValue,
-        SettingsError::Conflict { .. } => ErrorCode::SettingsConflict,
+        SettingsError::Conflict { .. } | SettingsError::MaintenanceActive => {
+            ErrorCode::SettingsConflict
+        }
+        SettingsError::MaintenanceUnpersisted => ErrorCode::CoreUnavailable,
         SettingsError::Storage(_) => ErrorCode::SettingsStorage,
         SettingsError::Uninitialized | SettingsError::Stopped => ErrorCode::CoreUnavailable,
     }

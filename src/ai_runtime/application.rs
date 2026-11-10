@@ -1,6 +1,7 @@
 //! Explicit application-owned activation of selected Python AI workers.
 
 use std::{collections::HashSet, sync::Arc};
+use uuid::Uuid;
 
 use tokio::{process::Command, time::timeout};
 
@@ -364,6 +365,106 @@ impl RunningAiApplication {
         self.recovery_handle()
             .restart_failed_worker(service, expected_generation)
             .await
+    }
+
+    /// Recover a hardware-profiled failed process without silently downgrading its
+    /// saved device selection. The candidate must pass the same verification as
+    /// the original activation before its generation can be published.
+    pub async fn recover_failed_hardware_worker(
+        &self,
+        service: AiService,
+        failed_generation: Uuid,
+        prepared: &AiApplicationConfig,
+        selection: &super::hardware::HardwareConfig,
+        store: &super::hardware::HardwareConfigStore,
+        check_current: &(dyn Fn() -> Result<(), AiRuntimeError> + Send + Sync),
+    ) -> Result<Uuid, AiApplicationError> {
+        prepared.validate()?;
+        if !self
+            .supervisor
+            .accepts_plan(prepared.topology, &prepared.host)
+        {
+            return Err(AiApplicationError::Invalid(
+                "recovery host or process topology differs from the running application".into(),
+            ));
+        }
+        selection
+            .validate()
+            .map_err(|error| AiApplicationError::Invalid(error.to_string()))?;
+        if selection.selection.service != service {
+            return Err(AiApplicationError::Invalid(
+                "hardware selection does not match the failed service".into(),
+            ));
+        }
+        let services = self.worker_services(service).ok_or_else(|| {
+            AiApplicationError::Invalid("service is not part of the running application".into())
+        })?;
+        let worker = prepared
+            .workers
+            .iter()
+            .find(|worker| worker.composition.services() == services)
+            .ok_or_else(|| {
+                AiApplicationError::Invalid(
+                    "prepared recovery does not contain the entire failed worker".into(),
+                )
+            })?;
+        super::hardware::verify_worker_plan(worker, selection)
+            .map_err(|error| AiApplicationError::Invalid(error.to_string()))?;
+        let verify = || store.verify_current(selection);
+        self.supervisor
+            .recover_failed_hardware_guarded(
+                service,
+                failed_generation,
+                &worker.composition,
+                &worker.models,
+                &selection.selection.profile(),
+                &verify,
+                check_current,
+            )
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Revalidate an application-prepared worker plan and recover only the failed
+    /// process generation; sibling split workers are never reconstructed.
+    pub async fn recover_failed_worker(
+        &self,
+        service: AiService,
+        failed_generation: Uuid,
+        prepared: &AiApplicationConfig,
+        check_current: &(dyn Fn() -> Result<(), AiRuntimeError> + Send + Sync),
+    ) -> Result<Uuid, AiApplicationError> {
+        prepared.validate()?;
+        if !self
+            .supervisor
+            .accepts_plan(prepared.topology, &prepared.host)
+        {
+            return Err(AiApplicationError::Invalid(
+                "recovery host or process topology differs from the running application".into(),
+            ));
+        }
+        let services = self.worker_services(service).ok_or_else(|| {
+            AiApplicationError::Invalid("service is not part of the running application".into())
+        })?;
+        let worker = prepared
+            .workers
+            .iter()
+            .find(|worker| worker.composition.services() == services)
+            .ok_or_else(|| {
+                AiApplicationError::Invalid(
+                    "prepared recovery does not contain the entire failed worker".into(),
+                )
+            })?;
+        self.supervisor
+            .recover_failed_composed_guarded(
+                service,
+                failed_generation,
+                &worker.composition,
+                &worker.models,
+                check_current,
+            )
+            .await
+            .map_err(Into::into)
     }
 
     pub fn speech_recognizer(&self) -> Option<super::speech::PythonSpeechRecognizer> {

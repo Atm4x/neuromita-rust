@@ -8,6 +8,7 @@ use thiserror::Error;
 
 use super::{
     bootstrap::{PythonBootstrap, PythonBootstrapError},
+    sdk::{SdkError, SdkPublisher},
     uv::{UvInstallError, UvInstaller},
 };
 
@@ -36,6 +37,8 @@ pub enum ManagedRuntimeError {
     UnsupportedPython(String),
     #[error("managed Python version verification failed: {0}")]
     Interpreter(String),
+    #[error("verified Python SDK publication failed: {0}")]
+    Sdk(#[from] SdkError),
 }
 
 impl ManagedRuntimeBootstrap {
@@ -86,6 +89,7 @@ impl ManagedRuntimeBootstrap {
                 self.python_version
             )));
         }
+        SdkPublisher::new(self.uv.data_directory.clone()).publish_embedded()?;
         Ok(ManagedRuntime {
             uv_executable,
             python_executable,

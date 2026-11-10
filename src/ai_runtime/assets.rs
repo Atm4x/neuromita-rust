@@ -13,18 +13,19 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     time::timeout,
 };
-use uuid::Uuid;
 
 use super::{
     install::{ModelAssetRequirement, PluginInstallPlan},
     layer::valid_segment,
+    revision_lease::RevisionLease,
 };
 
 const RECEIPT: &str = ".neuromita-assets.json";
-
 pub mod catalog;
 mod generation;
+mod staging;
 pub use generation::{ModelGenerationError, ModelGenerationRequest};
+use staging::AssetStage;
 
 #[derive(Debug, Clone)]
 pub enum AssetSource {
@@ -293,16 +294,11 @@ impl ModelAssetStore {
             .collect())
     }
 
-    /// Sources must be explicitly supplied by the caller; plugin metadata cannot authorize downloads.
-    pub async fn publish(
+    fn planned_sources<'a>(
         &self,
-        plugin_id: &str,
-        revision: &str,
         plan: &PluginInstallPlan,
-        sources: &[AssetInput],
-    ) -> Result<PathBuf, ModelAssetError> {
-        let destination = self.revision_path(plugin_id, revision)?;
-        reject_symlinks(&destination).await?;
+        sources: &'a [AssetInput],
+    ) -> Result<Vec<(&'a AssetInput, VerifiedAsset)>, ModelAssetError> {
         if sources.len() > 512 || plan.assets.len() > 512 {
             return Err(ModelAssetError::Invalid("too many assets".into()));
         }
@@ -350,6 +346,79 @@ impl ModelAssetStore {
                 "source not present in install plan".into(),
             ));
         }
+        Ok(retained)
+    }
+
+    /// Validate an entire pinned source selection before any backend or overlay is
+    /// published. No network requests and no filesystem writes are made here.
+    /// Publication verifies hashes again so preflight is not a trust boundary.
+    pub async fn preflight_sources(
+        &self,
+        plugin_id: &str,
+        revision: &str,
+        plan: &PluginInstallPlan,
+        sources: &[AssetInput],
+    ) -> Result<(), ModelAssetError> {
+        let destination = self.revision_path(plugin_id, revision)?;
+        reject_symlinks(&destination).await?;
+        let retained = self.planned_sources(plan, sources)?;
+        let receipt = AssetReceipt {
+            plugin_id: plugin_id.into(),
+            revision: revision.into(),
+            assets: retained.iter().map(|(_, data)| data.clone()).collect(),
+        };
+        if self.checked_existing(&destination, &receipt).await? {
+            return Ok(());
+        }
+        for (source, _) in retained {
+            match &source.source {
+                AssetSource::LocalFile(path) => {
+                    reject_symlinks(path).await?;
+                    let metadata = tokio::fs::symlink_metadata(path).await?;
+                    if !metadata.is_file() || metadata.file_type().is_symlink() {
+                        return Err(ModelAssetError::Invalid(
+                            "local asset source must be a regular file".into(),
+                        ));
+                    }
+                    if !hash_file(path, self.max_asset_bytes)
+                        .await?
+                        .eq_ignore_ascii_case(&source.sha256)
+                    {
+                        return Err(ModelAssetError::Checksum(source.relative_path.clone()));
+                    }
+                }
+                AssetSource::Https(url) => {
+                    let parsed = reqwest::Url::parse(url).map_err(|_| {
+                        ModelAssetError::Invalid("invalid HTTPS asset source URL".into())
+                    })?;
+                    if parsed.scheme() != "https"
+                        || parsed.host_str().is_none()
+                        || !parsed.username().is_empty()
+                        || parsed.password().is_some()
+                        || parsed.fragment().is_some()
+                        || url.len() > 2048
+                    {
+                        return Err(ModelAssetError::Invalid(
+                            "HTTPS source must not contain credentials or fragments".into(),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Sources must be explicitly supplied by the caller; plugin metadata cannot authorize downloads.
+    pub async fn publish(
+        &self,
+        plugin_id: &str,
+        revision: &str,
+        plan: &PluginInstallPlan,
+        sources: &[AssetInput],
+    ) -> Result<PathBuf, ModelAssetError> {
+        let destination = self.revision_path(plugin_id, revision)?;
+        reject_symlinks(&destination).await?;
+        let retained = self.planned_sources(plan, sources)?;
         let receipt = AssetReceipt {
             plugin_id: plugin_id.into(),
             revision: revision.into(),
@@ -362,9 +431,32 @@ impl ModelAssetStore {
             .parent()
             .ok_or_else(|| ModelAssetError::Invalid("missing parent".into()))?;
         tokio::fs::create_dir_all(parent).await?;
-        let staging = parent.join(format!(".staging-{}", Uuid::new_v4()));
-        tokio::fs::create_dir(&staging).await?;
-        let outcome = async {
+        reject_symlinks(parent).await?;
+        let _revision = timeout(self.timeout, async {
+            loop {
+                match RevisionLease::exclusive(&destination) {
+                    Ok(lease) => return Ok(lease),
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    Err(error) => return Err(ModelAssetError::Io(error)),
+                }
+            }
+        })
+        .await
+        .map_err(|_| ModelAssetError::Timeout)??;
+        if self.checked_existing(&destination, &receipt).await? {
+            return Ok(destination);
+        }
+        let scan_parent = parent.to_path_buf();
+        tokio::task::spawn_blocking(move || AssetStage::recover(&scan_parent))
+            .await
+            .map_err(|error| {
+                ModelAssetError::Invalid(format!("staging recovery task failed: {error}"))
+            })??;
+        let mut stage = AssetStage::new(parent)?;
+        let staging = stage.path.clone();
+        async {
             for (source, asset) in retained {
                 let output = staging.join(&asset.relative_path);
                 tokio::fs::create_dir_all(
@@ -390,13 +482,10 @@ impl ModelAssetStore {
                 return Err(ModelAssetError::Conflict);
             }
             tokio::fs::rename(&staging, &destination).await?;
+            stage.published();
             Ok(destination)
         }
-        .await;
-        if outcome.is_err() {
-            let _ = tokio::fs::remove_dir_all(&staging).await;
-        }
-        outcome
+        .await
     }
 
     fn validate_asset(
@@ -427,6 +516,7 @@ impl ModelAssetStore {
 mod tests {
     use super::*;
     use crate::ai_runtime::install::PluginInstallPlan;
+    use uuid::Uuid;
 
     #[tokio::test]
     async fn stages_verified_revision_and_rejects_corrupt_or_wrong_hash() {
@@ -441,6 +531,7 @@ mod tests {
             timeout: Duration::from_secs(5),
         };
         let plan = PluginInstallPlan {
+            build_stages: vec![],
             asset_hooks: vec![],
             assets: vec![ModelAssetRequirement {
                 role: "rvc".into(),
@@ -514,6 +605,7 @@ mod tests {
             timeout: Duration::from_secs(5),
         };
         let plan = PluginInstallPlan {
+            build_stages: vec![],
             asset_hooks: vec![],
             packages: vec![],
             requirements: vec![],
@@ -529,6 +621,7 @@ mod tests {
         tokio::fs::write(&input, b"huge payload").await.unwrap();
         let sha = hash_file(&input, 1024).await.unwrap();
         let plan = PluginInstallPlan {
+            build_stages: vec![],
             asset_hooks: vec![],
             assets: vec![ModelAssetRequirement {
                 role: "wav".into(),
