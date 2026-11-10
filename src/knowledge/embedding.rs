@@ -51,6 +51,8 @@ pub enum EmbeddingError {
     Http(u16),
     #[error("invalid embedding result: {0}")]
     Response(String),
+    #[error("semantic retrieval context has been superseded")]
+    StaleKnowledge,
 }
 
 #[derive(Debug, Clone)]

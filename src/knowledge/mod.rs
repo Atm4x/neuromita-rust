@@ -75,6 +75,19 @@ impl KnowledgeRetrieval {
             .await
     }
 
+    pub(crate) async fn select_with_relations_at(
+        &self,
+        character: CharacterId,
+        memories: &[MemoryRecord],
+        islands: &[MemoryRecord],
+        relations: &[MemoryRelation],
+        query: &str,
+        turn: crate::timeline::selection::TimelineTurn,
+    ) -> Result<Option<String>, EmbeddingError> {
+        self.select_with_relations_inner(character, memories, islands, relations, query, Some(turn))
+            .await
+    }
+
     pub async fn select_with_relations(
         &self,
         character: CharacterId,
@@ -83,8 +96,21 @@ impl KnowledgeRetrieval {
         relations: &[MemoryRelation],
         query: &str,
     ) -> Result<Option<String>, EmbeddingError> {
+        self.select_with_relations_inner(character, memories, islands, relations, query, None)
+            .await
+    }
+
+    async fn select_with_relations_inner(
+        &self,
+        character: CharacterId,
+        memories: &[MemoryRecord],
+        islands: &[MemoryRecord],
+        relations: &[MemoryRelation],
+        query: &str,
+        turn: Option<crate::timeline::selection::TimelineTurn>,
+    ) -> Result<Option<String>, EmbeddingError> {
         let selected = self
-            .select_with_islands(character, memories, islands, query)
+            .select_with_islands_inner(character, memories, islands, query, turn)
             .await?;
         let links = match &self.mode {
             KnowledgeMode::Semantic { .. } => render_relation_context(relations, query),
@@ -106,16 +132,29 @@ impl KnowledgeRetrieval {
         islands: &[MemoryRecord],
         query: &str,
     ) -> Result<Option<String>, EmbeddingError> {
+        self.select_with_islands_inner(character, memories, islands, query, None)
+            .await
+    }
+
+    async fn select_with_islands_inner(
+        &self,
+        character: CharacterId,
+        memories: &[MemoryRecord],
+        islands: &[MemoryRecord],
+        query: &str,
+        turn: Option<crate::timeline::selection::TimelineTurn>,
+    ) -> Result<Option<String>, EmbeddingError> {
         let selected = match &self.mode {
             KnowledgeMode::Lexical => render_memory_context(memories, query),
             KnowledgeMode::Semantic { retriever, fusion } => {
                 let result = retriever
-                    .retrieve_with_fusion(
+                    .retrieve_with_fusion_at(
                         character,
                         memories,
                         query,
                         SemanticRetrievalFilter::all(),
                         *fusion,
+                        turn,
                     )
                     .await?;
                 tracing::debug!(

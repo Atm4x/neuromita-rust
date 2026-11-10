@@ -1,4 +1,4 @@
-name: Regenerate B82 backend checks
+name: Regenerate B85 backend checks
 
 on:
   push:
@@ -6,6 +6,7 @@ on:
       - codex/timeline-b82-foreign-knowledge-dispatch-fence-20261110
       - codex/timeline-b83-post-dispatch-acceptance-20261110
       - codex/timeline-b84-orphan-terminal-reconciliation-20261110
+      - codex/timeline-b85-semantic-epoch-eviction-20261110
 
 permissions:
   contents: read

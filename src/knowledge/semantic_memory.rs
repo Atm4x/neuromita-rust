@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     sync::{Arc, Mutex},
 };
 
@@ -15,7 +15,10 @@ use super::{
 use crate::{
     identity::CharacterId,
     memory::{MemoryKind, MemoryState},
-    timeline::domain::{MemoryId, MemoryRecord},
+    timeline::{
+        domain::{MemoryId, MemoryRecord},
+        selection::TimelineTurn,
+    },
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -29,6 +32,20 @@ struct CacheKey {
 struct EmbeddingCache {
     entries: HashMap<CacheKey, Embedding>,
     order: VecDeque<CacheKey>,
+    snapshots: HashMap<CharacterId, AuthoritativeSnapshot>,
+    revisions: HashMap<CharacterId, u64>,
+    clear_revision: u64,
+}
+
+struct AuthoritativeSnapshot {
+    turn: TimelineTurn,
+    active_ids: HashSet<MemoryId>,
+}
+
+#[derive(Clone, Copy)]
+struct RetrievalBarrier {
+    revision: u64,
+    clear_revision: u64,
 }
 
 impl EmbeddingCache {
@@ -36,8 +53,68 @@ impl EmbeddingCache {
         Self {
             entries: HashMap::new(),
             order: VecDeque::new(),
+            snapshots: HashMap::new(),
+            revisions: HashMap::new(),
+            clear_revision: 0,
         }
     }
+    fn purge_character(&mut self, character: CharacterId, keep: Option<&HashSet<CacheKey>>) {
+        self.entries.retain(|key, _| {
+            key.character != character || keep.is_some_and(|allowed| allowed.contains(key))
+        });
+        self.order.retain(|key| self.entries.contains_key(key));
+    }
+
+    fn track(
+        &mut self,
+        character: CharacterId,
+        turn: Option<TimelineTurn>,
+        keys: &[CacheKey],
+    ) -> Result<RetrievalBarrier, EmbeddingError> {
+        if let Some(turn) = turn {
+            if turn.character != character {
+                return Err(EmbeddingError::StaleKnowledge);
+            }
+            let active = keys.iter().cloned().collect::<HashSet<_>>();
+            let active_ids = keys.iter().map(|key| key.id).collect::<HashSet<_>>();
+            let previous = self.snapshots.get(&character);
+            if let Some(previous) = previous {
+                let newer_selection =
+                    turn.selection.generation > previous.turn.selection.generation;
+                let same_selection = turn.selection == previous.turn.selection;
+                if !newer_selection
+                    && (!same_selection
+                        || turn.context_head < previous.turn.context_head
+                        || (turn.context_head == previous.turn.context_head
+                            && turn.context_epoch != previous.turn.context_epoch)
+                        || (turn.context_head == previous.turn.context_head
+                            && !active_ids.is_subset(&previous.active_ids)))
+                {
+                    return Err(EmbeddingError::StaleKnowledge);
+                }
+            }
+            let purge_all = previous.is_some_and(|previous| {
+                previous.turn.selection != turn.selection
+                    || previous.turn.context_epoch != turn.context_epoch
+            });
+            self.purge_character(character, (!purge_all).then_some(&active));
+            *self.revisions.entry(character).or_default() += 1;
+            self.snapshots
+                .insert(character, AuthoritativeSnapshot { turn, active_ids });
+        } else if self.snapshots.contains_key(&character) {
+            return Err(EmbeddingError::StaleKnowledge);
+        }
+        Ok(RetrievalBarrier {
+            revision: *self.revisions.get(&character).unwrap_or(&0),
+            clear_revision: self.clear_revision,
+        })
+    }
+
+    fn unchanged(&self, character: CharacterId, barrier: RetrievalBarrier) -> bool {
+        self.clear_revision == barrier.clear_revision
+            && *self.revisions.get(&character).unwrap_or(&0) == barrier.revision
+    }
+
     fn insert(&mut self, key: CacheKey, embedding: Embedding, max: usize) {
         if self.entries.contains_key(&key) {
             return;
@@ -155,6 +232,7 @@ impl SemanticMemoryRetriever {
             .unwrap_or_else(|poison| poison.into_inner());
         cache.entries.clear();
         cache.order.clear();
+        cache.clear_revision = cache.clear_revision.wrapping_add(1);
     }
 
     pub async fn retrieve(
@@ -190,6 +268,19 @@ impl SemanticMemoryRetriever {
         filter: SemanticRetrievalFilter,
         mode: FusionMode,
     ) -> Result<RetrievedMemory, EmbeddingError> {
+        self.retrieve_with_fusion_at(character, memories, query, filter, mode, None)
+            .await
+    }
+
+    pub(crate) async fn retrieve_with_fusion_at(
+        &self,
+        character: CharacterId,
+        memories: &[MemoryRecord],
+        query: &str,
+        filter: SemanticRetrievalFilter,
+        mode: FusionMode,
+        turn: Option<TimelineTurn>,
+    ) -> Result<RetrievedMemory, EmbeddingError> {
         let filter = filter.validate()?;
         let config = FusionConfig {
             mode,
@@ -212,6 +303,20 @@ impl SemanticMemoryRetriever {
             embedded_characters: 0,
             cache_hits: 0,
         };
+        let keys: Vec<_> = memories
+            .iter()
+            .map(|memory| CacheKey {
+                character,
+                space: space.clone(),
+                id: memory.id,
+                content: memory.content.clone(),
+            })
+            .collect();
+        let barrier = self
+            .cache
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .track(character, turn, &keys)?;
         if memories.is_empty() {
             return Ok(RetrievedMemory {
                 rendered: None,
@@ -222,15 +327,6 @@ impl SemanticMemoryRetriever {
                 cost,
             });
         }
-        let keys: Vec<_> = memories
-            .iter()
-            .map(|memory| CacheKey {
-                character,
-                space: space.clone(),
-                id: memory.id,
-                content: memory.content.clone(),
-            })
-            .collect();
         let mut vectors: Vec<Option<Embedding>> = vec![None; memories.len()];
         let mut missing = Vec::new();
         {
@@ -238,6 +334,9 @@ impl SemanticMemoryRetriever {
                 .cache
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
+            if !cache.unchanged(character, barrier) {
+                return Err(EmbeddingError::StaleKnowledge);
+            }
             for (index, key) in keys.iter().enumerate() {
                 if let Some(vector) = cache.entries.get(key) {
                     cost.cache_hits += 1;
@@ -261,6 +360,14 @@ impl SemanticMemoryRetriever {
         cost.embedding_requests += 1;
         cost.embedded_texts += 1;
         if !missing.is_empty() {
+            if !self
+                .cache
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .unchanged(character, barrier)
+            {
+                return Err(EmbeddingError::StaleKnowledge);
+            }
             let texts = missing
                 .iter()
                 .map(|&i| memories[i].content.clone())
@@ -288,6 +395,9 @@ impl SemanticMemoryRetriever {
                     .cache
                     .lock()
                     .unwrap_or_else(|poison| poison.into_inner());
+                if !cache.unchanged(character, barrier) {
+                    return Err(EmbeddingError::StaleKnowledge);
+                }
                 cache.insert(keys[index].clone(), vector, self.max_entries);
             }
         }
@@ -394,6 +504,14 @@ impl SemanticMemoryRetriever {
                     })
             })
             .collect();
+        if !self
+            .cache
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .unchanged(character, barrier)
+        {
+            return Err(EmbeddingError::StaleKnowledge);
+        }
         let status = if selected_ids.is_empty() {
             RetrievalStatus::NoMatches
         } else {
@@ -512,3 +630,6 @@ mod b84_tests {
         assert_eq!(again.cost.cache_hits, 0);
     }
 }
+
+#[cfg(test)]
+mod b85_tests;
