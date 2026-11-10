@@ -21,9 +21,11 @@ use crate::{
     ai_runtime::{
         AiService,
         application::{AiApplicationConfig, AiApplicationError, RunningAiApplication},
+        install_coordinator::AiHubInstallCoordinator,
         live_speech::{
             LiveSpeechRuntime, LiveSpeechTranscriber, LiveSpeechVoice, watch_speech_settings,
         },
+        native_service::AiHubNativeService,
     },
     character::{CharacterHandle, CharacterId, CharacterRegistry, ReminderBridge},
     finetune::{FineTuneCollector, FineTuneError, FineTuneSettings},
@@ -122,6 +124,7 @@ pub struct ApplicationConfig {
     pub limits: RuntimeLimits,
     pub voice: Arc<dyn VoiceProvider>,
     pub ai_runtime: Option<AiApplicationConfig>,
+    pub ai_hub_install_root: Option<std::path::PathBuf>,
     pub ai_speech_inventory: Option<crate::ai_runtime::speech_catalog::SpeechInventory>,
     pub ai_installed_speech:
         Option<crate::ai_runtime::installed_speech::InstalledSpeechEnvironment>,
@@ -170,6 +173,7 @@ impl ApplicationConfig {
             limits,
             voice: Arc::new(UnavailableVoiceProvider),
             ai_runtime: None,
+            ai_hub_install_root: None,
             ai_speech_inventory: None,
             ai_installed_speech: None,
             ai_hardware: None,
@@ -197,6 +201,12 @@ impl ApplicationConfig {
 
     pub fn with_prompt_catalog(mut self, catalog: PromptCatalog) -> Self {
         self.prompts = Some(Arc::new(catalog));
+        self
+    }
+
+    /// Enable Core-owned installation admission for an explicitly configured data root.
+    pub fn with_ai_hub_install_root(mut self, root: std::path::PathBuf) -> Self {
+        self.ai_hub_install_root = Some(root);
         self
     }
 
@@ -359,6 +369,8 @@ pub struct ApplicationLifecycle {
     speech_controller: Arc<tokio::sync::Mutex<crate::audio::controller::SpeechSessionController>>,
     speech_startup_warning: Option<String>,
     ai_recovery: Option<crate::ai_runtime::application::AiRecoveryHandle>,
+    ai_hub_install: Option<Arc<AiHubInstallCoordinator>>,
+    ai_hub_native: Option<Arc<AiHubNativeService>>,
     id: Uuid,
     stop: CancellationToken,
     completion: Option<oneshot::Receiver<Result<(), ApplicationError>>>,
@@ -733,6 +745,8 @@ struct ApplicationOwner {
     lease: RuntimeLease,
     _settings_instance: Option<Arc<SettingsInstanceLease>>,
     ai_runtime: Option<RunningAiApplication>,
+    ai_hub_install: Option<Arc<AiHubInstallCoordinator>>,
+    ai_hub_native: Option<Arc<AiHubNativeService>>,
     live_speech: Option<Arc<LiveSpeechRuntime>>,
     speech_watch_task: Option<JoinHandle<()>>,
 }
@@ -756,6 +770,7 @@ impl ApplicationLifecycle {
             limits,
             voice,
             ai_runtime,
+            ai_hub_install_root,
             ai_speech_inventory,
             ai_installed_speech,
             ai_hardware,
@@ -798,6 +813,24 @@ impl ApplicationLifecycle {
                 Arc::clone(instance),
             ));
         }
+        if let Some(root) = &ai_hub_install_root {
+            if !root.is_absolute() {
+                return Err(SettingsError::Storage(
+                    "AI Hub must use an absolute owned data root".into(),
+                )
+                .into());
+            }
+            if let Some(instance) = &settings_instance
+                && !instance
+                    .matches_root(root)
+                    .map_err(|error| SettingsError::Storage(error.to_string()))?
+            {
+                return Err(SettingsError::Storage(
+                    "AI Hub must share the exclusive Core-owned profile root".into(),
+                )
+                .into());
+            }
+        }
         if let (Some(instance), Some(environment)) = (&settings_instance, &ai_installed_speech)
             && !instance
                 .matches_root(&environment.data_directory)
@@ -809,6 +842,10 @@ impl ApplicationLifecycle {
             )
             .into());
         }
+        let ai_hub_install = ai_hub_install_root
+            .as_ref()
+            .map(|root| AiHubInstallCoordinator::new(root.clone()));
+        let ai_hub_native = ai_hub_install_root.map(AiHubNativeService::new);
         let finetune = finetune
             .map(|settings| FineTuneCollector::from_settings(&settings))
             .transpose()?;
@@ -1158,6 +1195,8 @@ impl ApplicationLifecycle {
             lease,
             _settings_instance: settings_instance,
             ai_runtime,
+            ai_hub_install: ai_hub_install.clone(),
+            ai_hub_native: ai_hub_native.clone(),
             live_speech,
             speech_watch_task,
         };
@@ -1210,6 +1249,8 @@ impl ApplicationLifecycle {
             speech_controller,
             speech_startup_warning,
             ai_recovery,
+            ai_hub_install,
+            ai_hub_native,
             id,
             stop,
             completion: Some(completion),
@@ -1325,6 +1366,14 @@ impl ApplicationLifecycle {
 
     pub fn speech_startup_warning(&self) -> Option<&str> {
         self.speech_startup_warning.as_deref()
+    }
+
+    pub fn ai_hub_native(&self) -> Option<&Arc<AiHubNativeService>> {
+        self.ai_hub_native.as_ref()
+    }
+
+    pub fn ai_hub_install(&self) -> Option<&Arc<AiHubInstallCoordinator>> {
+        self.ai_hub_install.as_ref()
     }
 
     pub fn presenter(&self) -> &GuiPresenter {
@@ -1617,6 +1666,12 @@ impl ApplicationOwner {
             && let Err(error) = task.await
         {
             failure = Some(ApplicationError::Task(error.to_string()));
+        }
+        if let Some(native) = self.ai_hub_native.take() {
+            native.shutdown().await;
+        }
+        if let Some(hub) = self.ai_hub_install.take() {
+            hub.shutdown().await;
         }
         if let Some(runtime) = self.ai_runtime.take()
             && let Err(error) = runtime.shutdown().await

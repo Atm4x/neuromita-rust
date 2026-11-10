@@ -1,0 +1,322 @@
+//! Core-owned native worker and package operation lifecycle.
+//! The desktop sends commands and observes read models, but never holds a worker or download task.
+
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
+
+use tokio::sync::{Mutex, mpsc};
+use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
+
+use super::{
+    native_download_operation::{
+        NativeDownloadEvent, NativeDownloadOperation, NativeDownloadSelection,
+    },
+    native_https::NativeHttpsOrigin,
+    native_model::{NativeBackend, NativeModelSnapshot},
+    native_revisions::{NativeRevisionOverview, NativeRevisionStore},
+    native_trust::{NativeAuthorizedRelease, NativePolicyPin, NativeReleaseTrust},
+    native_workflow::{NativeModelWorkflow, NativeWorkflowSnapshot},
+};
+
+struct NativeState {
+    workflow: Option<NativeModelWorkflow>,
+    download: Option<NativeDownloadOperation>,
+}
+
+pub struct AiHubNativeService {
+    root: PathBuf,
+    state: Mutex<NativeState>,
+    stop: CancellationToken,
+}
+
+pub fn native_download_configured() -> bool {
+    publisher_policy_pin().is_ok_and(|pin| pin.is_some())
+        && option_env!("NEUROMITA_NATIVE_PACKAGE_ORIGIN")
+            .is_some_and(|origin| NativeHttpsOrigin::parse(origin).is_ok())
+}
+
+fn publisher_policy_pin() -> Result<Option<NativePolicyPin>, String> {
+    option_env!("NEUROMITA_NATIVE_PUBLISHER_POLICY_SHA256")
+        .map(NativePolicyPin::from_sha256_hex)
+        .transpose()
+        .map_err(|error| error.to_string())
+}
+
+fn trust(root: &Path) -> Result<NativeReleaseTrust, String> {
+    Ok(NativeReleaseTrust::new(
+        root.join("Config/native-publisher-keys.json"),
+        root.join("AIData/NativeApprovals"),
+        publisher_policy_pin()?,
+    ))
+}
+
+fn empty_snapshot() -> NativeWorkflowSnapshot {
+    NativeWorkflowSnapshot {
+        trust: Vec::new(),
+        inventory: NativeRevisionOverview {
+            revisions: Vec::new(),
+            selections: Vec::new(),
+        },
+        active_revision: None,
+        worker: None,
+    }
+}
+
+fn open_workflow(root: &Path) -> Result<Option<NativeModelWorkflow>, String> {
+    let revisions = root.join("AIData/NativeModels/revisions");
+    let runtime = root.join("AIData/NativeRuntime");
+    let revisions_exist = revisions.try_exists().map_err(|error| error.to_string())?;
+    let runtime_exists = runtime.try_exists().map_err(|error| error.to_string())?;
+    if !revisions_exist && !runtime_exists {
+        return Ok(None);
+    }
+    if !revisions_exist || !runtime_exists {
+        return Err("Нативное хранилище установлено не полностью".into());
+    }
+    let workflow =
+        NativeModelWorkflow::with_trust(NativeRevisionStore::new(revisions, runtime), trust(root)?);
+    workflow.snapshot().map_err(|error| error.to_string())?;
+    Ok(Some(workflow))
+}
+
+fn ensure_storage(path: &Path) -> Result<(), String> {
+    for part in path.ancestors() {
+        if let Ok(metadata) = std::fs::symlink_metadata(part)
+            && (metadata.file_type().is_symlink() || !metadata.is_dir())
+        {
+            return Err("Нативное хранилище содержит небезопасный каталог".into());
+        }
+    }
+    std::fs::create_dir_all(path).map_err(|error| error.to_string())
+}
+
+impl AiHubNativeService {
+    pub fn new(root: PathBuf) -> Arc<Self> {
+        Arc::new(Self {
+            root,
+            state: Mutex::new(NativeState {
+                workflow: None,
+                download: None,
+            }),
+            stop: CancellationToken::new(),
+        })
+    }
+
+    pub async fn snapshot(&self) -> Result<NativeWorkflowSnapshot, String> {
+        let state = self.state.lock().await;
+        match &state.workflow {
+            Some(workflow) => workflow.snapshot().map_err(|error| error.to_string()),
+            None => Ok(empty_snapshot()),
+        }
+    }
+
+    pub async fn refresh(&self) -> Result<NativeWorkflowSnapshot, String> {
+        let mut state = self.state.lock().await;
+        if self.stop.is_cancelled() {
+            return Err("Приложение завершает работу".into());
+        }
+        if state.workflow.is_none() {
+            state.workflow = open_workflow(&self.root)?;
+        }
+        match &state.workflow {
+            Some(workflow) => workflow.snapshot().map_err(|error| error.to_string()),
+            None => Ok(empty_snapshot()),
+        }
+    }
+
+    pub fn authorized_releases(&self) -> Result<Vec<NativeAuthorizedRelease>, String> {
+        trust(&self.root)?
+            .available_releases()
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn select(
+        &self,
+        model_id: &str,
+        manifest_sha256: &str,
+        backend: NativeBackend,
+    ) -> Result<(), String> {
+        let state = self.state.lock().await;
+        if self.stop.is_cancelled() {
+            return Err("Приложение завершает работу".into());
+        }
+        state
+            .workflow
+            .as_ref()
+            .ok_or("Нативная ревизия недоступна")?
+            .select_trusted(model_id, manifest_sha256, backend)
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn activate(&self, model_id: &str) -> Result<NativeModelSnapshot, String> {
+        let mut state = self.state.lock().await;
+        if self.stop.is_cancelled() {
+            return Err("Приложение завершает работу".into());
+        }
+        state
+            .workflow
+            .as_mut()
+            .ok_or("Нативная ревизия недоступна")?
+            .activate_selected(model_id, Duration::from_secs(30))
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn deactivate(&self) -> Result<(), String> {
+        let mut state = self.state.lock().await;
+        if self.stop.is_cancelled() {
+            return Err("Приложение завершает работу".into());
+        }
+        state
+            .workflow
+            .as_mut()
+            .ok_or("Нативная сессия недоступна")?
+            .deactivate()
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn refresh_worker(&self) -> Result<(), String> {
+        let mut state = self.state.lock().await;
+        if let Some(workflow) = state.workflow.as_mut() {
+            workflow
+                .refresh_worker()
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    pub async fn start_download(
+        &self,
+        request: NativeDownloadSelection,
+        events: mpsc::UnboundedSender<NativeDownloadEvent>,
+    ) -> Result<Uuid, String> {
+        let mut state = self.state.lock().await;
+        if self.stop.is_cancelled() {
+            return Err("Приложение завершает работу".into());
+        }
+        if state.download.is_some() {
+            return Err("Установка уже выполняется".into());
+        }
+        let origin = option_env!("NEUROMITA_NATIVE_PACKAGE_ORIGIN")
+            .ok_or_else(|| "Источник нативных пакетов не закреплён в сборке".to_owned())
+            .and_then(|value| NativeHttpsOrigin::parse(value).map_err(|error| error.to_string()))?;
+        let pin =
+            publisher_policy_pin()?.ok_or("В сборке отсутствует доверенная политика издателей")?;
+        let trust = NativeReleaseTrust::new(
+            self.root.join("Config/native-publisher-keys.json"),
+            self.root.join("AIData/NativeApprovals"),
+            Some(pin),
+        );
+        trust
+            .verify_hex(&request.model_id, &request.manifest_sha256)
+            .map_err(|error| error.to_string())?;
+        let revisions = self.root.join("AIData/NativeModels/revisions");
+        let runtime = self.root.join("AIData/NativeRuntime");
+        let staging = self.root.join("AIData/NativeDownloads");
+        for path in [&revisions, &runtime, &staging] {
+            ensure_storage(path)?;
+        }
+        let operation = NativeDownloadOperation::start(
+            NativeRevisionStore::new(revisions, runtime),
+            trust,
+            origin,
+            request,
+            staging,
+            Duration::from_secs(3600),
+            events,
+        )
+        .map_err(|error| error.to_string())?;
+        let id = operation.id();
+        state.download = Some(operation);
+        Ok(id)
+    }
+
+    pub async fn cancel_download(&self) -> bool {
+        let state = self.state.lock().await;
+        if let Some(operation) = state.download.as_ref() {
+            operation.cancel();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub async fn finish_download(&self, id: Uuid) -> bool {
+        let mut state = self.state.lock().await;
+        if state
+            .download
+            .as_ref()
+            .is_none_or(|operation| operation.id() != id)
+        {
+            return false;
+        }
+        if let Some(mut operation) = state.download.take() {
+            operation.join().await;
+        }
+        true
+    }
+
+    pub async fn shutdown(&self) {
+        self.stop.cancel();
+        let mut state = self.state.lock().await;
+        if let Some(mut operation) = state.download.take() {
+            operation.cancel();
+            operation.join().await;
+        }
+        if let Some(workflow) = state.workflow.as_mut()
+            && workflow
+                .snapshot()
+                .ok()
+                .and_then(|snapshot| snapshot.worker)
+                .is_some()
+        {
+            if let Err(error) = workflow.deactivate().await {
+                tracing::warn!(%error, "native worker shutdown failed");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn empty_native_owner_is_not_a_ready_worker() {
+        let root = std::env::temp_dir().join(format!("native-owner-empty-{}", Uuid::new_v4()));
+        let owner = AiHubNativeService::new(root.clone());
+        let snapshot = owner.refresh().await.unwrap();
+        assert!(snapshot.worker.is_none());
+        assert!(snapshot.inventory.revisions.is_empty());
+        assert!(owner.activate("arbitrary").await.is_err());
+        owner.shutdown().await;
+        assert!(owner.refresh().await.is_err());
+        assert!(!root.exists());
+    }
+
+    #[tokio::test]
+    async fn download_without_pinned_origin_is_rejected_before_touching_storage() {
+        let root = std::env::temp_dir().join(format!("native-owner-untrusted-{}", Uuid::new_v4()));
+        let owner = AiHubNativeService::new(root.clone());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let result = owner
+            .start_download(
+                NativeDownloadSelection {
+                    model_id: "voice".into(),
+                    manifest_sha256: "aa".repeat(32),
+                    backend: NativeBackend::Cpu,
+                },
+                tx,
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(rx.try_recv().is_err());
+        assert!(!root.exists());
+    }
+}
