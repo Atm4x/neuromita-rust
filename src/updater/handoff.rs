@@ -274,6 +274,47 @@ fn schedule_after_shutdown_with(
     }
 }
 
+/// Cancel an already scheduled helper handoff while the originating installed GUI
+/// is still running. The helper cannot apply until this process exits; the
+/// cancellation verifies the exact durable intent and removes it under the
+/// installation lock before releasing the recovery startup lease.
+pub fn cancel_scheduled_before_exit(activator: &SingleFileActivator) -> Result<(), HandoffError> {
+    cancel_scheduled_before_exit_with(activator, &ProductionHandoffRuntime)
+}
+
+fn cancel_scheduled_before_exit_with(
+    activator: &SingleFileActivator,
+    runtime: &impl HandoffRuntime,
+) -> Result<(), HandoffError> {
+    validate_handoff_environment(activator)?;
+    let intent_path = activator
+        .install_root()
+        .join(".neuromita-update")
+        .join(HANDOFF_NAME);
+    require_regular_file(&intent_path)?;
+    let bytes = fs::read(&intent_path)?;
+    if bytes.is_empty() || bytes.len() > 1024 {
+        return Err(HandoffError::InvalidInvocation);
+    }
+    let intent: HandoffIntent =
+        serde_json::from_slice(&bytes).map_err(|_| HandoffError::InvalidInvocation)?;
+    let expected = if cfg!(windows) {
+        "neuromita-gui.exe"
+    } else {
+        "neuromita-gui"
+    };
+    if intent.parent_pid != process::id()
+        || intent.parent_identity != current_process_identity()?
+        || intent.target != expected
+        || activator.target_path().file_name() != Some(OsStr::new(expected))
+    {
+        return Err(HandoffError::WrongCaller);
+    }
+    let helper = activator.install_root().join(HELPER_NAME);
+    activator.discard_scheduled_handoff(intent.nonce, &bytes, || runtime.disarm(&helper))?;
+    Ok(())
+}
+
 fn abort_failed_schedule(
     activator: &SingleFileActivator,
     helper: &Path,

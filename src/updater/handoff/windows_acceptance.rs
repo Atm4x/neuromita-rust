@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 const TEST_KEY: &str = "NM_D56_ISOLATED_REGISTRY_KEY";
 const TEST_ARGS: &str = "NM_D56_HELPER_ARGS";
+const TEST_CANCEL: &str = "NM_D58_CANCEL_SCHEDULED";
 const PARENT: &str = "updater::handoff::windows_acceptance::installed_parent_probe";
 const HELPER: &str = "updater::handoff::windows_acceptance::installed_helper_probe";
 const UPDATED: &str = "updater::handoff::windows_acceptance::updated_gui_probe";
@@ -73,7 +74,16 @@ fn installed_parent_probe() {
     let activator =
         SingleFileActivator::new(executable.parent().unwrap(), &data, "neuromita-gui.exe").unwrap();
     let key = env::var(TEST_KEY).unwrap();
-    schedule_after_shutdown_with(&activator, &IsolatedHandoffRuntime::new(&key)).unwrap();
+    let runtime = IsolatedHandoffRuntime::new(&key);
+    schedule_after_shutdown_with(&activator, &runtime).unwrap();
+    if env::var_os(TEST_CANCEL).is_some() {
+        cancel_scheduled_before_exit_with(&activator, &runtime).unwrap();
+        fs::write(
+            executable.parent().unwrap().join("parent-cancelled"),
+            b"cancelled",
+        )
+        .unwrap();
+    }
 }
 
 #[test]
@@ -162,7 +172,16 @@ fn wait_for_report(data: &Path) -> io::Result<String> {
     }
 }
 
-fn installed_case(success: bool) -> Result<(), Box<dyn std::error::Error>> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Scenario {
+    Healthy,
+    FailedStartup,
+    Cancelled,
+}
+
+fn installed_case(mode: Scenario) -> Result<(), Box<dyn std::error::Error>> {
+    let success = mode == Scenario::Healthy;
+    let cancelled = mode == Scenario::Cancelled;
     let root = env::temp_dir().join(format!("nm-d56-native-handoff-{}", Uuid::new_v4()));
     let install = root.join("install");
     let data_path = install.join("UserData");
@@ -204,22 +223,29 @@ fn installed_case(success: bool) -> Result<(), Box<dyn std::error::Error>> {
     let lease = IsolatedHandoffRuntime::new(&subkey);
     assert!(!lease.is_armed(&installed_helper)?);
 
-    let parent = probe_command(&installed_gui, PARENT)
-        .env(TEST_KEY, &subkey)
-        .stdin(Stdio::null())
-        .output()?;
+    let mut command = probe_command(&installed_gui, PARENT);
+    command.env(TEST_KEY, &subkey);
+    if cancelled {
+        command.env(TEST_CANCEL, "1");
+    }
+    let parent = command.stdin(Stdio::null()).output()?;
     assert!(
         parent.status.success(),
         "installed parent failed: {}",
         String::from_utf8_lossy(&parent.stderr)
     );
-    let state = wait_for_report(&data_path)?;
-    let expected = if success {
-        "updated-and-restarted"
+    if cancelled {
+        assert!(install.join("parent-cancelled").exists());
+        assert!(!data_path.join("updates").join(RESULT_NAME).exists());
     } else {
-        "rolled-back-after-startup-failure"
-    };
-    assert_eq!(state, expected);
+        let state = wait_for_report(&data_path)?;
+        let expected = if success {
+            "updated-and-restarted"
+        } else {
+            "rolled-back-after-startup-failure"
+        };
+        assert_eq!(state, expected);
+    }
     assert_eq!(
         fs::read(&installed_gui)?.as_slice(),
         if success {
@@ -235,10 +261,10 @@ fn installed_case(success: bool) -> Result<(), Box<dyn std::error::Error>> {
     assert!(!install.join(".neuromita-update").exists());
     assert!(!lease.is_armed(&installed_helper)?);
     reboot_guard::remove_isolated_key(&subkey)?;
-    let marker = install.join(if success {
-        "new-gui-ready"
-    } else {
-        "old-gui-relaunched"
+    let marker = install.join(match mode {
+        Scenario::Healthy => "new-gui-ready",
+        Scenario::FailedStartup => "old-gui-relaunched",
+        Scenario::Cancelled => "parent-cancelled",
     });
     let deadline = Instant::now() + Duration::from_secs(10);
     while !marker.exists() {
@@ -282,6 +308,7 @@ fn installed_helper_rejects_missing_isolated_recovery_lease() {
 
 #[test]
 fn installed_windows_helper_handoff_with_isolated_guard() {
-    installed_case(true).unwrap();
-    installed_case(false).unwrap();
+    installed_case(Scenario::Healthy).unwrap();
+    installed_case(Scenario::FailedStartup).unwrap();
+    installed_case(Scenario::Cancelled).unwrap();
 }

@@ -127,6 +127,17 @@ pub fn schedule_prepared_native_update(
     }
 }
 
+/// The originating installed GUI may abandon an already scheduled update
+/// before it exits. This is a verified cancellation, not an update or rollback.
+/// It refuses a different GUI process or any transaction already being applied.
+pub fn cancel_scheduled_native_update(
+    data_root: &PortableDataRoot,
+) -> Result<(), NativeInstallError> {
+    let activator = running_gui_activator(data_root)?;
+    handoff::cancel_scheduled_before_exit(&activator)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

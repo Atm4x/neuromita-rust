@@ -263,6 +263,64 @@ impl SingleFileActivator {
         self.cleanup()
     }
 
+    /// Cancel a scheduled update while its exact originating GUI is still alive.
+    /// The caller must verify the originating PID and process-creation identity.
+    /// The recovery lease is released only after the whole verified workspace is gone,
+    /// while the installation lock is still held against competing preparations.
+    pub(crate) fn discard_scheduled_handoff(
+        &self,
+        nonce: Uuid,
+        handoff_bytes: &[u8],
+        release_lease: impl FnOnce() -> io::Result<()>,
+    ) -> Result<(), ActivationError> {
+        let _lock = lock_installation(&self.install_root)?;
+        if handoff_bytes.is_empty() || handoff_bytes.len() > 1024 {
+            return Err(ActivationError::Conflict(
+                "invalid scheduled handoff length",
+            ));
+        }
+        let workspace = self.workspace();
+        let intent_path = workspace.join("handoff.json");
+        regular_file(&intent_path)?;
+        if fs::read(&intent_path)? != handoff_bytes {
+            return Err(ActivationError::Conflict("scheduled handoff was modified"));
+        }
+        if self.load_journal()?.health_nonce != Some(nonce) {
+            return Err(ActivationError::Conflict(
+                "scheduled handoff nonce mismatch",
+            ));
+        }
+        if self.recover_unlocked()? != RecoveryOutcome::Prepared {
+            return Err(ActivationError::Conflict(
+                "only an unchanged, unapplied scheduled update can be cancelled",
+            ));
+        }
+        let mut observed_candidate = false;
+        let mut observed_journal = false;
+        let mut observed_handoff = false;
+        for entry in fs::read_dir(&workspace)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if name != CANDIDATE && name != JOURNAL && name != "handoff.json" {
+                return Err(ActivationError::Conflict(
+                    "unexpected scheduled workspace entry",
+                ));
+            }
+            regular_file(&entry.path())?;
+            observed_candidate |= name == CANDIDATE;
+            observed_journal |= name == JOURNAL;
+            observed_handoff |= name == "handoff.json";
+        }
+        if !observed_candidate || !observed_journal || !observed_handoff {
+            return Err(ActivationError::Conflict("incomplete scheduled workspace"));
+        }
+        fs::remove_file(&intent_path)?;
+        sync_directory(&workspace)?;
+        self.cleanup()?;
+        release_lease()?;
+        Ok(())
+    }
+
     /// Bind an unapplied update to exactly one helper restart attempt.
     /// A recoverable backup then remains on disk until an explicit readiness receipt.
     pub fn arm_health_check(&self, nonce: Uuid) -> Result<(), ActivationError> {
@@ -1074,6 +1132,105 @@ mod tests {
         fs::remove_file(&obstruction).unwrap();
         fixture.activation.discard_prepared().unwrap();
         assert!(!fixture.workspace().exists());
+    }
+
+    #[test]
+    fn scheduled_cancellation_checks_nonce_inventory_and_releases_guard_last() {
+        let fixture = Fixture::new();
+        fixture
+            .activation
+            .prepare(&fixture.asset, &fixture.artifact)
+            .unwrap();
+        let nonce = Uuid::new_v4();
+        fixture.activation.arm_health_check(nonce).unwrap();
+        let intent = fixture.workspace().join("handoff.json");
+        fs::write(&intent, b"immutable scheduled handoff").unwrap();
+        let mut lease_released = false;
+        assert!(matches!(
+            fixture.activation.discard_scheduled_handoff(
+                Uuid::new_v4(),
+                b"immutable scheduled handoff",
+                || {
+                    lease_released = true;
+                    Ok(())
+                }
+            ),
+            Err(ActivationError::Conflict(_))
+        ));
+        assert!(!lease_released);
+        assert!(matches!(
+            fixture
+                .activation
+                .discard_scheduled_handoff(nonce, b"changed", || {
+                    lease_released = true;
+                    Ok(())
+                }),
+            Err(ActivationError::Conflict(_))
+        ));
+        assert!(!lease_released);
+        let obstruction = fixture.workspace().join("foreign-file");
+        fs::write(&obstruction, b"must not be removed").unwrap();
+        assert!(matches!(
+            fixture.activation.discard_scheduled_handoff(
+                nonce,
+                b"immutable scheduled handoff",
+                || {
+                    lease_released = true;
+                    Ok(())
+                }
+            ),
+            Err(ActivationError::Conflict(_))
+        ));
+        assert!(!lease_released);
+        assert!(intent.exists());
+        assert!(fixture.workspace().join(JOURNAL).exists());
+        assert!(fixture.workspace().join(CANDIDATE).exists());
+        fs::remove_file(obstruction).unwrap();
+        fixture
+            .activation
+            .discard_scheduled_handoff(nonce, b"immutable scheduled handoff", || {
+                assert!(!fixture.workspace().exists());
+                lease_released = true;
+                Ok(())
+            })
+            .unwrap();
+        assert!(lease_released);
+        assert_eq!(fs::read(fixture.target()).unwrap(), b"old version");
+        assert_eq!(
+            fs::read(fixture.data.path().join("settings.json")).unwrap(),
+            b"private settings"
+        );
+        assert!(!fixture.workspace().exists());
+    }
+
+    #[test]
+    fn scheduled_cancellation_refuses_an_already_applied_update() {
+        let fixture = Fixture::new();
+        fixture
+            .activation
+            .prepare(&fixture.asset, &fixture.artifact)
+            .unwrap();
+        let nonce = Uuid::new_v4();
+        fixture.activation.arm_health_check(nonce).unwrap();
+        let intent = fixture.workspace().join("handoff.json");
+        fs::write(&intent, b"immutable scheduled handoff").unwrap();
+        assert_eq!(
+            fixture.activation.apply_or_resume().unwrap(),
+            RecoveryOutcome::AwaitingHealth
+        );
+        assert!(matches!(
+            fixture.activation.discard_scheduled_handoff(
+                nonce,
+                b"immutable scheduled handoff",
+                || {
+                    panic!("must not release guard on an applied update");
+                }
+            ),
+            Err(ActivationError::Conflict(_))
+        ));
+        assert_eq!(fs::read(fixture.target()).unwrap(), b"new version");
+        assert!(fixture.workspace().join(BACKUP).exists());
+        assert!(intent.exists());
     }
 
     #[test]

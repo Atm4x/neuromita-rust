@@ -17,7 +17,7 @@ use neuromita::{
         activation::SingleFileActivator,
         check::native_asset_name,
         handoff::{READY_NONCE_ENV, acknowledge_gui_ready},
-        install::schedule_prepared_native_update,
+        install::{cancel_scheduled_native_update, schedule_prepared_native_update},
     },
 };
 #[cfg(target_os = "linux")]
@@ -41,7 +41,10 @@ fn main() {
     {
         let result = if env::var_os(READY_NONCE_ENV).is_some() {
             restarted_gui()
-        } else if env::args().nth(1).as_deref() == Some("--e2e-install-parent") {
+        } else if matches!(
+            env::args().nth(1).as_deref(),
+            Some("--e2e-install-parent" | "--e2e-cancel-parent")
+        ) {
             installed_parent()
         } else if env::current_exe()
             .ok()
@@ -65,6 +68,10 @@ fn installed_parent() -> Result<(), Box<dyn std::error::Error>> {
     let install = exe.parent().ok_or("no parent")?;
     let data = PortableDataRoot::resolve(Some(&install.join("UserData")))?;
     schedule_prepared_native_update(&data)?;
+    if env::args().nth(1).as_deref() == Some("--e2e-cancel-parent") {
+        cancel_scheduled_native_update(&data)?;
+        fs::write(install.join("scheduled-update-cancelled"), b"cancelled")?;
+    }
     Ok(())
 }
 
@@ -140,6 +147,7 @@ enum Scenario {
     HelperNotExecutable,
     HelperMissing,
     ConflictingHandoff,
+    CancelledAfterScheduling,
 }
 
 #[cfg(target_os = "linux")]
@@ -150,6 +158,7 @@ fn case(mode: Scenario, base: &Path) -> Result<(), Box<dyn std::error::Error>> {
         Scenario::HelperNotExecutable => "denied",
         Scenario::HelperMissing => "missing",
         Scenario::ConflictingHandoff => "conflicting-handoff",
+        Scenario::CancelledAfterScheduling => "cancelled",
     };
     let install = base.join(name);
     let data_path = install.join("UserData");
@@ -164,7 +173,10 @@ fn case(mode: Scenario, base: &Path) -> Result<(), Box<dyn std::error::Error>> {
         fs::copy(&old_source, &gui)?;
     }
     let old = fs::read(&gui)?;
-    let installed_probe = matches!(mode, Scenario::Healthy | Scenario::BadStartup);
+    let installed_probe = matches!(
+        mode,
+        Scenario::Healthy | Scenario::BadStartup | Scenario::CancelledAfterScheduling
+    );
     let next_source = base.join(if mode == Scenario::BadStartup {
         "new-bad"
     } else {
@@ -223,10 +235,26 @@ fn case(mode: Scenario, base: &Path) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let parent = Command::new(&gui)
-        .arg("--e2e-install-parent")
+        .arg(if mode == Scenario::CancelledAfterScheduling {
+            "--e2e-cancel-parent"
+        } else {
+            "--e2e-install-parent"
+        })
         .stdin(Stdio::null())
         .output()?;
     match mode {
+        Scenario::CancelledAfterScheduling => {
+            assert!(
+                parent.status.success(),
+                "cancel failed: {}",
+                String::from_utf8_lossy(&parent.stderr)
+            );
+            assert!(install.join("scheduled-update-cancelled").exists());
+            thread::sleep(Duration::from_millis(300));
+            assert_eq!(fs::read(&gui)?, old);
+            assert!(!install.join(".neuromita-update").exists());
+            assert!(!data_path.join("updates/last-activation.json").exists());
+        }
         Scenario::ConflictingHandoff => {
             assert!(!parent.status.success());
             let diagnostics = String::from_utf8_lossy(&parent.stderr);
@@ -295,6 +323,7 @@ fn conductor() -> Result<(), Box<dyn std::error::Error>> {
         case(Scenario::HelperNotExecutable, &base)?;
         case(Scenario::HelperMissing, &base)?;
         case(Scenario::ConflictingHandoff, &base)?;
+        case(Scenario::CancelledAfterScheduling, &base)?;
         Ok::<(), Box<dyn std::error::Error>>(())
     })();
     thread::sleep(Duration::from_secs(3));

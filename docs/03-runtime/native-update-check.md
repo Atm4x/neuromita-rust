@@ -329,3 +329,39 @@ A small platform-specific unit test uses a live process with an abbreviated
 wait deadline, plus a process-identity-mismatch case, without making the
 whole test suite wait two minutes. This does not constitute a released-GUI
 click-through test or a real Windows native acceptance run.
+
+## Cancel a scheduled update before the originating GUI exits (D58)
+
+An already scheduled native update is now cancelable **only by the same installed
+GUI process while it is still running**. The GUI controller can call
+`install::cancel_scheduled_native_update` before its graceful shutdown begins.
+This is not a new updater-helper CLI command and it does not let a second
+process replace or cancel another installation's update.
+
+Cancellation verifies the exact durable handoff bytes, parent PID and OS
+creation identity, installed GUI filename and nonce against the health-armed
+journal. Under the exclusive installation lock, the activator first checks
+that both previous target and staged candidate still match their recorded
+SHA-256 digests, the update is **unapplied**, and the entire workspace contains
+only the expected journal, candidate and exact handoff. Unknown files, a
+modified handoff, nonce mismatch or partially applied update cause a refusal
+without removing the candidate, journal or recovery guard. Only after a
+successful, verified workspace cleanup does it release the matching recovery
+lease **while still holding the installation lock**, so a competing new
+preparation cannot lose its newly registered guard in between.
+
+The separately running helper continues to require the original GUI to exit.
+If the GUI cancels while the helper waits, the helper sees a missing handoff
+and exits without replacing the EXE. Cancellation never kills an updater or
+relaunches a GUI. A later unexpected lease-removal error can leave only a
+stale recovery startup entry, which the existing login recovery removes when
+it observes no transaction; it cannot resurrect or apply the cancelled update.
+
+Linux installed-process E2E covers scheduling followed by cancellation while
+the original GUI is alive, no target mutation, unchanged UserData, no
+activation status, and no remaining workspace. The Windows-specific isolated
+HKCU helper subprocess test adds the same cancellation scenario without
+writing the real `HKCU\\...\\Run` key. It must pass on an actual Windows
+runner before claiming native Windows acceptance. The real Slint GUI still
+requires a presentation-layer cancellation action; this API alone does not
+claim an end-user button or published release.
