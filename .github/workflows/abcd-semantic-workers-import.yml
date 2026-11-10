@@ -1,0 +1,30 @@
+name: ABCD exact semantic worker ownership import
+on:
+  push:
+    branches:
+      - bridge/abcd-semantic-workers-import-20261111
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Import verified service-owned semantic worker commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f transfer/abcd-semantic-workers.b64 || exit 0
+          git fetch origin +refs/heads/codex/abcd-core-boundary-fixes-20261110:refs/heads/abcd-base
+          BASE=$(git rev-parse refs/heads/abcd-base)
+          test "$BASE" = "f0fe30ffe50919b7a3487e6e86cfbbdf4ed3ec0a"
+          base64 -d transfer/abcd-semantic-workers.b64 > "$RUNNER_TEMP/semantic-workers.bundle"
+          echo "7cea61221af6bfef451f5704c0af2a98cdec9bcb8110266adf769c956378957f  $RUNNER_TEMP/semantic-workers.bundle" | sha256sum -c -
+          git bundle verify "$RUNNER_TEMP/semantic-workers.bundle"
+          git fetch "$RUNNER_TEMP/semantic-workers.bundle" refs/heads/codex/abcd-integration-20261110:refs/heads/abcd-candidate
+          HEAD=$(git rev-parse refs/heads/abcd-candidate)
+          test "$HEAD" = "6f039276d483e294adf685670fe639d275d78c50"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git push origin refs/heads/abcd-candidate:refs/heads/codex/abcd-core-boundary-fixes-20261110
