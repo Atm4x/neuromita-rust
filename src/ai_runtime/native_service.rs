@@ -2,6 +2,7 @@
 //! The desktop sends commands and observes read models, but never holds a worker or download task.
 
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -18,19 +19,23 @@ use super::{
     native_https::NativeHttpsOrigin,
     native_model::{NativeBackend, NativeModelSnapshot},
     native_revisions::{NativeRevisionOverview, NativeRevisionStore},
+    native_speech::NativeSpeechKind,
     native_trust::{NativeAuthorizedRelease, NativePolicyPin, NativeReleaseTrust},
     native_workflow::{NativeModelWorkflow, NativeWorkflowSnapshot},
+    service_workers::{ServiceModel, ServiceWorkerRegistry, WorkerClaim},
 };
 
 struct NativeState {
     workflow: Option<NativeModelWorkflow>,
     download: Option<NativeDownloadOperation>,
+    claims: HashMap<NativeSpeechKind, WorkerClaim>,
 }
 
 pub struct AiHubNativeService {
     root: PathBuf,
     state: Mutex<NativeState>,
     stop: CancellationToken,
+    registry: Arc<ServiceWorkerRegistry>,
 }
 
 pub fn native_download_configured() -> bool {
@@ -63,6 +68,7 @@ fn empty_snapshot() -> NativeWorkflowSnapshot {
         },
         active_revision: None,
         worker: None,
+        service_workers: Vec::new(),
     }
 }
 
@@ -96,13 +102,19 @@ fn ensure_storage(path: &Path) -> Result<(), String> {
 
 impl AiHubNativeService {
     pub fn new(root: PathBuf) -> Arc<Self> {
+        Self::with_registry(root, ServiceWorkerRegistry::new())
+    }
+
+    pub fn with_registry(root: PathBuf, registry: Arc<ServiceWorkerRegistry>) -> Arc<Self> {
         Arc::new(Self {
             root,
             state: Mutex::new(NativeState {
                 workflow: None,
                 download: None,
+                claims: HashMap::new(),
             }),
             stop: CancellationToken::new(),
+            registry,
         })
     }
 
@@ -153,6 +165,124 @@ impl AiHubNativeService {
     }
 
     pub async fn activate(&self, model_id: &str) -> Result<NativeModelSnapshot, String> {
+        let services = {
+            let state = self.state.lock().await;
+            if self.stop.is_cancelled() {
+                return Err("Приложение завершает работу".into());
+            }
+            state
+                .workflow
+                .as_ref()
+                .ok_or("Нативная ревизия недоступна")?
+                .selected_speech_services(model_id)
+                .map_err(|e| e.to_string())?
+        };
+        let _tts_gate = if services == [NativeSpeechKind::Tts] {
+            Some(self.registry.transition_gate(super::AiService::Tts).await)
+        } else {
+            None
+        };
+        let _asr_gate = if services == [NativeSpeechKind::Asr] {
+            Some(self.registry.transition_gate(super::AiService::Asr).await)
+        } else {
+            None
+        };
+        let mut state = self.state.lock().await;
+        if self.stop.is_cancelled() {
+            return Err("Приложение завершает работу".into());
+        }
+        match services.as_slice() {
+            [] => state
+                .workflow
+                .as_mut()
+                .ok_or("Нативная ревизия недоступна")?
+                .activate_selected(model_id, Duration::from_secs(30))
+                .await
+                .map_err(|e| e.to_string()),
+            [service] => {
+                self.activate_speech_locked(&mut state, *service, model_id)
+                    .await
+            }
+            _ => Err(
+                "Для модели с несколькими сервисами необходима привязка к конкретному сервису"
+                    .into(),
+            ),
+        }
+    }
+
+    async fn activate_speech_locked(
+        &self,
+        state: &mut NativeState,
+        service: NativeSpeechKind,
+        model_id: &str,
+    ) -> Result<NativeModelSnapshot, String> {
+        let workflow = state
+            .workflow
+            .as_mut()
+            .ok_or("Нативная ревизия недоступна")?;
+        let choice = workflow
+            .selected_choice(model_id)
+            .map_err(|e| e.to_string())?;
+        let model = crate::settings::SpeechModelReference::rust(
+            model_id,
+            choice
+                .manifest_sha256
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>(),
+        );
+        let service_id = match service {
+            NativeSpeechKind::Tts => super::AiService::Tts,
+            NativeSpeechKind::Asr => super::AiService::Asr,
+        };
+        let claim = self
+            .registry
+            .claim(ServiceModel {
+                service: service_id,
+                model,
+            })
+            .map_err(|e| e.to_string())?;
+        let snapshot = workflow
+            .activate_for_service(service, model_id, Duration::from_secs(30))
+            .await
+            .map_err(|e| e.to_string())?;
+        state.claims.insert(service, claim);
+        Ok(snapshot)
+    }
+
+    pub async fn activate_for_service(
+        &self,
+        service: NativeSpeechKind,
+        model_id: &str,
+    ) -> Result<NativeModelSnapshot, String> {
+        let ai_service = match service {
+            NativeSpeechKind::Tts => super::AiService::Tts,
+            NativeSpeechKind::Asr => super::AiService::Asr,
+        };
+        let _transition = self.registry.transition_gate(ai_service).await;
+        let mut state = self.state.lock().await;
+        if self.stop.is_cancelled() {
+            return Err("Приложение завершает работу".into());
+        }
+        let capabilities = state
+            .workflow
+            .as_ref()
+            .ok_or("Нативная ревизия недоступна")?
+            .selected_speech_services(model_id)
+            .map_err(|e| e.to_string())?;
+        if !capabilities.contains(&service) {
+            return Err("Модель не поддерживает запрошенный сервис".into());
+        }
+        self.activate_speech_locked(&mut state, service, model_id)
+            .await
+    }
+
+    pub async fn deactivate_for_service(&self, service: NativeSpeechKind) -> Result<(), String> {
+        let ai_service = match service {
+            NativeSpeechKind::Tts => super::AiService::Tts,
+            NativeSpeechKind::Asr => super::AiService::Asr,
+        };
+        let _transition = self.registry.transition_gate(ai_service).await;
         let mut state = self.state.lock().await;
         if self.stop.is_cancelled() {
             return Err("Приложение завершает работу".into());
@@ -160,10 +290,12 @@ impl AiHubNativeService {
         state
             .workflow
             .as_mut()
-            .ok_or("Нативная ревизия недоступна")?
-            .activate_selected(model_id, Duration::from_secs(30))
+            .ok_or("Нативная сессия недоступна")?
+            .deactivate_for_service(service)
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        state.claims.remove(&service);
+        Ok(())
     }
 
     pub async fn synthesize_speech(
@@ -218,6 +350,8 @@ impl AiHubNativeService {
     }
 
     pub async fn deactivate(&self) -> Result<(), String> {
+        let _tts_gate = self.registry.transition_gate(super::AiService::Tts).await;
+        let _asr_gate = self.registry.transition_gate(super::AiService::Asr).await;
         let mut state = self.state.lock().await;
         if self.stop.is_cancelled() {
             return Err("Приложение завершает работу".into());
@@ -226,16 +360,18 @@ impl AiHubNativeService {
             .workflow
             .as_mut()
             .ok_or("Нативная сессия недоступна")?
-            .deactivate()
+            .deactivate_all()
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        state.claims.clear();
+        Ok(())
     }
 
     pub async fn refresh_worker(&self) -> Result<(), String> {
         let mut state = self.state.lock().await;
         if let Some(workflow) = state.workflow.as_mut() {
             workflow
-                .refresh_worker()
+                .refresh_all_workers()
                 .await
                 .map_err(|error| error.to_string())?;
         }
@@ -315,22 +451,19 @@ impl AiHubNativeService {
 
     pub async fn shutdown(&self) {
         self.stop.cancel();
+        let _tts_gate = self.registry.transition_gate(super::AiService::Tts).await;
+        let _asr_gate = self.registry.transition_gate(super::AiService::Asr).await;
         let mut state = self.state.lock().await;
         if let Some(mut operation) = state.download.take() {
             operation.cancel();
             operation.join().await;
         }
-        if let Some(workflow) = state.workflow.as_mut()
-            && workflow
-                .snapshot()
-                .ok()
-                .and_then(|snapshot| snapshot.worker)
-                .is_some()
-        {
-            if let Err(error) = workflow.deactivate().await {
+        if let Some(workflow) = state.workflow.as_mut() {
+            if let Err(error) = workflow.deactivate_all().await {
                 tracing::warn!(%error, "native worker shutdown failed");
             }
         }
+        state.claims.clear();
     }
 }
 

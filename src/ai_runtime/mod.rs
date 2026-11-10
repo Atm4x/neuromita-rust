@@ -44,6 +44,7 @@ pub mod resolver;
 mod revision_lease;
 pub mod runtime_status;
 pub mod sdk;
+pub mod service_workers;
 pub mod speech;
 pub mod speech_catalog;
 pub mod speech_inspection;

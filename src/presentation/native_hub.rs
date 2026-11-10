@@ -40,10 +40,8 @@ impl NativeHubPresenter {
             .selections
             .iter()
             .any(|item| item.manifest_state != NativeSelectionManifestState::Present);
+        let service_workers = snapshot.service_workers;
         let active = snapshot.active_revision;
-        let active_digest = active
-            .as_ref()
-            .map(|choice| hex_digest(choice.manifest_sha256));
         let worker = snapshot.worker.as_ref().map(NativeModelPresenter::project);
         let mut revisions = Vec::new();
         for item in inventory.models {
@@ -53,11 +51,16 @@ impl NativeHubPresenter {
                         && selection.manifest_sha256 == item.manifest_sha256
                         && selection.backend == backend
                 });
-                let running = active.as_ref().is_some_and(|choice| {
-                    choice.model_id == item.model_id
-                        && choice.backend == backend
-                        && active_digest.as_deref() == Some(&item.manifest_sha256)
-                });
+                let is_selected_revision =
+                    |choice: &crate::ai_runtime::native_revisions::NativeRevisionChoice| {
+                        choice.model_id == item.model_id
+                            && choice.backend == backend
+                            && hex_digest(choice.manifest_sha256) == item.manifest_sha256
+                    };
+                let running = active.as_ref().is_some_and(is_selected_revision)
+                    || service_workers
+                        .iter()
+                        .any(|session| is_selected_revision(&session.choice));
                 let observed_phase = if running {
                     worker
                         .as_ref()
@@ -65,6 +68,14 @@ impl NativeHubPresenter {
                             worker.model_id == item.model_id && worker.backend == backend
                         })
                         .map(|worker| worker.phase)
+                        .or_else(|| {
+                            service_workers
+                                .iter()
+                                .find(|session| is_selected_revision(&session.choice))
+                                .and_then(|session| {
+                                    session.worker.as_ref().map(|worker| worker.phase)
+                                })
+                        })
                 } else {
                     None
                 };
@@ -89,7 +100,7 @@ impl NativeHubPresenter {
         }
         NativeHubView {
             revisions,
-            has_active_worker: active.is_some(),
+            has_active_worker: active.is_some() || !service_workers.is_empty(),
             invalid_selection,
         }
     }
@@ -139,6 +150,7 @@ mod tests {
             }],
             active_revision: None,
             worker: None,
+            service_workers: Vec::new(),
         });
         assert!(matches!(
             view.revisions[0].trust,
@@ -186,6 +198,7 @@ mod tests {
                 phase: NativePhase::Ready,
                 last_failure: None,
             }),
+            service_workers: Vec::new(),
         });
         assert!(view.has_active_worker);
         assert!(!view.invalid_selection);
@@ -214,6 +227,7 @@ mod tests {
             },
             active_revision: None,
             worker: None,
+            service_workers: Vec::new(),
         });
         assert!(view.invalid_selection);
         assert!(!view.has_active_worker);

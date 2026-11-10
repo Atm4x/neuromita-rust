@@ -271,118 +271,304 @@ mod tests {
     }
 }
 
-use super::native_service::AiHubNativeService;
+use std::collections::HashMap;
+
+use super::{
+    native_service::AiHubNativeService,
+    service_workers::{ServiceModel, ServiceWorkerRegistry},
+};
 use crate::{
     audio::session::{SpeechFuture, SpeechSessionError, SpeechTranscriber},
-    settings::{SettingsOwner, SpeechEngineSelection, TtsBackend},
+    settings::{
+        SettingsOwner, SpeechModelReference, SpeechSettings, TtsBackend, WorkerImplementation,
+    },
     voice::{VoiceError, VoiceFuture, VoiceOptions, VoiceProvider},
 };
 
+/// The per-service transport contract, independent of its process implementation.
+/// Only the selected model identity is passed to a worker; the worker never chooses
+/// an alternative implementation after an error.
+trait TtsWorker: Send + Sync {
+    fn synthesize<'a>(
+        &'a self,
+        model: &'a SpeechModelReference,
+        speech: &'a SpeechSettings,
+        text: Arc<str>,
+        options: VoiceOptions,
+    ) -> VoiceFuture<'a>;
+}
+
+trait AsrWorker: Send + Sync {
+    fn transcribe<'a>(
+        &'a self,
+        model: &'a SpeechModelReference,
+        speech: &'a SpeechSettings,
+        wav: &'a [u8],
+    ) -> SpeechFuture<'a, Transcript>;
+}
+
+struct PythonTtsWorker(Arc<dyn VoiceProvider>);
+struct RustTtsWorker(Arc<AiHubNativeService>);
+struct PythonAsrWorker(Arc<dyn SpeechTranscriber>);
+struct RustAsrWorker(Arc<AiHubNativeService>);
+
+impl TtsWorker for PythonTtsWorker {
+    fn synthesize<'a>(
+        &'a self,
+        model: &'a SpeechModelReference,
+        speech: &'a SpeechSettings,
+        text: Arc<str>,
+        options: VoiceOptions,
+    ) -> VoiceFuture<'a> {
+        Box::pin(async move {
+            if speech.tts.backend == TtsBackend::Local
+                && model.model_id != speech.tts.local_model_id
+            {
+                return Err(VoiceError::Unavailable);
+            }
+            self.0.synthesize(text, options).await
+        })
+    }
+}
+
+impl TtsWorker for RustTtsWorker {
+    fn synthesize<'a>(
+        &'a self,
+        model: &'a SpeechModelReference,
+        speech: &'a SpeechSettings,
+        text: Arc<str>,
+        options: VoiceOptions,
+    ) -> VoiceFuture<'a> {
+        Box::pin(async move {
+            if speech.tts.backend != TtsBackend::Local || !speech.tts.enabled {
+                return Err(VoiceError::Unavailable);
+            }
+            let revision = model.revision.as_deref().ok_or(VoiceError::Unavailable)?;
+            self.0
+                .synthesize_speech(
+                    &model.model_id,
+                    revision,
+                    &text,
+                    &options.voice,
+                    &speech.tts.local_language,
+                    options.volume.get(),
+                )
+                .await
+                .map_err(VoiceError::Generation)
+        })
+    }
+}
+
+impl AsrWorker for PythonAsrWorker {
+    fn transcribe<'a>(
+        &'a self,
+        model: &'a SpeechModelReference,
+        speech: &'a SpeechSettings,
+        wav: &'a [u8],
+    ) -> SpeechFuture<'a, Transcript> {
+        Box::pin(async move {
+            if model.model_id != speech.asr.recognizer_id {
+                return Err(SpeechSessionError::Asr(
+                    "selected ASR model differs from the loaded Python plugin".into(),
+                ));
+            }
+            self.0.transcribe(wav).await
+        })
+    }
+}
+
+impl AsrWorker for RustAsrWorker {
+    fn transcribe<'a>(
+        &'a self,
+        model: &'a SpeechModelReference,
+        speech: &'a SpeechSettings,
+        wav: &'a [u8],
+    ) -> SpeechFuture<'a, Transcript> {
+        Box::pin(async move {
+            let revision = model.revision.as_deref().ok_or_else(|| {
+                SpeechSessionError::Asr("native model revision is missing".into())
+            })?;
+            let language = speech
+                .asr
+                .model_languages
+                .get(&model.model_id)
+                .map_or("auto", String::as_str);
+            self.0
+                .transcribe_speech(&model.model_id, revision, wav, language)
+                .await
+                .map_err(SpeechSessionError::Asr)
+        })
+    }
+}
+
 pub(crate) struct RoutedSpeechVoice {
     pub settings: Arc<SettingsOwner>,
-    pub python: Arc<dyn VoiceProvider>,
-    pub native: Option<Arc<AiHubNativeService>>,
+    registry: Arc<ServiceWorkerRegistry>,
+    implementations: HashMap<WorkerImplementation, Arc<dyn TtsWorker>>,
+}
+
+impl RoutedSpeechVoice {
+    pub fn new(
+        settings: Arc<SettingsOwner>,
+        python: Arc<dyn VoiceProvider>,
+        native: Option<Arc<AiHubNativeService>>,
+        registry: Arc<ServiceWorkerRegistry>,
+    ) -> Self {
+        let mut implementations: HashMap<WorkerImplementation, Arc<dyn TtsWorker>> = HashMap::new();
+        implementations.insert(
+            WorkerImplementation::Python,
+            Arc::new(PythonTtsWorker(python)),
+        );
+        if let Some(owner) = native {
+            implementations.insert(WorkerImplementation::Rust, Arc::new(RustTtsWorker(owner)));
+        }
+        Self {
+            settings,
+            registry,
+            implementations,
+        }
+    }
 }
 
 impl VoiceProvider for RoutedSpeechVoice {
     fn synthesize(&self, text: Arc<str>, options: VoiceOptions) -> VoiceFuture<'_> {
         Box::pin(async move {
+            let _call = self.registry.inference_gate(super::AiService::Tts).await;
             let saved = self
                 .settings
                 .snapshot_all()
-                .map_err(|error| VoiceError::Generation(error.to_string()))?;
+                .map_err(|e| VoiceError::Generation(e.to_string()))?;
             let speech = &saved.values.speech;
-            if let SpeechEngineSelection::Native {
-                model_id,
-                manifest_sha256,
-            } = &speech.tts_engine
+            let selected = speech
+                .model_for(super::AiService::Tts)
+                .unwrap_or_else(|| SpeechModelReference::python(speech.tts.local_model_id.clone()));
+            if speech.tts.backend == TtsBackend::Local
+                && self
+                    .registry
+                    .active(super::AiService::Tts)
+                    .map_err(|error| VoiceError::Generation(error.to_string()))?
+                    != Some(ServiceModel {
+                        service: super::AiService::Tts,
+                        model: selected.clone(),
+                    })
             {
-                if !speech.tts.enabled || speech.tts.backend != TtsBackend::Local {
-                    return Err(VoiceError::Unavailable);
-                }
-                let owner = self.native.as_ref().ok_or(VoiceError::Unavailable)?;
-                let result = owner
-                    .synthesize_speech(
-                        model_id,
-                        manifest_sha256,
-                        &text,
-                        &options.voice,
-                        &speech.tts.local_language,
-                        options.volume.get(),
-                    )
-                    .await
-                    .map_err(VoiceError::Generation)?;
-                let current = self
-                    .settings
-                    .snapshot_all()
-                    .map_err(|error| VoiceError::Generation(error.to_string()))?;
-                if current.values.speech.tts_engine != speech.tts_engine
-                    || current.values.speech.tts.local_language != speech.tts.local_language
-                    || !current.values.speech.tts.enabled
-                    || current.values.speech.tts.backend != TtsBackend::Local
-                {
-                    return Err(VoiceError::Unavailable);
-                }
-                Ok(result)
-            } else {
-                self.python.synthesize(text, options).await
+                return Err(VoiceError::Unavailable);
             }
+            let worker = self
+                .implementations
+                .get(&selected.implementation)
+                .ok_or(VoiceError::Unavailable)?;
+            let audio = worker.synthesize(&selected, speech, text, options).await?;
+            let current = self
+                .settings
+                .snapshot_all()
+                .map_err(|e| VoiceError::Generation(e.to_string()))?;
+            if current.values.speech.model_for(super::AiService::Tts)
+                != speech.model_for(super::AiService::Tts)
+                || current.values.speech.tts != speech.tts
+                || current.values.speech.tts_model_options != speech.tts_model_options
+                || (speech.tts.backend == TtsBackend::Local
+                    && self
+                        .registry
+                        .active(super::AiService::Tts)
+                        .map_err(|error| VoiceError::Generation(error.to_string()))?
+                        != Some(ServiceModel {
+                            service: super::AiService::Tts,
+                            model: selected,
+                        }))
+            {
+                return Err(VoiceError::Unavailable);
+            }
+            Ok(audio)
         })
     }
 }
 
 pub(crate) struct RoutedSpeechTranscriber {
     pub settings: Arc<SettingsOwner>,
-    pub python: Option<Arc<dyn SpeechTranscriber>>,
-    pub native: Option<Arc<AiHubNativeService>>,
+    registry: Arc<ServiceWorkerRegistry>,
+    implementations: HashMap<WorkerImplementation, Arc<dyn AsrWorker>>,
+}
+
+impl RoutedSpeechTranscriber {
+    pub fn new(
+        settings: Arc<SettingsOwner>,
+        python: Option<Arc<dyn SpeechTranscriber>>,
+        native: Option<Arc<AiHubNativeService>>,
+        registry: Arc<ServiceWorkerRegistry>,
+    ) -> Self {
+        let mut implementations: HashMap<WorkerImplementation, Arc<dyn AsrWorker>> = HashMap::new();
+        if let Some(owner) = python {
+            implementations.insert(
+                WorkerImplementation::Python,
+                Arc::new(PythonAsrWorker(owner)),
+            );
+        }
+        if let Some(owner) = native {
+            implementations.insert(WorkerImplementation::Rust, Arc::new(RustAsrWorker(owner)));
+        }
+        Self {
+            settings,
+            registry,
+            implementations,
+        }
+    }
 }
 
 impl SpeechTranscriber for RoutedSpeechTranscriber {
     fn transcribe<'a>(&'a self, wav: &'a [u8]) -> SpeechFuture<'a, Transcript> {
         Box::pin(async move {
+            let _call = self.registry.inference_gate(super::AiService::Asr).await;
             let saved = self
                 .settings
                 .snapshot_all()
-                .map_err(|error| SpeechSessionError::Asr(error.to_string()))?;
+                .map_err(|e| SpeechSessionError::Asr(e.to_string()))?;
             let speech = &saved.values.speech;
-            if let SpeechEngineSelection::Native {
-                model_id,
-                manifest_sha256,
-            } = &speech.asr_engine
+            let selected = speech
+                .model_for(super::AiService::Asr)
+                .ok_or_else(|| SpeechSessionError::Asr("no ASR model selected".into()))?;
+            if self
+                .registry
+                .active(super::AiService::Asr)
+                .map_err(|error| SpeechSessionError::Asr(error.to_string()))?
+                != Some(ServiceModel {
+                    service: super::AiService::Asr,
+                    model: selected.clone(),
+                })
             {
-                let owner = self
-                    .native
-                    .as_ref()
-                    .ok_or_else(|| SpeechSessionError::Asr("native ASR is not active".into()))?;
-                let language = speech
-                    .asr
-                    .model_languages
-                    .get(model_id)
-                    .map_or("auto", String::as_str);
-                let result = owner
-                    .transcribe_speech(model_id, manifest_sha256, wav, language)
-                    .await
-                    .map_err(SpeechSessionError::Asr)?;
-                let current = self
-                    .settings
-                    .snapshot_all()
-                    .map_err(|error| SpeechSessionError::Asr(error.to_string()))?;
-                if current.values.speech.asr_engine != speech.asr_engine
-                    || current.values.speech.asr.model_languages.get(model_id)
-                        != speech.asr.model_languages.get(model_id)
-                {
-                    return Err(SpeechSessionError::Asr(
-                        "ASR selection changed during inference".into(),
-                    ));
-                }
-                Ok(result)
-            } else {
-                self.python
-                    .as_ref()
-                    .ok_or_else(|| SpeechSessionError::Asr("Python ASR is not active".into()))?
-                    .transcribe(wav)
-                    .await
+                return Err(SpeechSessionError::Asr(
+                    "selected ASR worker is not active".into(),
+                ));
             }
+            let worker = self
+                .implementations
+                .get(&selected.implementation)
+                .ok_or_else(|| {
+                    SpeechSessionError::Asr("selected ASR model worker is not installed".into())
+                })?;
+            let transcript = worker.transcribe(&selected, speech, wav).await?;
+            let current = self
+                .settings
+                .snapshot_all()
+                .map_err(|e| SpeechSessionError::Asr(e.to_string()))?;
+            if current.values.speech.model_for(super::AiService::Asr)
+                != speech.model_for(super::AiService::Asr)
+                || current.values.speech.asr != speech.asr
+                || current.values.speech.asr_model_options != speech.asr_model_options
+                || self
+                    .registry
+                    .active(super::AiService::Asr)
+                    .map_err(|error| SpeechSessionError::Asr(error.to_string()))?
+                    != Some(ServiceModel {
+                        service: super::AiService::Asr,
+                        model: selected,
+                    })
+            {
+                return Err(SpeechSessionError::Asr(
+                    "ASR model selection changed during inference".into(),
+                ));
+            }
+            Ok(transcript)
         })
     }
 }

@@ -27,6 +27,7 @@ use crate::{
         },
         native_service::AiHubNativeService,
         native_speech::{RoutedSpeechTranscriber, RoutedSpeechVoice},
+        service_workers::{ServiceModel, ServiceWorkerRegistry, WorkerClaim},
     },
     character::{CharacterHandle, CharacterId, CharacterRegistry, ReminderBridge},
     finetune::{FineTuneCollector, FineTuneError, FineTuneSettings},
@@ -746,6 +747,7 @@ struct ApplicationOwner {
     lease: RuntimeLease,
     _settings_instance: Option<Arc<SettingsInstanceLease>>,
     ai_runtime: Option<RunningAiApplication>,
+    prepared_claims: Vec<WorkerClaim>,
     ai_hub_install: Option<Arc<AiHubInstallCoordinator>>,
     ai_hub_native: Option<Arc<AiHubNativeService>>,
     live_speech: Option<Arc<LiveSpeechRuntime>>,
@@ -843,10 +845,12 @@ impl ApplicationLifecycle {
             )
             .into());
         }
+        let service_workers = ServiceWorkerRegistry::new();
         let ai_hub_install = ai_hub_install_root
             .as_ref()
             .map(|root| AiHubInstallCoordinator::new(root.clone()));
-        let ai_hub_native = ai_hub_install_root.map(AiHubNativeService::new);
+        let ai_hub_native = ai_hub_install_root
+            .map(|root| AiHubNativeService::with_registry(root, Arc::clone(&service_workers)));
         let finetune = finetune
             .map(|settings| FineTuneCollector::from_settings(&settings))
             .transpose()?;
@@ -970,13 +974,43 @@ impl ApplicationLifecycle {
         // startup. The worker may appear or change after settings are edited.
         let initial_speech = settings_owner.snapshot_all()?.values.speech.clone();
         let live_speech = live_environment.map(|environment| {
-            Arc::new(LiveSpeechRuntime::new(
-                environment,
-                ai_runtime.take(),
-                &initial_speech,
-                speech_startup_warning.as_deref(),
-            ))
+            Arc::new(
+                LiveSpeechRuntime::new_with_registry(
+                    environment,
+                    ai_runtime.take(),
+                    &initial_speech,
+                    speech_startup_warning.as_deref(),
+                    Arc::clone(&service_workers),
+                )
+                .expect("no native worker can be active before application startup finishes"),
+            )
         });
+        let mut prepared_claims = Vec::new();
+        if live_speech.is_none()
+            && let Some(runtime) = ai_runtime.as_ref()
+        {
+            for service in [AiService::Tts, AiService::Asr] {
+                if runtime.has_service(service) {
+                    let model = runtime
+                        .status_snapshot()
+                        .service(service)
+                        .active_model
+                        .map(|loaded| {
+                            crate::settings::SpeechModelReference::python(loaded.plugin_id)
+                        })
+                        .ok_or_else(|| {
+                            AiApplicationError::Invalid(
+                                "running Python worker has no active model".into(),
+                            )
+                        })?;
+                    prepared_claims.push(
+                        service_workers
+                            .claim(ServiceModel { service, model })
+                            .map_err(|error| AiApplicationError::Invalid(error.to_string()))?,
+                    );
+                }
+            }
+        }
         let ai_recovery = if live_speech.is_none() {
             ai_runtime
                 .as_ref()
@@ -1005,19 +1039,21 @@ impl ApplicationLifecycle {
         };
         let speech: Option<Arc<dyn crate::audio::session::SpeechTranscriber>> =
             if speech.is_some() || ai_hub_native.is_some() {
-                Some(Arc::new(RoutedSpeechTranscriber {
-                    settings: Arc::clone(&settings_owner),
-                    python: speech,
-                    native: ai_hub_native.clone(),
-                }))
+                Some(Arc::new(RoutedSpeechTranscriber::new(
+                    Arc::clone(&settings_owner),
+                    speech,
+                    ai_hub_native.clone(),
+                    Arc::clone(&service_workers),
+                )))
             } else {
                 None
             };
-        let voice: Arc<dyn VoiceProvider> = Arc::new(RoutedSpeechVoice {
-            settings: Arc::clone(&settings_owner),
-            python: voice,
-            native: ai_hub_native.clone(),
-        });
+        let voice: Arc<dyn VoiceProvider> = Arc::new(RoutedSpeechVoice::new(
+            Arc::clone(&settings_owner),
+            voice,
+            ai_hub_native.clone(),
+            Arc::clone(&service_workers),
+        ));
         let registry = Arc::new(RequestRegistry::new_with_diagnostics(
             limits.discovery_buffer.get(),
             crate::request::DiagnosticsLimits::default(),
@@ -1211,6 +1247,7 @@ impl ApplicationLifecycle {
             lease,
             _settings_instance: settings_instance,
             ai_runtime,
+            prepared_claims,
             ai_hub_install: ai_hub_install.clone(),
             ai_hub_native: ai_hub_native.clone(),
             live_speech,
@@ -1699,6 +1736,7 @@ impl ApplicationOwner {
         {
             failure = Some(ApplicationError::Ai(error));
         }
+        self.prepared_claims.clear();
         self.settings_stop.cancel();
         if let Some(task) = self.settings_task.take() {
             match task.await {

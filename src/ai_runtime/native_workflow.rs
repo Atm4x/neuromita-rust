@@ -1,7 +1,7 @@
 //! Application-owned orchestration for installed native model revisions.
 //! A persistent selection is not a live worker and a metadata view is not a content receipt.
 
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 use serde_json::Value;
 use thiserror::Error;
@@ -22,6 +22,10 @@ use super::{
 pub enum NativeWorkflowError {
     #[error("a native model process is already active; stop it before activating another")]
     AlreadyActive,
+    #[error("native model advertises multiple services; select the service explicitly")]
+    AmbiguousService,
+    #[error("native model does not implement the requested service")]
+    UnsupportedService,
     #[error("no selected native model revision exists")]
     NotSelected,
     #[error("no native model process is active")]
@@ -46,6 +50,14 @@ pub struct NativeWorkflowSnapshot {
     pub trust: Vec<NativeRevisionTrust>,
     pub active_revision: Option<NativeRevisionChoice>,
     pub worker: Option<NativeModelSnapshot>,
+    pub service_workers: Vec<NativeServiceWorkerSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeServiceWorkerSnapshot {
+    pub service: NativeSpeechKind,
+    pub choice: NativeRevisionChoice,
+    pub worker: Option<NativeModelSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +78,7 @@ pub struct NativeModelWorkflow {
     revisions: NativeRevisionStore,
     trust: Option<NativeReleaseTrust>,
     active: Option<ActiveNativeSession>,
+    speech_workers: HashMap<NativeSpeechKind, ActiveNativeSession>,
 }
 
 impl NativeModelWorkflow {
@@ -74,6 +87,7 @@ impl NativeModelWorkflow {
             revisions,
             trust: None,
             active: None,
+            speech_workers: HashMap::new(),
         }
     }
 
@@ -84,6 +98,7 @@ impl NativeModelWorkflow {
             revisions,
             trust: Some(trust),
             active: None,
+            speech_workers: HashMap::new(),
         }
     }
 
@@ -103,14 +118,32 @@ impl NativeModelWorkflow {
                     }),
             })
             .collect();
+        let mut service_workers = self
+            .speech_workers
+            .iter()
+            .map(|(service, session)| NativeServiceWorkerSnapshot {
+                service: *service,
+                choice: session.choice.clone(),
+                worker: session.controller.last_observed_snapshot(),
+            })
+            .collect::<Vec<_>>();
+        service_workers.sort_by_key(|worker| match worker.service {
+            NativeSpeechKind::Tts => 0,
+            NativeSpeechKind::Asr => 1,
+        });
+        let representative = self.active.as_ref().or_else(|| {
+            if self.speech_workers.len() == 1 {
+                self.speech_workers.values().next()
+            } else {
+                None
+            }
+        });
         Ok(NativeWorkflowSnapshot {
             inventory,
             trust,
-            active_revision: self.active.as_ref().map(|session| session.choice.clone()),
-            worker: self
-                .active
-                .as_ref()
-                .and_then(|session| session.controller.last_observed_snapshot()),
+            active_revision: representative.map(|session| session.choice.clone()),
+            worker: representative.and_then(|session| session.controller.last_observed_snapshot()),
+            service_workers,
         })
     }
 
@@ -160,14 +193,86 @@ impl NativeModelWorkflow {
         Ok(())
     }
 
+    /// Compatibility entry point for older generic packages and single-service
+    /// speech packages. A dual-capability package requires an explicit service.
+    pub fn selected_speech_services(
+        &self,
+        model_id: &str,
+    ) -> Result<Vec<NativeSpeechKind>, NativeWorkflowError> {
+        let (controller, selection) = self.prepared_selected(model_id, Duration::from_secs(30))?;
+        let registered = controller
+            .discover()?
+            .into_iter()
+            .find(|entry| entry.manifest().model_id == selection.model_id)
+            .ok_or(NativeControllerError::NotFound)?;
+        Ok(registered
+            .manifest()
+            .speech_capabilities
+            .iter()
+            .map(|c| c.kind)
+            .collect())
+    }
+
+    pub fn selected_choice(
+        &self,
+        model_id: &str,
+    ) -> Result<NativeRevisionChoice, NativeWorkflowError> {
+        let (_, selected) = self.prepared_selected(model_id, Duration::from_secs(30))?;
+        Ok(choice_from_selection(selected))
+    }
+
     pub async fn activate_selected(
         &mut self,
         model_id: &str,
         deadline: Duration,
     ) -> Result<NativeModelSnapshot, NativeWorkflowError> {
-        if self.active.is_some() {
-            return Err(NativeWorkflowError::AlreadyActive);
+        let (controller, selection) = self.prepared_selected(model_id, deadline)?;
+        let registration = controller
+            .discover()?
+            .into_iter()
+            .find(|entry| entry.manifest().model_id == selection.model_id)
+            .ok_or(NativeControllerError::NotFound)?;
+        match registration.manifest().speech_capabilities.as_slice() {
+            [] => self.activate_generic(controller, selection).await,
+            [capability] => {
+                self.activate_speech_session(capability.kind, controller, selection)
+                    .await
+            }
+            _ => Err(NativeWorkflowError::AmbiguousService),
         }
+    }
+
+    /// Each service has an independent native worker slot. An ASR activation
+    /// cannot evict a TTS worker, and two TTS activations cannot coexist.
+    pub async fn activate_for_service(
+        &mut self,
+        service: NativeSpeechKind,
+        model_id: &str,
+        deadline: Duration,
+    ) -> Result<NativeModelSnapshot, NativeWorkflowError> {
+        let (controller, selection) = self.prepared_selected(model_id, deadline)?;
+        let registration = controller
+            .discover()?
+            .into_iter()
+            .find(|entry| entry.manifest().model_id == selection.model_id)
+            .ok_or(NativeControllerError::NotFound)?;
+        if !registration
+            .manifest()
+            .speech_capabilities
+            .iter()
+            .any(|capability| capability.kind == service)
+        {
+            return Err(NativeWorkflowError::UnsupportedService);
+        }
+        self.activate_speech_session(service, controller, selection)
+            .await
+    }
+
+    fn prepared_selected(
+        &self,
+        model_id: &str,
+        deadline: Duration,
+    ) -> Result<(NativeModelController, NativeModelSelection), NativeWorkflowError> {
         if let Some(policy) = &self.trust {
             let choice = self
                 .revisions
@@ -175,12 +280,23 @@ impl NativeModelWorkflow {
                 .ok_or(NativeWorkflowError::NotSelected)?;
             policy.verify(&choice.model_id, &choice.manifest_sha256)?;
         }
-        let (mut controller, selection) = self
+        let (controller, selection) = self
             .revisions
             .controller_for_selected(model_id, deadline)?
             .ok_or(NativeWorkflowError::NotSelected)?;
         if let Some(policy) = &self.trust {
             policy.verify(&selection.model_id, &selection.approved_manifest_sha256)?;
+        }
+        Ok((controller, selection))
+    }
+
+    async fn activate_generic(
+        &mut self,
+        mut controller: NativeModelController,
+        selection: NativeModelSelection,
+    ) -> Result<NativeModelSnapshot, NativeWorkflowError> {
+        if self.active.is_some() {
+            return Err(NativeWorkflowError::AlreadyActive);
         }
         let snapshot = controller.activate(&selection).await?;
         self.active = Some(ActiveNativeSession {
@@ -190,10 +306,51 @@ impl NativeModelWorkflow {
         Ok(snapshot)
     }
 
+    async fn activate_speech_session(
+        &mut self,
+        service: NativeSpeechKind,
+        mut controller: NativeModelController,
+        selection: NativeModelSelection,
+    ) -> Result<NativeModelSnapshot, NativeWorkflowError> {
+        if self.speech_workers.contains_key(&service) {
+            return Err(NativeWorkflowError::AlreadyActive);
+        }
+        let snapshot = controller.activate(&selection).await?;
+        self.speech_workers.insert(
+            service,
+            ActiveNativeSession {
+                choice: choice_from_selection(selection),
+                controller,
+            },
+        );
+        Ok(snapshot)
+    }
+
     pub async fn refresh_worker(
         &mut self,
     ) -> Result<Option<NativeModelSnapshot>, NativeWorkflowError> {
         match self.active.as_mut() {
+            Some(session) => Ok(session.controller.status().await?),
+            None => match self.speech_workers.len() {
+                0 => Ok(None),
+                1 => Ok(self
+                    .speech_workers
+                    .values_mut()
+                    .next()
+                    .expect("single worker")
+                    .controller
+                    .status()
+                    .await?),
+                _ => Err(NativeWorkflowError::AmbiguousService),
+            },
+        }
+    }
+
+    pub async fn refresh_service(
+        &mut self,
+        service: NativeSpeechKind,
+    ) -> Result<Option<NativeModelSnapshot>, NativeWorkflowError> {
+        match self.speech_workers.get_mut(&service) {
             Some(session) => Ok(session.controller.status().await?),
             None => Ok(None),
         }
@@ -208,7 +365,10 @@ impl NativeModelWorkflow {
         language: &str,
         volume_percent: u8,
     ) -> Result<crate::voice::AudioArtifact, NativeWorkflowError> {
-        let session = self.active.as_mut().ok_or(NativeWorkflowError::NotActive)?;
+        let session = self
+            .speech_workers
+            .get_mut(&NativeSpeechKind::Tts)
+            .ok_or(NativeWorkflowError::NotActive)?;
         if session.choice.model_id != model_id
             || session.choice.manifest_sha256 != parse_sha256(manifest_sha256)?
         {
@@ -231,7 +391,10 @@ impl NativeModelWorkflow {
         wav: &[u8],
         language: &str,
     ) -> Result<crate::ai_runtime::speech::Transcript, NativeWorkflowError> {
-        let session = self.active.as_mut().ok_or(NativeWorkflowError::NotActive)?;
+        let session = self
+            .speech_workers
+            .get_mut(&NativeSpeechKind::Asr)
+            .ok_or(NativeWorkflowError::NotActive)?;
         if session.choice.model_id != model_id
             || session.choice.manifest_sha256 != parse_sha256(manifest_sha256)?
         {
@@ -257,7 +420,57 @@ impl NativeModelWorkflow {
         Ok(session.controller.infer(payload).await?)
     }
 
+    pub async fn refresh_all_workers(&mut self) -> Result<(), NativeWorkflowError> {
+        if let Some(session) = self.active.as_mut() {
+            session.controller.status().await?;
+        }
+        for session in self.speech_workers.values_mut() {
+            session.controller.status().await?;
+        }
+        Ok(())
+    }
+
+    pub async fn deactivate_for_service(
+        &mut self,
+        service: NativeSpeechKind,
+    ) -> Result<(), NativeWorkflowError> {
+        let mut session = self
+            .speech_workers
+            .remove(&service)
+            .ok_or(NativeWorkflowError::NotActive)?;
+        session.controller.deactivate().await?;
+        Ok(())
+    }
+
+    pub async fn deactivate_all(&mut self) -> Result<(), NativeWorkflowError> {
+        let mut first_error = None;
+        for service in [NativeSpeechKind::Tts, NativeSpeechKind::Asr] {
+            if self.speech_workers.contains_key(&service) {
+                if let Err(error) = self.deactivate_for_service(service).await {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        if self.active.is_some() {
+            if let Err(error) = self.deactivate().await {
+                first_error.get_or_insert(error);
+            }
+        }
+        if let Some(error) = first_error {
+            Err(error)
+        } else {
+            Ok(())
+        }
+    }
+
     pub async fn deactivate(&mut self) -> Result<(), NativeWorkflowError> {
+        if self.active.is_none() && self.speech_workers.len() == 1 {
+            let service = *self.speech_workers.keys().next().expect("single worker");
+            return self.deactivate_for_service(service).await;
+        }
+        if self.active.is_none() && self.speech_workers.len() > 1 {
+            return Err(NativeWorkflowError::AmbiguousService);
+        }
         let mut session = self.active.take().ok_or(NativeWorkflowError::NotActive)?;
         session.controller.deactivate().await?;
         Ok(())

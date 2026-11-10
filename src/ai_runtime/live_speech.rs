@@ -22,7 +22,7 @@ use crate::{
         controller::SpeechSessionController,
         session::{SpeechFuture, SpeechSessionError, SpeechTranscriber},
     },
-    settings::{SettingsOwner, SpeechEngineSelection, SpeechSettings, TtsBackend},
+    settings::{SettingsOwner, SpeechSettings, TtsBackend, WorkerImplementation},
     voice::{VoiceError, VoiceFuture, VoiceOptions, VoiceProvider},
 };
 
@@ -31,6 +31,7 @@ use super::{
     application::{AiApplicationError, RunningAiApplication},
     installed_speech::{InstalledSpeechEnvironment, InstalledSpeechError},
     runtime_status::{RecoveryAttempts, RuntimePhase, RuntimeSnapshot},
+    service_workers::{ServiceModel, ServiceWorkerRegistry, WorkerClaim, WorkerOwnershipError},
     speech::Transcript,
 };
 
@@ -45,7 +46,9 @@ impl SelectionKey {
         let tts = (settings.tts.enabled
             && settings.tts.backend == TtsBackend::Local
             && settings.tts.local_auto_load
-            && matches!(settings.tts_engine, SpeechEngineSelection::Python))
+            && settings
+                .model_for(AiService::Tts)
+                .is_some_and(|model| model.implementation == WorkerImplementation::Python))
         .then(|| {
             let id = &settings.tts.local_model_id;
             (
@@ -58,7 +61,9 @@ impl SelectionKey {
             )
         });
         let asr = (!settings.asr.recognizer_id.is_empty()
-            && matches!(settings.asr_engine, SpeechEngineSelection::Python))
+            && settings
+                .model_for(AiService::Asr)
+                .is_some_and(|model| model.implementation == WorkerImplementation::Python))
         .then(|| {
             let id = &settings.asr.recognizer_id;
             (
@@ -104,6 +109,8 @@ pub enum SpeechReconfigurationError {
     Installed(#[from] InstalledSpeechError),
     #[error(transparent)]
     Runtime(#[from] AiApplicationError),
+    #[error(transparent)]
+    Ownership(#[from] WorkerOwnershipError),
 }
 
 const RECOVERY_POLL_INTERVAL: Duration = Duration::from_secs(3);
@@ -211,6 +218,8 @@ impl RecoveryBudget {
 
 pub struct LiveSpeechRuntime {
     installed: InstalledSpeechEnvironment,
+    registry: Arc<ServiceWorkerRegistry>,
+    claims: Mutex<Vec<WorkerClaim>>,
     current: RwLock<Option<RunningAiApplication>>,
     transition: Mutex<()>,
     applied_selection: Mutex<SelectionKey>,
@@ -226,6 +235,23 @@ impl LiveSpeechRuntime {
         settings: &SpeechSettings,
         startup_error: Option<&str>,
     ) -> Self {
+        Self::new_with_registry(
+            installed,
+            initial,
+            settings,
+            startup_error,
+            ServiceWorkerRegistry::new(),
+        )
+        .expect("a fresh service worker registry cannot have a conflicting owner")
+    }
+
+    pub fn new_with_registry(
+        installed: InstalledSpeechEnvironment,
+        initial: Option<RunningAiApplication>,
+        settings: &SpeechSettings,
+        startup_error: Option<&str>,
+        registry: Arc<ServiceWorkerRegistry>,
+    ) -> Result<Self, WorkerOwnershipError> {
         let applied_selection = if initial.is_some() {
             SelectionKey::from_settings(settings)
         } else {
@@ -238,15 +264,27 @@ impl LiveSpeechRuntime {
         if let Some(error) = startup_error {
             mark_failure(&mut snapshot, &SelectionKey::from_settings(settings), error);
         }
-        Self {
+        let mut claims = Vec::new();
+        if let Some(runtime) = initial.as_ref() {
+            for service in [AiService::Tts, AiService::Asr] {
+                if runtime.has_service(service)
+                    && let Some(model) = settings.model_for(service)
+                {
+                    claims.push(registry.claim(ServiceModel { service, model })?);
+                }
+            }
+        }
+        Ok(Self {
             installed,
+            registry,
+            claims: Mutex::new(claims),
             current: RwLock::new(initial),
             transition: Mutex::new(()),
             applied_selection: Mutex::new(applied_selection),
             status: watch::channel(snapshot).0,
             shutting_down: AtomicBool::new(false),
             recovery_policy: RecoveryPolicy::default(),
-        }
+        })
     }
 
     pub fn new_with_recovery_policy(
@@ -306,9 +344,9 @@ impl LiveSpeechRuntime {
         self.snapshot()
     }
 
-    /// Serializes candidates. The original runtime remains active until the new one
-    /// has passed installation inspection and model initialization. A failed or stale
-    /// candidate is retired without changing the active runtime or microphone.
+    /// A new revision never starts while the previous service worker is alive.
+    /// Installation probing is performed first, but process startup is serialized
+    /// after a completed shutdown of the previous worker generation.
     pub(crate) async fn reconcile(
         &self,
         desired: &SpeechSettings,
@@ -317,6 +355,8 @@ impl LiveSpeechRuntime {
         stopping: &CancellationToken,
     ) -> Result<(), SpeechReconfigurationError> {
         let _transition = self.transition.lock().await;
+        let _tts_gate = self.registry.transition_gate(AiService::Tts).await;
+        let _asr_gate = self.registry.transition_gate(AiService::Asr).await;
         if self.shutting_down.load(Ordering::Acquire) || stopping.is_cancelled() {
             return Ok(());
         }
@@ -342,6 +382,58 @@ impl LiveSpeechRuntime {
                 return Err(error.into());
             }
         };
+        let still_selected = || {
+            !stopping.is_cancelled()
+                && !self.shutting_down.load(Ordering::Acquire)
+                && settings.snapshot_all().is_ok_and(|snapshot| {
+                    SelectionKey::from_settings(&snapshot.values.speech) == key
+                })
+        };
+        if !still_selected() {
+            self.restore_current().await;
+            return Ok(());
+        }
+        let mut capture = capture.lock().await;
+        if !still_selected() {
+            self.restore_current().await;
+            return Ok(());
+        }
+        let mut applied = self.applied_selection.lock().await;
+        if applied.asr != key.asr {
+            capture.stop().await;
+        }
+        let previous = self.current.write().await.take();
+        self.status.send_replace(RuntimeSnapshot::default());
+        if let Some(previous) = previous {
+            previous.shutdown().await?;
+        }
+        self.claims.lock().await.clear();
+        *applied = SelectionKey::default();
+        drop(applied);
+        drop(capture);
+        if !still_selected() {
+            return Ok(());
+        }
+
+        let mut new_claims = Vec::new();
+        if let Some(plan) = &prepared {
+            for service in [AiService::Tts, AiService::Asr] {
+                if plan
+                    .workers
+                    .iter()
+                    .any(|worker| worker.models.iter().any(|model| model.service == service))
+                    && let Some(model) = desired.model_for(service)
+                {
+                    match self.registry.claim(ServiceModel { service, model }) {
+                        Ok(claim) => new_claims.push(claim),
+                        Err(error) => {
+                            self.failed(&key, &error.to_string());
+                            return Err(error.into());
+                        }
+                    }
+                }
+            }
+        }
         let candidate = match prepared {
             Some(plan) => match plan.activate().await {
                 Ok(running) => Some(running),
@@ -352,45 +444,20 @@ impl LiveSpeechRuntime {
             },
             None => None,
         };
-        let still_selected = || {
-            settings
-                .snapshot_all()
-                .is_ok_and(|snapshot| SelectionKey::from_settings(&snapshot.values.speech) == key)
-        };
-        if stopping.is_cancelled() || !still_selected() {
+        if !still_selected() {
             if let Some(candidate) = candidate {
-                let _ = candidate.shutdown().await;
+                candidate.shutdown().await?;
             }
-            self.restore_current().await;
             return Ok(());
-        }
-        let mut capture = capture.lock().await;
-        if stopping.is_cancelled() || !still_selected() {
-            drop(capture);
-            if let Some(candidate) = candidate {
-                let _ = candidate.shutdown().await;
-            }
-            self.restore_current().await;
-            return Ok(());
-        }
-        let mut applied = self.applied_selection.lock().await;
-        if applied.asr != key.asr {
-            capture.stop().await;
         }
         let mut active = self.current.write().await;
-        let old = std::mem::replace(&mut *active, candidate);
-        let snapshot = active.as_ref().map_or_else(
+        *active = candidate;
+        self.status.send_replace(active.as_ref().map_or_else(
             RuntimeSnapshot::default,
             RunningAiApplication::status_snapshot,
-        );
-        self.status.send_replace(snapshot);
-        *applied = key;
-        drop(active);
-        drop(applied);
-        drop(capture);
-        if let Some(previous) = old {
-            previous.shutdown().await?;
-        }
+        ));
+        *self.applied_selection.lock().await = key;
+        *self.claims.lock().await = new_claims;
         Ok(())
     }
 
@@ -405,6 +472,7 @@ impl LiveSpeechRuntime {
         stopping: &CancellationToken,
     ) -> Result<(), SpeechReconfigurationError> {
         let _transition = self.transition.lock().await;
+        let _service_gate = self.registry.transition_gate(service).await;
         if stopping.is_cancelled() || self.shutting_down.load(Ordering::Acquire) {
             return Ok(());
         }
@@ -492,11 +560,14 @@ impl LiveSpeechRuntime {
     pub async fn shutdown(&self) -> Result<(), AiApplicationError> {
         self.shutting_down.store(true, Ordering::Release);
         let _transition = self.transition.lock().await;
+        let _tts_gate = self.registry.transition_gate(AiService::Tts).await;
+        let _asr_gate = self.registry.transition_gate(AiService::Asr).await;
         let previous = self.current.write().await.take();
         self.status.send_replace(RuntimeSnapshot::default());
         if let Some(previous) = previous {
             previous.shutdown().await?;
         }
+        self.claims.lock().await.clear();
         Ok(())
     }
 }

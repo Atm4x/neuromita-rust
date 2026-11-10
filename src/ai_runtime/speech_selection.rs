@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::settings::{SpeechEngineSelection, SpeechSettings, TtsBackend};
+use crate::settings::{SpeechSettings, TtsBackend, WorkerImplementation};
 
 use super::{
     AiRuntimeError, AiService, ModelActivation, PythonHostConfig, fetch_speech_plugin_inspection,
@@ -71,10 +71,9 @@ pub fn select_speech_model(
     inventory: &SpeechInventory,
     service: AiService,
 ) -> Result<Option<SpeechSelection>, SpeechSelectionError> {
-    if matches!(service, AiService::Tts)
-        && !matches!(settings.tts_engine, SpeechEngineSelection::Python)
-        || matches!(service, AiService::Asr)
-            && !matches!(settings.asr_engine, SpeechEngineSelection::Python)
+    if settings
+        .model_for(service)
+        .is_some_and(|model| model.implementation != WorkerImplementation::Python)
     {
         return Ok(None);
     }
@@ -271,23 +270,23 @@ mod tests {
     }
 
     #[test]
-    fn native_selection_never_resolves_to_a_python_plugin_even_with_same_id() {
+    fn rust_model_entry_never_resolves_to_python_plugin_with_same_name() {
         let mut settings = SpeechSettings::default();
         settings.tts.enabled = true;
         settings.tts.backend = TtsBackend::Local;
         settings.tts.local_model_id = "same_id".into();
         settings.asr.recognizer_id = "same_id".into();
-        settings.tts_engine = SpeechEngineSelection::Native {
-            model_id: "same_id".into(),
-            manifest_sha256: "b".repeat(64),
-        };
-        settings.asr_engine = SpeechEngineSelection::Native {
-            model_id: "same_id".into(),
-            manifest_sha256: "b".repeat(64),
-        };
+        settings.tts_model = Some(crate::settings::SpeechModelReference::rust(
+            "same_id",
+            "b".repeat(64),
+        ));
+        settings.asr_model = Some(crate::settings::SpeechModelReference::rust(
+            "same_id",
+            "b".repeat(64),
+        ));
         let inventory = SpeechInventory {
-            tts: vec![entry("same_id", &["rev1"])],
-            asr: vec![entry("same_id", &["rev1"])],
+            tts: vec![entry("same_id", &[])],
+            asr: vec![entry("same_id", &[])],
             errors: vec![],
         };
         assert!(
