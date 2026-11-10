@@ -1,0 +1,33 @@
+name: Import exact Agent C signed remote native release index
+on:
+  push:
+    branches: [bridge/agent-c-index-verified-20261110]
+    paths: [.github/workflows/bridge-agent-c-verified-native-index-20261110.yml]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/agent-c-index-verified-20261110
+          fetch-depth: 0
+      - name: Verify exact original bundle and non-force publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .github/bridge/agent-c-verified-index.part0{0,1,2,3,4,5,6,7,8} | base64 -d >/tmp/agent-c-remote-index.bundle
+          test "$(sha256sum /tmp/agent-c-remote-index.bundle | cut -d' ' -f1)" = "923730e72f355d565fb6fd074feccbbe700b55c62c04f55f4d42bfb1e44110ea"
+          git fetch origin refs/heads/codex/ai-native-signed-release-catalog-20261110
+          test "$(git rev-parse FETCH_HEAD)" = "fa6b0ba1c72b26ce79e5f39be65936fec6d78bfb"
+          git fetch origin refs/heads/codex/ai-native-remote-index-20261110:refs/remotes/origin/candidate
+          test "$(git rev-parse refs/remotes/origin/candidate)" = "fa6b0ba1c72b26ce79e5f39be65936fec6d78bfb"
+          git bundle verify /tmp/agent-c-remote-index.bundle
+          git fetch /tmp/agent-c-remote-index.bundle refs/heads/codex/ai-native-remote-index-20261110
+          test "$(git rev-parse FETCH_HEAD)" = "1939039e0a0d673cb3bfb7abd89b27b5f8719b47"
+          git checkout --detach "1939039e0a0d673cb3bfb7abd89b27b5f8719b47"
+          test "$(git rev-parse HEAD^{tree})" = "31f73dcceab89eb49ab9a53d944caecae2d1cc12"
+          test "$(git rev-list --parents -n1 HEAD)" = "1939039e0a0d673cb3bfb7abd89b27b5f8719b47 fa6b0ba1c72b26ce79e5f39be65936fec6d78bfb"
+          git diff --check "fa6b0ba1c72b26ce79e5f39be65936fec6d78bfb" HEAD
+          git push origin HEAD:refs/heads/codex/ai-native-remote-index-20261110
