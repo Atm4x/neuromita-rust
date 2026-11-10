@@ -54,6 +54,10 @@ component StatusCard inherits Rectangle {
 component PlayButton inherits Rectangle {
     in property <bool> game-running;
     in property <bool> game-running-external;
+    in property <bool> launcher-busy;
+    in property <string> action-text: root.launcher-busy
+        ? (root.game-running ? I18n.i18n("launcher.actions.stopping", "Останавливается…") : I18n.i18n("launcher.actions.starting", "Запускается…"))
+        : (root.game-running-external ? I18n.i18n("launcher.game.external-running", "Игра запущена отдельно") : root.game-running ? I18n.i18n("launcher.actions.stop", "Остановить") : I18n.i18n("launcher.actions.play", "Играть"));
     callback play();
     callback menu-action(LauncherMenuAction);
     height: 62px;
@@ -63,8 +67,8 @@ component PlayButton inherits Rectangle {
         ActionSurface {
             border-radius: 0px; horizontal-stretch: 1;
             border-top-left-radius: 16px; border-bottom-left-radius: 16px;
-            label: root.game-running-external ? I18n.i18n("launcher.game.external-running", "Игра запущена отдельно") : root.game-running ? I18n.i18n("launcher.actions.stop", "Остановить") : I18n.i18n("launcher.actions.play", "Играть");
-            enabled: !root.game-running-external;
+            label: root.action-text;
+            enabled: !root.game-running-external && !root.launcher-busy;
             background: self.pressed ? Theme.accent-pressed : self.hovered ? Theme.accent-hover : @linear-gradient(90deg, Theme.accent, #c0476f);
             border-width: 1px; border-color: #c04c806b;
             HorizontalLayout {
@@ -74,7 +78,7 @@ component PlayButton inherits Rectangle {
                     if root.game-running: Label { text: "■"; font-size: 15px; color: white; }
                     if !root.game-running: Icon { source: Icons.play; width: 13px; height: 16px; colorize: white; }
                 }
-                Label { text: root.game-running-external ? I18n.i18n("launcher.game.external-running", "Игра запущена отдельно") : root.game-running ? I18n.i18n("launcher.actions.stop", "Остановить") : I18n.i18n("launcher.actions.play", "Играть"); font-size: Theme.primary-size; font-weight: 800; color: white; horizontal-stretch: 0; }
+                Label { text: root.action-text; font-size: Theme.primary-size; font-weight: 800; color: white; horizontal-stretch: 0; }
             }
             activated => { root.play(); }
         }
@@ -139,6 +143,7 @@ export component HomePage inherits Rectangle {
     in property <bool> client-selected;
     in property <bool> game-running;
     in property <bool> game-running-external;
+    in property <bool> launcher-busy;
     callback toggle-backend();
     callback toggle-client();
     callback play();
@@ -167,7 +172,7 @@ export component HomePage inherits Rectangle {
                 StatusCard { model: root.backend; icon: Icons.rust; icon-color: Theme.rust; icon-size: 34px; checked: root.backend-selected; toggled => { root.toggle-backend(); } }
                 StatusCard { model: root.client; icon: Icons.unity; icon-color: #f0f0f0; icon-size: 34px; checked: root.client-selected; toggled => { root.toggle-client(); } }
             }
-            PlayButton { game-running: root.game-running; game-running-external: root.game-running-external; play => { root.play(); } menu-action(action) => { root.menu-action(action); } }
+            PlayButton { game-running: root.game-running; game-running-external: root.game-running-external; launcher-busy: root.launcher-busy; play => { root.play(); } menu-action(action) => { root.menu-action(action); } }
         }
         VerticalLayout {
             min-width: 0px; preferred-width: 0px; horizontal-stretch: 2;

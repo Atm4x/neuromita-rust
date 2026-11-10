@@ -92,6 +92,7 @@ export component AppWindow inherits Window {
     in property <bool> client-selected;
     in property <bool> game-running;
     in property <bool> game-running-external;
+    in property <bool> launcher-busy;
     in property <bool> launcher-inspected;
     in property <bool> unity-installed;
     in property <string> notice;
@@ -157,7 +158,7 @@ export component AppWindow inherits Window {
                 backend: { title: I18n.i18n("launcher.core.title", "Ядро Rust"), value: root.core-connected ? I18n.i18n("launcher.core.running", "Работает") : root.core-connecting ? I18n.i18n("launcher.core.starting", "Запускается…") : I18n.i18n("launcher.core.stopped", "Не запущен"), update: "" };
                 client: { title: root.client.title, value: !root.launcher-inspected ? I18n.i18n("launcher.install.checking", "Проверяется…") : root.unity-installed ? I18n.i18n("launcher.install.detected", "Установка обнаружена") : I18n.i18n("launcher.install.missing", "Не установлен"), update: "" };
                 releases: root.releases;
-                backend-selected: root.backend-selected; client-selected: root.client-selected; game-running: root.game-running; game-running-external: root.game-running-external;
+                backend-selected: root.backend-selected; client-selected: root.client-selected; game-running: root.game-running; game-running-external: root.game-running-external; launcher-busy: root.launcher-busy;
                 toggle-backend => { root.toggle-backend(); }
                 toggle-client => { root.toggle-client(); }
                 play => { root.play(); }

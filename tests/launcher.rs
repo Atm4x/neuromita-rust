@@ -650,3 +650,6 @@ fn interactive_cli_persists_selection_and_does_not_auto_start() {
         .unwrap();
     assert!(reopened.status.success(), "{reopened:?}");
 }
+
+#[cfg(windows)]
+mod launcher_windows_cases;

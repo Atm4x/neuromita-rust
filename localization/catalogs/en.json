@@ -47,6 +47,14 @@
     "source": "Остановить",
     "translation": "Stop"
   },
+  "launcher.actions.starting": {
+    "source": "Запускается…",
+    "translation": "Starting…"
+  },
+  "launcher.actions.stopping": {
+    "source": "Останавливается…",
+    "translation": "Stopping…"
+  },
   "launcher.game.external-running": {
     "source": "Игра запущена отдельно",
     "translation": "Game running separately"
