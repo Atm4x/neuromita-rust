@@ -892,3 +892,301 @@ fn concurrent_fork_writers_cannot_overwrite_each_others_output() {
             .starts_with(".neuromita-document-fork-")
     }));
 }
+
+#[test]
+fn versioned_remove_keeps_original_index_and_produces_separate_verified_corpus() {
+    let f = Fixture::new();
+    fs::remove_file(f.documents.join("ignored.bin")).unwrap();
+    f.build();
+    let before = fs::read(f.documents.join("notes.md")).unwrap();
+    let original = document_index::inspect_source(&f.documents, CharacterId::Kind).unwrap();
+    let digest = original
+        .documents
+        .iter()
+        .find(|d| d.path == "notes.md")
+        .unwrap()
+        .source_sha256
+        .clone();
+    let output = f.root.join("version-without-notes");
+    let result = f.call(&[
+        "fork-remove",
+        "--root",
+        f.documents.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--name",
+        "notes.md",
+        "--expected-sha256",
+        &digest,
+        "--output",
+        output.to_str().unwrap(),
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let receipt: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(receipt["removed_name"], "notes.md");
+    assert_eq!(receipt["previous_sha256"], digest);
+    assert_eq!(receipt["remaining_documents"], 1);
+    assert_eq!(receipt["requires_reindex"], true);
+    assert!(!output.join("notes.md").exists());
+    assert_eq!(
+        fs::read(output.join("details.txt")).unwrap(),
+        fs::read(f.documents.join("details.txt")).unwrap()
+    );
+    assert_eq!(fs::read(f.documents.join("notes.md")).unwrap(), before);
+    assert!(f.run("verify", &[]).status.success());
+    assert!(f.query("Moscow").status.success());
+    let index = f.root.join("removed-index.json");
+    let built = f.call(&[
+        "build",
+        "--root",
+        output.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--index",
+        index.to_str().unwrap(),
+    ]);
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let q = f.call(&[
+        "query",
+        "--root",
+        output.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--index",
+        index.to_str().unwrap(),
+        "--text",
+        "Moscow",
+    ]);
+    assert!(q.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&q.stdout).unwrap()["status"],
+        "no_matches"
+    );
+    assert!(
+        !f.call(&[
+            "verify",
+            "--root",
+            output.to_str().unwrap(),
+            "--character",
+            "Kind",
+            "--index",
+            f.index.to_str().unwrap()
+        ])
+        .status
+        .success()
+    );
+}
+
+#[test]
+fn versioned_remove_rejects_wrong_sha_unknown_and_existing_output() {
+    let f = Fixture::new();
+    fs::remove_file(f.documents.join("ignored.bin")).unwrap();
+    let snapshot = document_index::inspect_source(&f.documents, CharacterId::Kind).unwrap();
+    let digest = snapshot
+        .documents
+        .iter()
+        .find(|d| d.path == "notes.md")
+        .unwrap()
+        .source_sha256
+        .clone();
+    let old = fs::read(f.documents.join("notes.md")).unwrap();
+    let output = f.root.join("removed-version");
+    let call = |name: &str, sha: &str| {
+        f.call(&[
+            "fork-remove",
+            "--root",
+            f.documents.to_str().unwrap(),
+            "--character",
+            "Kind",
+            "--name",
+            name,
+            "--expected-sha256",
+            sha,
+            "--output",
+            output.to_str().unwrap(),
+        ])
+    };
+    assert!(!call("notes.md", &"0".repeat(64)).status.success());
+    assert!(!call("missing.md", &digest).status.success());
+    assert!(!call("../notes.md", &digest).status.success());
+    assert!(!output.exists());
+    assert!(call("notes.md", &digest).status.success());
+    assert!(!call("notes.md", &digest).status.success());
+    assert_eq!(fs::read(f.documents.join("notes.md")).unwrap(), old);
+    assert_eq!(
+        fs::read_to_string(output.join("details.txt")).unwrap(),
+        "The garden has seven sakura trees."
+    );
+}
+
+#[test]
+fn versioned_remove_rejects_unowned_entries_and_symlink_source() {
+    let f = Fixture::new();
+    let snapshot = document_index::inspect_source(&f.documents, CharacterId::Kind).unwrap();
+    let digest = snapshot
+        .documents
+        .iter()
+        .find(|d| d.path == "notes.md")
+        .unwrap()
+        .source_sha256
+        .clone();
+    let out = f.root.join("removed-version");
+    let call = || {
+        f.call(&[
+            "fork-remove",
+            "--root",
+            f.documents.to_str().unwrap(),
+            "--character",
+            "Kind",
+            "--name",
+            "notes.md",
+            "--expected-sha256",
+            &digest,
+            "--output",
+            out.to_str().unwrap(),
+        ])
+    };
+    assert!(!call().status.success());
+    fs::remove_file(f.documents.join("ignored.bin")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        fs::remove_file(f.documents.join("details.txt")).unwrap();
+        let outside = f.root.join("outside.txt");
+        fs::write(&outside, "foreign source").unwrap();
+        symlink(&outside, f.documents.join("details.txt")).unwrap();
+        assert!(!call().status.success());
+    }
+    assert!(!out.exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn two_concurrent_removers_preserve_the_unique_published_winner() {
+    let f = Fixture::new();
+    fs::remove_file(f.documents.join("ignored.bin")).unwrap();
+    let snapshot = document_index::inspect_source(&f.documents, CharacterId::Kind).unwrap();
+    let digest = snapshot
+        .documents
+        .iter()
+        .find(|d| d.path == "notes.md")
+        .unwrap()
+        .source_sha256
+        .clone();
+    let root = f.documents.to_string_lossy().to_string();
+    let output = f.root.join("removed-v2").to_string_lossy().to_string();
+    let handles = (0..2)
+        .map(|_| {
+            let (root, output, digest) = (root.clone(), output.clone(), digest.clone());
+            std::thread::spawn(move || {
+                Command::new(env!("CARGO_BIN_EXE_neuromita"))
+                    .args([
+                        "documents",
+                        "fork-remove",
+                        "--root",
+                        &root,
+                        "--character",
+                        "Kind",
+                        "--name",
+                        "notes.md",
+                        "--expected-sha256",
+                        &digest,
+                        "--output",
+                        &output,
+                    ])
+                    .output()
+                    .unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+    let results = handles
+        .into_iter()
+        .map(|h| h.join().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(results.iter().filter(|r| r.status.success()).count(), 1);
+    assert!(!f.root.join("removed-v2/notes.md").exists());
+    assert_eq!(
+        fs::read(f.root.join("removed-v2/details.txt")).unwrap(),
+        fs::read(f.documents.join("details.txt")).unwrap()
+    );
+    assert!(fs::read_dir(&f.root).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".neuromita-document-fork-")
+    }));
+}
+
+#[test]
+fn versioned_remove_only_document_yields_empty_verified_corpus_without_fallback() {
+    let f = Fixture::new();
+    fs::remove_file(f.documents.join("ignored.bin")).unwrap();
+    fs::remove_file(f.documents.join("details.txt")).unwrap();
+    f.build();
+    let source = document_index::inspect_source(&f.documents, CharacterId::Kind).unwrap();
+    let digest = source.documents[0].source_sha256.clone();
+    let output = f.root.join("empty-version");
+    let removed = f.call(&[
+        "fork-remove",
+        "--root",
+        f.documents.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--name",
+        "notes.md",
+        "--expected-sha256",
+        &digest,
+        "--output",
+        output.to_str().unwrap(),
+    ]);
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&removed.stdout).unwrap()["remaining_documents"],
+        0
+    );
+    assert_eq!(fs::read_dir(&output).unwrap().count(), 0);
+    let index = f.root.join("empty-version-index.json");
+    assert!(
+        f.call(&[
+            "build",
+            "--root",
+            output.to_str().unwrap(),
+            "--character",
+            "Kind",
+            "--index",
+            index.to_str().unwrap()
+        ])
+        .status
+        .success()
+    );
+    let result = f.call(&[
+        "query",
+        "--root",
+        output.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--index",
+        index.to_str().unwrap(),
+        "--text",
+        "sakura",
+    ]);
+    assert!(result.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&result.stdout).unwrap()["status"],
+        "empty_corpus"
+    );
+    assert!(f.run("verify", &[]).status.success());
+}

@@ -445,8 +445,8 @@ fn write_private_document(path: &Path, bytes: &[u8]) -> Result<(), DocumentError
     Ok(())
 }
 
-/// A versioned replacement changes one new root only. The old source and its
-/// selected index remain valid until an operator explicitly switches settings.
+/// A versioned corpus mutation only publishes a fresh directory. Neither mutation
+/// removes or overwrites a byte from the original corpus.
 pub fn fork_replacing_document(
     root: &Path,
     character: CharacterId,
@@ -463,18 +463,51 @@ pub fn fork_replacing_document(
         replacement,
         output_root,
         || Ok(()),
-        |parent| {
-            #[cfg(unix)]
-            {
-                File::open(parent)?.sync_all()
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = parent;
-                Ok(())
-            }
-        },
+        sync_corpus_parent,
     )
+}
+
+/// The removed document remains available in the original, unchanged corpus.
+/// The new corpus is a candidate until an operator explicitly reindexes and
+/// activates it via the existing settings revision CAS.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ForkedCorpusRemoval {
+    pub character: CharacterId,
+    pub removed_name: String,
+    pub previous_sha256: String,
+    pub output_root: String,
+    pub remaining_documents: usize,
+    pub requires_reindex: bool,
+}
+
+pub fn fork_removing_document(
+    root: &Path,
+    character: CharacterId,
+    name: &str,
+    expected_sha256: &str,
+    output_root: &Path,
+) -> Result<ForkedCorpusRemoval, DocumentError> {
+    fork_removing_with_hooks(
+        root,
+        character,
+        name,
+        expected_sha256,
+        output_root,
+        || Ok(()),
+        sync_corpus_parent,
+    )
+}
+
+fn sync_corpus_parent(parent: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        File::open(parent)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = parent;
+        Ok(())
+    }
 }
 
 fn fork_replacing_with_hooks(
@@ -487,6 +520,73 @@ fn fork_replacing_with_hooks(
     after_staging: impl FnOnce() -> Result<(), DocumentError>,
     sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
 ) -> Result<ForkedCorpus, DocumentError> {
+    let result = fork_changing_with_hooks(
+        root,
+        character,
+        name,
+        expected_sha256,
+        Some(replacement),
+        output_root,
+        after_staging,
+        sync_parent,
+    )?;
+    Ok(ForkedCorpus {
+        character,
+        replaced_name: name.to_owned(),
+        previous_sha256: expected_sha256.to_owned(),
+        replacement_sha256: result
+            .replacement_sha256
+            .ok_or(DocumentError::InvalidText)?,
+        output_root: result.output_root,
+        requires_reindex: true,
+    })
+}
+
+fn fork_removing_with_hooks(
+    root: &Path,
+    character: CharacterId,
+    name: &str,
+    expected_sha256: &str,
+    output_root: &Path,
+    after_staging: impl FnOnce() -> Result<(), DocumentError>,
+    sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<ForkedCorpusRemoval, DocumentError> {
+    let result = fork_changing_with_hooks(
+        root,
+        character,
+        name,
+        expected_sha256,
+        None,
+        output_root,
+        after_staging,
+        sync_parent,
+    )?;
+    Ok(ForkedCorpusRemoval {
+        character,
+        removed_name: name.to_owned(),
+        previous_sha256: expected_sha256.to_owned(),
+        output_root: result.output_root,
+        remaining_documents: result.document_count,
+        requires_reindex: true,
+    })
+}
+
+struct ForkOutcome {
+    output_root: String,
+    replacement_sha256: Option<String>,
+    document_count: usize,
+}
+
+fn fork_changing_with_hooks(
+    root: &Path,
+    character: CharacterId,
+    name: &str,
+    expected_sha256: &str,
+    replacement: Option<&Path>,
+    output_root: &Path,
+    after_staging: impl FnOnce() -> Result<(), DocumentError>,
+    sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<ForkOutcome, DocumentError> {
     validate_root(root)?;
     if name.is_empty()
         || name.starts_with('.')
@@ -504,15 +604,8 @@ fn fork_replacing_with_hooks(
             "invalid document name or expected digest".into(),
         ));
     }
-    if !replacement.is_absolute()
-        || fs::canonicalize(replacement)? != replacement
-        || replacement.starts_with(root)
-        || !output_root.is_absolute()
-        || output_root.starts_with(root)
-    {
-        return Err(DocumentError::UnsafePath(
-            "invalid replacement or output location".into(),
-        ));
+    if !output_root.is_absolute() || output_root.starts_with(root) {
+        return Err(DocumentError::UnsafePath("invalid output location".into()));
     }
     let parent = output_root
         .parent()
@@ -528,7 +621,6 @@ fn fork_replacing_with_hooks(
         .ok_or_else(|| DocumentError::UnsafePath("output must be UTF-8".into()))?
         .to_owned();
     let original = inspect_source(root, character)?;
-    // Never silently discard unrelated application-owned files during a fork.
     let entries = fs::read_dir(root)?.collect::<Result<Vec<_>, _>>()?;
     if entries.len() != original.documents.len() {
         return Err(DocumentError::UnsafePath(
@@ -545,11 +637,20 @@ fn fork_replacing_with_hooks(
     if entry.source_sha256 != expected_sha256 {
         return Err(DocumentError::StaleIndex);
     }
-    let bytes = read_regular(replacement, MAX_SINGLE_BYTES)?;
-    if chunks(std::str::from_utf8(&bytes).map_err(|_| DocumentError::InvalidText)?)?.is_empty() {
-        return Err(DocumentError::InvalidText);
-    }
-    let replacement_digest = sha256(&bytes);
+    let replacement_bytes = replacement
+        .map(|path| {
+            if !path.is_absolute() || fs::canonicalize(path)? != path || path.starts_with(root) {
+                return Err(DocumentError::UnsafePath("invalid replacement path".into()));
+            }
+            let bytes = read_regular(path, MAX_SINGLE_BYTES)?;
+            let text = std::str::from_utf8(&bytes).map_err(|_| DocumentError::InvalidText)?;
+            if chunks(text)?.is_empty() {
+                return Err(DocumentError::InvalidText);
+            }
+            Ok(bytes)
+        })
+        .transpose()?;
+    let replacement_sha256 = replacement_bytes.as_ref().map(|bytes| sha256(bytes));
     let stage = parent.join(format!(".neuromita-document-fork-{}", uuid::Uuid::new_v4()));
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
@@ -559,10 +660,13 @@ fn fork_replacing_with_hooks(
     }
     builder.create(&stage)?;
     let mut published = false;
-    let result = (|| -> Result<(), DocumentError> {
+    let publication = (|| -> Result<usize, DocumentError> {
         for document in &original.documents {
             let data = if document.path == name {
-                bytes.clone()
+                match &replacement_bytes {
+                    Some(bytes) => bytes.clone(),
+                    None => continue,
+                }
             } else {
                 let data = read_regular(&root.join(&document.path), MAX_SINGLE_BYTES)?;
                 if sha256(&data) != document.source_sha256 {
@@ -573,27 +677,39 @@ fn fork_replacing_with_hooks(
             write_private_document(&stage.join(&document.path), &data)?;
         }
         let next = inspect_source(&stage, character)?;
-        if next.documents.len() != original.documents.len()
+        let expected_count = original.documents.len() - usize::from(replacement.is_none());
+        if next.documents.len() != expected_count
             || next
                 .documents
                 .iter()
-                .zip(&original.documents)
+                .zip(
+                    original
+                        .documents
+                        .iter()
+                        .filter(|doc| replacement.is_some() || doc.path != name),
+                )
                 .any(|(new, old)| {
                     if new.path != old.path {
                         return true;
                     }
                     if new.path == name {
-                        new.source_sha256 != replacement_digest
+                        Some(new.source_sha256.as_str()) != replacement_sha256.as_deref()
                     } else {
                         new != old
                     }
                 })
         {
-            return Err(DocumentError::Limit);
+            return Err(DocumentError::StaleIndex);
         }
         after_staging()?;
         if inspect_source(root, character)? != original
-            || read_regular(replacement, MAX_SINGLE_BYTES)? != bytes
+            || replacement
+                .zip(replacement_bytes.as_ref())
+                .map(|(path, bytes)| {
+                    read_regular(path, MAX_SINGLE_BYTES).map(|current| current != *bytes)
+                })
+                .transpose()?
+                .unwrap_or(false)
             || inspect_source(&stage, character)?.documents != next.documents
         {
             return Err(DocumentError::StaleIndex);
@@ -605,19 +721,16 @@ fn fork_replacing_with_hooks(
         sync_parent(parent).map_err(|error| {
             DocumentError::PublicationUncertain(format!("{}: {error}", output_root.display()))
         })?;
-        Ok(())
+        Ok(next.documents.len())
     })();
     if !published {
         let _ = fs::remove_dir_all(&stage);
     }
-    result?;
-    Ok(ForkedCorpus {
-        character,
-        replaced_name: name.to_owned(),
-        previous_sha256: expected_sha256.into(),
-        replacement_sha256: replacement_digest,
+    let document_count = publication?;
+    Ok(ForkOutcome {
         output_root: output_root_string,
-        requires_reindex: true,
+        replacement_sha256,
+        document_count,
     })
 }
 
@@ -833,6 +946,75 @@ mod fork_tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.temp);
         }
+    }
+
+    #[test]
+    fn removal_rejects_changed_source_before_publishing_and_cleans_staging() {
+        let f = Fixture::new();
+        let result = fork_removing_with_hooks(
+            &f.root,
+            CharacterId::Kind,
+            "notes.md",
+            &f.expected,
+            &f.target,
+            || {
+                fs::write(f.root.join("notes.md"), "Owner updated file")?;
+                Ok(())
+            },
+            |parent| File::open(parent)?.sync_all(),
+        );
+        assert!(matches!(result, Err(DocumentError::StaleIndex)));
+        assert!(!f.target.exists());
+        assert_eq!(
+            fs::read_to_string(f.root.join("notes.md")).unwrap(),
+            "Owner updated file"
+        );
+        f.assert_no_staging();
+    }
+
+    #[test]
+    fn removal_does_not_overwrite_foreign_destination() {
+        let f = Fixture::new();
+        let result = fork_removing_with_hooks(
+            &f.root,
+            CharacterId::Kind,
+            "notes.md",
+            &f.expected,
+            &f.target,
+            || {
+                fs::create_dir(&f.target)?;
+                fs::write(f.target.join("foreign.md"), "foreign")?;
+                Ok(())
+            },
+            |parent| File::open(parent)?.sync_all(),
+        );
+        assert!(matches!(result, Err(DocumentError::Io(_))));
+        assert_eq!(
+            fs::read_to_string(f.target.join("foreign.md")).unwrap(),
+            "foreign"
+        );
+        f.assert_no_staging();
+    }
+
+    #[test]
+    fn removal_postpublication_sync_failure_preserves_candidate() {
+        let f = Fixture::new();
+        let result = fork_removing_with_hooks(
+            &f.root,
+            CharacterId::Kind,
+            "notes.md",
+            &f.expected,
+            &f.target,
+            || Ok(()),
+            |_| Err(io::Error::other("forced directory fsync error")),
+        );
+        assert!(matches!(
+            result,
+            Err(DocumentError::PublicationUncertain(_))
+        ));
+        assert!(!f.target.join("notes.md").exists());
+        assert!(f.root.join("notes.md").exists());
+        f.assert_no_staging();
     }
 
     #[test]
