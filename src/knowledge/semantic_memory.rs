@@ -93,14 +93,23 @@ impl EmbeddingCache {
                     return Err(EmbeddingError::StaleKnowledge);
                 }
             }
-            let purge_all = previous.is_some_and(|previous| {
-                previous.turn.selection != turn.selection
-                    || previous.turn.context_epoch != turn.context_epoch
-            });
-            self.purge_character(character, (!purge_all).then_some(&active));
-            *self.revisions.entry(character).or_default() += 1;
-            self.snapshots
-                .insert(character, AuthoritativeSnapshot { turn, active_ids });
+            let identical = previous
+                .is_some_and(|previous| previous.turn == turn && previous.active_ids == active_ids)
+                && self
+                    .entries
+                    .keys()
+                    .filter(|key| key.character == character)
+                    .all(|key| active.contains(key));
+            if !identical {
+                let purge_all = previous.is_some_and(|previous| {
+                    previous.turn.selection != turn.selection
+                        || previous.turn.context_epoch != turn.context_epoch
+                });
+                self.purge_character(character, (!purge_all).then_some(&active));
+                *self.revisions.entry(character).or_default() += 1;
+                self.snapshots
+                    .insert(character, AuthoritativeSnapshot { turn, active_ids });
+            }
         } else if self.snapshots.contains_key(&character) {
             return Err(EmbeddingError::StaleKnowledge);
         }
@@ -223,6 +232,53 @@ impl SemanticMemoryRetriever {
     ) -> Result<Self, EmbeddingError> {
         self.reranker = Some((provider, policy.validate()?));
         Ok(self)
+    }
+
+    /// Whether a previously tracked character needs a new, authoritative
+    /// Timeline projection. An untracked character holds no cached memory.
+    pub(crate) fn needs_authoritative_refresh(
+        &self,
+        character: CharacterId,
+        turn: TimelineTurn,
+    ) -> bool {
+        let cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        match cache.snapshots.get(&character) {
+            Some(snapshot) => snapshot.turn != turn,
+            None => cache.entries.keys().any(|key| key.character == character),
+        }
+    }
+
+    /// Adopt a separately captured Timeline projection without starting any
+    /// embedding request. The same revision barrier governs retrieval and
+    /// idle reconciliation, so old in-flight work cannot restore evicted data.
+    pub(crate) fn refresh_authoritative(
+        &self,
+        character: CharacterId,
+        turn: TimelineTurn,
+        memories: &[MemoryRecord],
+    ) -> Result<(), EmbeddingError> {
+        let space = self.provider.space().clone();
+        let keys = memories
+            .iter()
+            .filter(|record| {
+                matches!(record.kind, MemoryKind::Fact | MemoryKind::RagOnly)
+                    && record.state == MemoryState::Active
+            })
+            .map(|record| CacheKey {
+                character,
+                space: space.clone(),
+                id: record.id,
+                content: record.content.clone(),
+            })
+            .collect::<Vec<_>>();
+        self.cache
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .track(character, Some(turn), &keys)?;
+        Ok(())
     }
 
     pub fn clear_cache(&self) {
@@ -633,3 +689,6 @@ mod b84_tests {
 
 #[cfg(test)]
 mod b85_tests;
+
+#[cfg(test)]
+mod b86_tests;

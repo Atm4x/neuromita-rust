@@ -64,6 +64,35 @@ impl KnowledgeRetrieval {
         })
     }
 
+    /// Reconcile a character's derived cache with a fresh Timeline projection.
+    /// Hints may trigger this read, but are never treated as source data.
+    pub(crate) fn refresh_authoritative(
+        &self,
+        character: CharacterId,
+        turn: crate::timeline::selection::TimelineTurn,
+        memories: &[MemoryRecord],
+    ) -> Result<(), EmbeddingError> {
+        match &self.mode {
+            KnowledgeMode::Lexical => Ok(()),
+            KnowledgeMode::Semantic { retriever, .. } => {
+                retriever.refresh_authoritative(character, turn, memories)
+            }
+        }
+    }
+
+    pub(crate) fn needs_authoritative_refresh(
+        &self,
+        character: CharacterId,
+        turn: crate::timeline::selection::TimelineTurn,
+    ) -> bool {
+        match &self.mode {
+            KnowledgeMode::Lexical => false,
+            KnowledgeMode::Semantic { retriever, .. } => {
+                retriever.needs_authoritative_refresh(character, turn)
+            }
+        }
+    }
+
     /// The existing fact-only selection contract remains available to callers.
     pub async fn select(
         &self,

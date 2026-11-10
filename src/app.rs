@@ -317,6 +317,65 @@ pub struct ApplicationLifecycle {
     completion: Option<oneshot::Receiver<Result<(), ApplicationError>>>,
 }
 
+/// The top-level owner samples Timeline after local notifications or an
+/// occasional idle poll. Notifications only schedule a read; a foreign SQLite
+/// writer never has to deliver them. No provider request is made here.
+fn reconcile_semantic_knowledge(
+    timeline: &Mutex<SessionTimeline>,
+    knowledge: &KnowledgeRetrieval,
+    character: CharacterId,
+) -> Result<(), String> {
+    let timeline = timeline.lock().map_err(|error| error.to_string())?;
+    let turn = timeline
+        .capture_turn(character, None, timeline.anchor())
+        .map_err(|error| error.to_string())?;
+    if !knowledge.needs_authoritative_refresh(character, turn) {
+        return Ok(());
+    }
+    let (_selection, anchor, world) = timeline
+        .selected_world_snapshot()
+        .map_err(|error| error.to_string())?;
+    if anchor.through != turn.context_head {
+        return Err("Timeline moved while reconciling knowledge".into());
+    }
+    let memories = crate::character::projection::character_memories_at(&world, character)
+        .map_err(|error| error.to_string())?
+        .all();
+    let after = timeline
+        .capture_turn(character, None, timeline.anchor())
+        .map_err(|error| error.to_string())?;
+    if turn != after {
+        return Err("Timeline advanced during knowledge reconciliation".into());
+    }
+    knowledge
+        .refresh_authoritative(character, turn, &memories)
+        .map_err(|error| error.to_string())
+}
+
+async fn run_semantic_knowledge_reconciler(
+    timeline: Arc<Mutex<SessionTimeline>>,
+    knowledge: Arc<KnowledgeRetrieval>,
+    character: CharacterId,
+    mut memories: tokio::sync::watch::Receiver<u64>,
+    mut context: tokio::sync::watch::Receiver<u64>,
+    stop: CancellationToken,
+) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            biased;
+            _ = stop.cancelled() => break,
+            changed = memories.changed() => if changed.is_err() { break; },
+            changed = context.changed() => if changed.is_err() { break; },
+            _ = interval.tick() => {},
+        }
+        if let Err(error) = reconcile_semantic_knowledge(&timeline, &knowledge, character) {
+            tracing::warn!(%character, %error, "authoritative semantic cache refresh deferred");
+        }
+    }
+}
+
 struct TimelineRequestIngress {
     timeline: Arc<Mutex<SessionTimeline>>,
 }
@@ -802,7 +861,7 @@ impl ApplicationLifecycle {
         let (releases, release_lifecycle) = ReleasesPresenter::new(release_feed);
         let releases_task = tokio::spawn(release_lifecycle.run(presenter_stop.child_token()));
         let reminders_wake = Arc::new(tokio::sync::Notify::new());
-        let (characters, owners) = CharacterRegistry::spawn_with_reminders(
+        let (characters, mut owners) = CharacterRegistry::spawn_with_reminders(
             Arc::clone(&timeline),
             owners_stop.clone(),
             limits.character_commands.get(),
@@ -815,6 +874,23 @@ impl ApplicationLifecycle {
         let generator = Arc::new(generator);
         let knowledge = Arc::new(knowledge);
         let presets = Arc::new(presets);
+        for id in CharacterId::ALL {
+            let (memory_updates, context_updates) = {
+                let timeline = timeline.lock().expect("timeline lock poisoned");
+                (
+                    timeline.observe_memory_changes(id),
+                    timeline.observe_context_epoch(id),
+                )
+            };
+            owners.push(tokio::spawn(run_semantic_knowledge_reconciler(
+                Arc::clone(&timeline),
+                Arc::clone(&knowledge),
+                id,
+                memory_updates,
+                context_updates,
+                owners_stop.clone(),
+            )));
+        }
         let games = Arc::new(games);
         for id in CharacterId::ALL {
             characters
@@ -1482,3 +1558,7 @@ impl Lifecycle for ApplicationLifecycle {
 #[cfg(test)]
 #[path = "app/regenerate_admission_tests.rs"]
 mod regenerate_admission_tests;
+
+#[cfg(test)]
+#[path = "app/regenerate_b86_tests.rs"]
+mod regenerate_b86_tests;
