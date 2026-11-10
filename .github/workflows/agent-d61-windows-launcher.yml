@@ -19,8 +19,8 @@ jobs:
       - name: Verify exact product commit and tree
         shell: bash
         run: |
-          test "$(git rev-parse HEAD)" = "6f3171d2c0374d42974ad273bc11f47929aca7df"
-          test "$(git rev-parse HEAD^{tree})" = "0d7b0a16b514a2991fea6b3b3958dde028d7e4cc"
+          test "$(git rev-parse HEAD)" = "46f9cd3ec196be32149a5528b0ed4cc439153912"
+          test "$(git rev-parse HEAD^{tree})" = "c86645f0d89bfc269f6c6908cf62970c18d76dce"
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: '1.98.1'
