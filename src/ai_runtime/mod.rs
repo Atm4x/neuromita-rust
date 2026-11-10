@@ -967,6 +967,12 @@ impl AiSupervisor {
             check_current: Some(check_current),
         })
         .await
+        .map_err(|error| match error {
+            AiRuntimeError::NotRunning
+            | AiRuntimeError::StaleGeneration
+            | AiRuntimeError::WorkerNotFailed => AiRuntimeError::ActivationSuperseded,
+            other => other,
+        })
     }
 
     /// Prepare a candidate worker for an explicit device profile. The candidate

@@ -18,6 +18,8 @@ use tokio::{
     time::timeout,
 };
 
+static CORE_TEST_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 struct ProviderCall {
     input: GenerationInput,
     reply: oneshot::Sender<String>,
@@ -114,6 +116,7 @@ fn disable() {
 
 #[tokio::test]
 async fn documents_are_explicit_character_scoped_and_fail_closed_on_stale_source() {
+    let _serial = CORE_TEST_MUTEX.lock().await;
     let folder = std::env::temp_dir().join(format!("nm-doc-gen-{}", uuid::Uuid::new_v4()));
     let root = folder.join("documents");
     std::fs::create_dir_all(&root).unwrap();
@@ -219,6 +222,7 @@ async fn documents_are_explicit_character_scoped_and_fail_closed_on_stale_source
 
 #[tokio::test]
 async fn document_selection_uses_admitted_settings_not_mutable_queue_state() {
+    let _serial = CORE_TEST_MUTEX.lock().await;
     let folder = std::env::temp_dir().join(format!("nm-doc-admit-{}", uuid::Uuid::new_v4()));
     let root = folder.join("documents");
     std::fs::create_dir_all(&root).unwrap();
@@ -270,11 +274,11 @@ fn document_settings_are_disabled_by_default_backward_compatible_and_validated()
         CharacterId::Crazy,
         DocumentGenerationSource {
             root: PathBuf::from("relative"),
-            index: PathBuf::from("/tmp/index.json"),
+            index: std::env::temp_dir().join("index.json"),
         },
     );
     assert!(value.validate().is_err());
-    value.sources.get_mut(&CharacterId::Crazy).unwrap().root = PathBuf::from("/tmp/root");
+    value.sources.get_mut(&CharacterId::Crazy).unwrap().root = std::env::temp_dir().join("root");
     assert!(value.validate().is_ok());
     value.max_results = 0;
     assert!(value.validate().is_err());
@@ -282,6 +286,7 @@ fn document_settings_are_disabled_by_default_backward_compatible_and_validated()
 
 #[tokio::test]
 async fn reindex_activation_is_explicit_revision_scoped_and_queued_requests_remain_pinned() {
+    let _serial = CORE_TEST_MUTEX.lock().await;
     use neuromita::document_revision::{DocumentRevisionApi, DocumentRevisionStatus};
     let folder = std::env::temp_dir().join(format!("nm-doc-revision-{}", uuid::Uuid::new_v4()));
     let root = folder.join("documents");

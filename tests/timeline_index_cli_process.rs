@@ -284,7 +284,7 @@ fn standalone_cli_rejects_malformed_source_and_never_creates_missing_database() 
     let fixture = Fixture::new();
     let db = fixture.db();
     db.execute(
-        "UPDATE timeline_events SET fact_json='malformed-json' WHERE sequence=1",
+        "UPDATE timeline_events SET fact_json='{}' WHERE sequence=1",
         [],
     )
     .unwrap();

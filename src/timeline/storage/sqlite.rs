@@ -1834,7 +1834,7 @@ mod tests {
         let original = encode(&facts[0]).unwrap();
         conn.write(
             "UPDATE timeline_events SET fact_json=? WHERE branch_id=? AND sequence=1",
-            &[&"not-json", &branch.0.to_string()],
+            &[&"{}", &branch.0.to_string()],
         )
         .unwrap();
         assert!(matches!(

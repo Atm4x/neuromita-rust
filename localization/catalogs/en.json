@@ -228,8 +228,8 @@
     "translation": "All settings"
   },
   "sandbox.attach": {
-    "source": "Прикрепить изображения",
-    "translation": "Attach images"
+    "source": "Добавить локальный файл в историю",
+    "translation": "Add a local file to history"
   },
   "sandbox.capture.auto": {
     "source": "Авто-прикрепление",
@@ -462,10 +462,6 @@
   "sandbox.label.voice": {
     "source": "Голос",
     "translation": "Voice"
-  },
-  "sandbox.mic": {
-    "source": "Микрофон",
-    "translation": "Microphone"
   },
   "sandbox.mic.start": {
     "source": "Начать голосовой ввод",

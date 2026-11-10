@@ -60,15 +60,26 @@ impl LiveMedia {
                     "Timeline event is not visible in the generation snapshot".into(),
                 )
             })?;
-            let parts = original
-                .fields
-                .get("content")
-                .map(crate::timeline::domain::parse_message_content)
-                .transpose()
-                .map_err(|error| {
+            let Some(content) = original.fields.get("content") else {
+                continue;
+            };
+            // Spoken response segments carry emotion metadata and are already
+            // projected as text. Only attachment-bearing events use the media codec.
+            let contains_attachment = content.as_array().is_some_and(|parts| {
+                parts.iter().any(|part| {
+                    matches!(
+                        part.get("type").and_then(Value::as_str),
+                        Some("image" | "audio" | "file")
+                    )
+                })
+            });
+            if !contains_attachment {
+                continue;
+            }
+            let parts =
+                crate::timeline::domain::parse_message_content(content).map_err(|error| {
                     GenerationError::Response(format!("invalid visible message: {error}"))
-                })?
-                .unwrap_or_default();
+                })?;
             if parts.iter().any(|part| part.asset().is_some()) {
                 let raw = parts
                     .iter()

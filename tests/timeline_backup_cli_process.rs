@@ -208,7 +208,7 @@ fn backup_cli_refuses_corrupt_canonical_data_and_does_not_publish_output() {
     fixture
         .keeper
         .execute(
-            "UPDATE timeline_events SET fact_json='broken' WHERE sequence=1",
+            "UPDATE timeline_events SET fact_json='{}' WHERE sequence=1",
             [],
         )
         .unwrap();

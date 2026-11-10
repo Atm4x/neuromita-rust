@@ -421,7 +421,7 @@ mod tests {
         let conn = Connection::open(&db.0).unwrap();
         conn.write(
             "UPDATE timeline_events SET fact_json=? WHERE branch_id=? AND sequence=1",
-            &[&"invalid-json", &branch.0.to_string()],
+            &[&"{}", &branch.0.to_string()],
         )
         .unwrap();
         assert!(SqliteTimelineRepository::inspect_derived_indexes(&db.0).is_err());
