@@ -205,7 +205,11 @@ impl NativeReleaseTrust {
         }
     }
 
-    fn load_verifier(&self) -> Result<NativePublisherVerifier, NativeTrustError> {
+    pub(super) fn approval_directory(&self) -> &Path {
+        &self.approvals_root
+    }
+
+    pub(super) fn load_verifier(&self) -> Result<NativePublisherVerifier, NativeTrustError> {
         let pin = self.policy_pin.ok_or(NativeTrustError::NotAuthorized)?;
         let bytes = read_optional(&self.policy_file, MAX_TRUST_BYTES)?
             .ok_or(NativeTrustError::NotAuthorized)?;
@@ -310,6 +314,11 @@ fn read_directory(path: &Path) -> Result<Vec<(String, PathBuf)>, NativeTrustErro
             .file_name()
             .into_string()
             .map_err(|_| NativeTrustError::Invalid("non-UTF8 approval entry"))?;
+        // The only ignored entries are transaction staging files created by
+        // the signed-index importer. They are never interpreted as approvals.
+        if name.starts_with(".incoming-") {
+            continue;
+        }
         entries.push((name, entry.path()));
         if entries.len() > MAX_APPROVED_RELEASES {
             return Err(NativeTrustError::Invalid("too many approval entries"));

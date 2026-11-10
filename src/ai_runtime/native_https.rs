@@ -91,6 +91,10 @@ pub enum NativeHttpsError {
 pub struct NativeHttpsOrigin(Url);
 
 impl NativeHttpsOrigin {
+    pub(crate) fn url(&self) -> &Url {
+        &self.0
+    }
+
     pub fn parse(raw: &str) -> Result<Self, NativeHttpsError> {
         let parsed = Url::parse(raw).map_err(|_| NativeHttpsError::Invalid("invalid URL"))?;
         if raw.len() > MAX_BASE_URL_BYTES
@@ -255,7 +259,7 @@ impl NativeHttpsPackageTransfer {
                 planned_bytes: None,
             },
         );
-        let manifest_url = artifact_url(origin, "packages", Some(model_id), "native-model.json")?;
+        let manifest_url = revision_url(origin, model_id, &manifest_sha256, "native-model.json")?;
         let manifest_path = stage.package.join("native-model.json");
         self.fetch_verified(
             manifest_url,
@@ -301,7 +305,7 @@ impl NativeHttpsPackageTransfer {
         );
         let package_files = std::iter::once(&manifest.executable).chain(manifest.assets.iter());
         for file in package_files {
-            let url = artifact_url(origin, "packages", Some(model_id), &file.path)?;
+            let url = revision_url(origin, model_id, &manifest_sha256, &file.path)?;
             let dest = create_file_parent(&stage.package, &file.path)?;
             let expected = parse_sha256(&file.sha256)?;
             self.fetch_verified(
@@ -324,9 +328,9 @@ impl NativeHttpsPackageTransfer {
                 continue;
             }
             let file = &runtime.file;
-            let url = artifact_url(origin, "runtime", None, &file.path)?;
-            let dest = create_file_parent(&stage.runtime, &file.path)?;
             let expected = parse_sha256(&file.sha256)?;
+            let url = runtime_url(origin, &expected, &file.path)?;
+            let dest = create_file_parent(&stage.runtime, &file.path)?;
             self.fetch_verified(
                 url,
                 &dest,
@@ -465,26 +469,48 @@ fn ensure_not_cancelled(token: &CancellationToken) -> Result<(), NativeHttpsErro
     }
 }
 
-fn artifact_url(
+fn revision_url(
     origin: &Url,
-    kind: &str,
-    model_id: Option<&str>,
+    model_id: &str,
+    digest: &[u8; 32],
     path: &str,
 ) -> Result<Url, NativeHttpsError> {
     let mut url = origin.clone();
-    {
-        let mut segments = url
-            .path_segments_mut()
-            .map_err(|_| NativeHttpsError::Invalid("invalid endpoint path"))?;
-        segments.pop_if_empty();
-        segments.push(kind);
-        if let Some(model) = model_id {
-            segments.push(model);
-        }
-        for segment in path.split('/') {
-            segments.push(segment);
-        }
+    let mut segments = url
+        .path_segments_mut()
+        .map_err(|_| NativeHttpsError::Invalid("revision URL"))?;
+    segments
+        .pop_if_empty()
+        .push("packages")
+        .push(model_id)
+        .push(
+            &digest
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>(),
+        );
+    for part in path.split('/') {
+        segments.push(part);
     }
+    drop(segments);
+    Ok(url)
+}
+
+fn runtime_url(origin: &Url, digest: &[u8; 32], path: &str) -> Result<Url, NativeHttpsError> {
+    let mut url = origin.clone();
+    let mut segments = url
+        .path_segments_mut()
+        .map_err(|_| NativeHttpsError::Invalid("runtime URL"))?;
+    segments.pop_if_empty().push("runtime").push(
+        &digest
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>(),
+    );
+    for part in path.split('/') {
+        segments.push(part);
+    }
+    drop(segments);
     Ok(url)
 }
 
@@ -700,21 +726,19 @@ mod tests {
             )
             .unwrap();
             let trust = NativeReleaseTrust::new(policy_path, approvals, Some(pin));
+            let release_root = format!("/release/packages/voice/{}", hex(&manifest_sha256));
             let responses = HashMap::from([
+                (format!("{release_root}/native-model.json"), manifest_bytes),
+                (format!("{release_root}/bin/worker"), executable.to_vec()),
                 (
-                    "/release/packages/voice/native-model.json".into(),
-                    manifest_bytes,
-                ),
-                (
-                    "/release/packages/voice/bin/worker".into(),
-                    executable.to_vec(),
-                ),
-                (
-                    "/release/packages/voice/weights/model.bin".into(),
+                    format!("{release_root}/weights/model.bin"),
                     weights.to_vec(),
                 ),
                 (
-                    "/release/runtime/lib/runtime.so".into(),
+                    format!(
+                        "/release/runtime/{}/lib/runtime.so",
+                        hex(&sha(runtime_file))
+                    ),
                     runtime_file.to_vec(),
                 ),
             ]);
@@ -847,10 +871,13 @@ mod tests {
         }
         let parsed = NativeHttpsOrigin::parse("https://releases.example.org/downloads/").unwrap();
         assert_eq!(
-            artifact_url(&parsed.0, "packages", Some("voice"), "weights/model.bin")
+            revision_url(&parsed.0, "voice", &[0x42; 32], "weights/model.bin")
                 .unwrap()
                 .as_str(),
-            "https://releases.example.org/downloads/packages/voice/weights/model.bin"
+            format!(
+                "https://releases.example.org/downloads/packages/voice/{}/weights/model.bin",
+                "42".repeat(32)
+            )
         );
     }
 
@@ -966,7 +993,12 @@ mod tests {
         let fixture = Fixture::new();
         let mut responses = fixture.responses.clone();
         responses.insert(
-            "/release/packages/voice/weights/model.bin".into(),
+            fixture
+                .responses
+                .keys()
+                .find(|k| k.ends_with("/weights/model.bin"))
+                .unwrap()
+                .clone(),
             b"test-model-wrights".to_vec(),
         );
         let server = LocalServer::start(responses, false).await;
@@ -1028,7 +1060,12 @@ mod tests {
         let fixture = Fixture::new();
         let mut responses = fixture.responses.clone();
         responses.insert(
-            "/release/packages/voice/native-model.json".into(),
+            fixture
+                .responses
+                .keys()
+                .find(|k| k.ends_with("/native-model.json"))
+                .unwrap()
+                .clone(),
             b"{\"schema_version\":1}".to_vec(),
         );
         let server = LocalServer::start(responses, false).await;
@@ -1045,7 +1082,12 @@ mod tests {
         let fixture = Fixture::new();
         let mut responses = fixture.responses.clone();
         responses.insert(
-            "/release/packages/voice/weights/model.bin".into(),
+            fixture
+                .responses
+                .keys()
+                .find(|k| k.ends_with("/weights/model.bin"))
+                .unwrap()
+                .clone(),
             vec![b'Z'; 200],
         );
         let server = LocalServer::start(responses, false).await;

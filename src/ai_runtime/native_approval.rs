@@ -104,6 +104,34 @@ impl NativePublisherVerifier {
         Ok(Self { keys: trusted })
     }
 
+    /// Verifies a detached publisher signature without exposing trusted key material.
+    /// This is shared with the independently domain-separated release-index contract.
+    pub(super) fn verify_detached(
+        &self,
+        publisher_id: &str,
+        message: &[u8],
+        signature_base64: &str,
+    ) -> Result<(), NativeApprovalError> {
+        if !valid_publisher_id(publisher_id) {
+            return Err(NativeApprovalError::InvalidApproval("publisher identifier"));
+        }
+        let signature = STANDARD
+            .decode(signature_base64.as_bytes())
+            .map_err(|_| NativeApprovalError::InvalidApproval("signature encoding"))?;
+        if signature.len() != 64 || STANDARD.encode(&signature) != signature_base64 {
+            return Err(NativeApprovalError::InvalidApproval(
+                "signature canonicality",
+            ));
+        }
+        let key = self
+            .keys
+            .get(publisher_id)
+            .ok_or(NativeApprovalError::UnknownPublisher)?;
+        UnparsedPublicKey::new(&ED25519, key)
+            .verify(message, &signature)
+            .map_err(|_| NativeApprovalError::InvalidSignature)
+    }
+
     /// Parses one externally issued approval. There is no default key, trust-on-
     /// first-use behavior, or acceptance of a key embedded in the document.
     pub fn verify(&self, bytes: &[u8]) -> Result<VerifiedNativeRelease, NativeApprovalError> {
@@ -158,7 +186,7 @@ pub fn signing_message(publisher_id: &str, model_id: &str, manifest_sha256: &str
     format!("neuromita.native-release.v1\n{publisher_id}\n{model_id}\n{manifest_sha256}\n")
 }
 
-fn valid_publisher_id(value: &str) -> bool {
+pub(super) fn valid_publisher_id(value: &str) -> bool {
     valid_identifier(value) && value.len() <= 64
 }
 
