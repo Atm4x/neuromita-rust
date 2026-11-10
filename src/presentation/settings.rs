@@ -4,10 +4,12 @@ use tokio::sync::watch;
 
 use crate::{
     character::CharacterId,
+    generation::ToolSettings,
     settings::{
         AppSettings, AsrPreferences, CharactersSettings, InterfaceSettings, OperationPresets,
         PresetId, PresetSelection, PresetSettings, SettingsArea, SettingsError, SettingsOwner,
-        SettingsSnapshot, SettingsTransfer, SpeechSettings, TtsPreferences, VoiceSettings, Volume,
+        SettingsSnapshot, SettingsTransfer, SpeechSettings, StructuredDisplayMode, TtsPreferences,
+        VoiceSettings, Volume,
     },
 };
 
@@ -107,6 +109,10 @@ pub struct AsrSettingsPresenter {
 
 pub struct PresetsSettingsPresenter {
     pub active: BoundProperty<PresetId>,
+}
+
+pub struct ToolsSettingsPresenter {
+    pub state: BoundProperty<ToolSettings>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -219,6 +225,7 @@ impl CharactersSettingsPresenter {
 pub struct InterfaceSettingsPresenter {
     owner: Arc<SettingsOwner>,
     pub hide_private: BoundProperty<bool>,
+    pub structured_display: BoundProperty<StructuredDisplayMode>,
 }
 
 impl InterfaceSettingsPresenter {
@@ -236,6 +243,7 @@ pub struct SettingsPresenter {
     pub tts: TtsSettingsPresenter,
     pub asr: AsrSettingsPresenter,
     pub presets: PresetsSettingsPresenter,
+    pub tools: ToolsSettingsPresenter,
     pub characters: CharactersSettingsPresenter,
 }
 impl SettingsPresenter {
@@ -253,6 +261,15 @@ impl SettingsPresenter {
                             .map(|_| ())
                     },
                 ),
+                structured_display: BoundProperty::new(
+                    Arc::clone(&owner),
+                    |settings| settings.interface.structured_display,
+                    |owner, value| {
+                        owner
+                            .edit::<InterfaceSettings>(|s| s.structured_display = value)
+                            .map(|_| ())
+                    },
+                ),
             },
             presets: PresetsSettingsPresenter {
                 active: BoundProperty::new(
@@ -261,6 +278,17 @@ impl SettingsPresenter {
                     |owner, value| {
                         owner
                             .edit::<PresetSettings>(|settings| settings.active = value)
+                            .map(|_| ())
+                    },
+                ),
+            },
+            tools: ToolsSettingsPresenter {
+                state: BoundProperty::new(
+                    Arc::clone(&owner),
+                    |settings| settings.tools.clone(),
+                    |owner, value| {
+                        owner
+                            .edit::<ToolSettings>(|settings| *settings = value)
                             .map(|_| ())
                     },
                 ),

@@ -2,6 +2,7 @@ use serde_json::{Map, Value};
 
 use crate::{
     character::CharacterContext,
+    generation::PreparedPrompt,
     identity::{CharacterId, EventId},
     interaction::TurnIntent,
     timeline::{
@@ -207,6 +208,30 @@ pub(crate) fn project_history(
 }
 
 impl LlmConversation {
+    /// Keep stable and dynamic segments separate until provider serialization.
+    /// The legacy character prompt is used only when no prompt set is assigned.
+    pub(crate) fn system_segments(
+        &self,
+        context: &CharacterContext,
+        prepared: Option<&PreparedPrompt>,
+    ) -> Vec<String> {
+        let Some(prepared) = prepared else {
+            return vec![self.system_instruction.clone()];
+        };
+        let mut segments = Vec::with_capacity(prepared.stable.len() + prepared.dynamic.len() + 2);
+        segments.push(context.description.to_string());
+        segments.extend(prepared.stable.iter().map(|s| s.to_string()));
+        segments.extend(prepared.dynamic.iter().map(|s| s.to_string()));
+        segments.push(format!(
+            "Принятых ответов: {}.",
+            context.state.accepted_replies
+        ));
+        segments
+            .into_iter()
+            .filter(|s| !s.trim().is_empty())
+            .collect()
+    }
+
     pub(crate) fn memory_query(context: &CharacterContext) -> String {
         let focus = match context.focus.intent {
             TurnIntent::Reply(id) | TurnIntent::React(id) => Some((id, context.focus.intent)),

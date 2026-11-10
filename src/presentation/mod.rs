@@ -12,8 +12,8 @@ mod settings;
 mod speech;
 
 pub use characters::{
-    CharactersPresenter, MemoryCapacityPreview, MemoryListPage, MemoryListQuery, MemoryObserver,
-    MemorySummary,
+    CharacterDebugField, CharactersPresenter, MemoryCapacityPreview, MemoryListPage,
+    MemoryListQuery, MemoryObserver, MemorySummary,
 };
 pub(crate) use chat::PresenterRunner;
 pub use chat::{ChatModel, ChatPresenter, PresenterError, RequestView};

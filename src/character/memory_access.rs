@@ -1,6 +1,6 @@
 use crate::{
     identity::CharacterId,
-    memory::{MAX_MEMORY_EDIT_CHANGES, MemoryChange, MemoryCommand, MemoryRecord},
+    memory::{MAX_MEMORY_EDIT_CHANGES, MemoryChange, MemoryCommand, MemoryRecord, MemoryRelation},
     timeline::{
         ContextAnchor, SessionTimeline, domain::TimelineError, selection::TimelineSelection,
     },
@@ -13,6 +13,7 @@ pub struct CharacterMemorySnapshot {
     pub(crate) character: CharacterId,
     pub(crate) anchor: ContextAnchor,
     pub(crate) records: Vec<MemoryRecord>,
+    pub(crate) relations: Vec<MemoryRelation>,
     pub(crate) selection: TimelineSelection,
 }
 
@@ -29,6 +30,10 @@ impl CharacterMemorySnapshot {
         &self.records
     }
 
+    pub fn relations(&self) -> &[MemoryRelation] {
+        &self.relations
+    }
+
     /// Opaque branch selection plus character-memory identity, without
     /// treating unrelated Timeline appends as memory-edit conflicts.
     pub(crate) fn matches_version(&self, other: &Self) -> bool {
@@ -36,6 +41,7 @@ impl CharacterMemorySnapshot {
             && self.selection == other.selection
             && self.anchor.branch_id == other.anchor.branch_id
             && self.records == other.records
+            && self.relations == other.relations
     }
 }
 
@@ -52,11 +58,14 @@ pub(crate) fn read_memory_snapshot(
     character: CharacterId,
 ) -> Result<CharacterMemorySnapshot, TimelineError> {
     let (selection, anchor, world) = timeline.selected_world_snapshot()?;
-    let records = super::projection::character_memories_at(&world, character)?.all();
+    let projection = super::projection::character_memories_at(&world, character)?;
+    let records = projection.all();
+    let relations = projection.relations();
     Ok(CharacterMemorySnapshot {
         character,
         anchor,
         records,
+        relations,
         selection,
     })
 }
@@ -88,7 +97,7 @@ pub(crate) fn edit_memory_snapshot(
         return Err(TimelineError::ConcurrentWrite);
     }
     let memories = super::projection::character_memories_at(&world, character)?;
-    if memories.all() != expected.records {
+    if memories.all() != expected.records || memories.relations() != expected.relations {
         return Err(TimelineError::ConcurrentWrite);
     }
     let changes = memories.resolve(commands).map_err(TimelineError::Invalid)?;

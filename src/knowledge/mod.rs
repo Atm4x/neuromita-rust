@@ -10,9 +10,9 @@ pub mod semantic_memory;
 
 use std::sync::Arc;
 
-use crate::{identity::CharacterId, timeline::domain::MemoryRecord};
+use crate::{identity::CharacterId, memory::MemoryRelation, timeline::domain::MemoryRecord};
 use embedding::EmbeddingError;
-use memory_context::{render_memory_context, render_memory_islands};
+use memory_context::{render_memory_context, render_memory_islands, render_relation_context};
 use retrieval_fusion::{FusionConfig, FusionMode, fuse};
 use semantic_memory::{SemanticMemoryRetriever, SemanticRetrievalFilter};
 
@@ -73,6 +73,28 @@ impl KnowledgeRetrieval {
     ) -> Result<Option<String>, EmbeddingError> {
         self.select_with_islands(character, memories, &[], query)
             .await
+    }
+
+    pub async fn select_with_relations(
+        &self,
+        character: CharacterId,
+        memories: &[MemoryRecord],
+        islands: &[MemoryRecord],
+        relations: &[MemoryRelation],
+        query: &str,
+    ) -> Result<Option<String>, EmbeddingError> {
+        let selected = self
+            .select_with_islands(character, memories, islands, query)
+            .await?;
+        let links = match &self.mode {
+            KnowledgeMode::Semantic { .. } => render_relation_context(relations, query),
+            KnowledgeMode::Lexical => None,
+        };
+        Ok(match (selected, links) {
+            (Some(text), Some(links)) => Some(format!("{text}\n{links}")),
+            (None, Some(links)) => Some(links),
+            (text, None) => text,
+        })
     }
 
     /// Islands are rendered separately from ranked facts and never embedded.
@@ -153,6 +175,7 @@ mod tests {
 
     fn fact() -> MemoryRecord {
         MemoryRecord {
+            entities: Vec::new(),
             id: MemoryId(Uuid::from_u128(14)),
             priority: MemoryPriority::Normal,
             content: "ромашковый чай".into(),

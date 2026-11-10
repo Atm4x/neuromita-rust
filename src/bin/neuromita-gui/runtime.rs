@@ -29,6 +29,15 @@ use neuromita::{
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolOption {
+    Enabled,
+    Calculator,
+    MemorySearch,
+    WebSearch,
+    WebReader,
+}
+
 pub enum Command {
     RefreshReleases,
     MemorySelect(CharacterId),
@@ -48,6 +57,7 @@ pub enum Command {
     AssignPreset(CharacterId, PresetSlot, PresetSelection),
     AssignAllPresets(CharacterId, PresetSelection),
     SelectPromptSet(CharacterId, String),
+    DebugSelect(CharacterId),
     RefreshPromptCatalog,
     OpenPromptFolder(CharacterId),
     VoiceInLauncher(bool),
@@ -61,6 +71,9 @@ pub enum Command {
     RefreshHardware,
     SectionVisibility(neuromita::settings::SettingsArea, bool),
     HidePrivate(bool),
+    StructuredDisplay(neuromita::settings::StructuredDisplayMode),
+    SetToolOption(ToolOption, bool),
+    SetToolDepth(u8),
     Select(CharacterId),
     Send(String),
     Cancel(RequestId),
@@ -93,6 +106,11 @@ pub enum Update {
     Diagnostics(String),
     Connections(std::sync::Arc<neuromita::server::ServerSnapshot>),
     Administration(Box<super::settings::AdministrationSnapshot>),
+    CharacterDebug {
+        character: CharacterId,
+        fields: Vec<neuromita::presentation::CharacterDebugField>,
+        error: Option<String>,
+    },
     PresetCreated(PresetId, PresetRecord),
     AdminSaved,
     PresetSaved(PresetId),
@@ -348,6 +366,7 @@ async fn observe(
     let mut memories = MemoryWatch::start(administration, CharacterId::Crazy)?;
     let mut pending: Option<ConversationChangePreview> = None;
     let mut character = CharacterId::Crazy;
+    let mut debug_character = CharacterId::Crazy;
     let mut requests = presenter.observe_requests();
     let mut settings = presenter.observe_settings().map_err(|e| e.to_string())?;
     let mut presets = presenter.observe_presets();
@@ -387,6 +406,7 @@ async fn observe(
                 ))),
                 Err(error) => publish(Update::AdminError(error.to_string())),
             }
+            publish(character_debug_snapshot(administration, debug_character).await);
             match presenter.snapshot(character).await {
                 Ok(snapshot) => publish(Update::Snapshot(Box::new(snapshot))),
                 Err(error) => publish(Update::Error(error.to_string())),
@@ -407,7 +427,7 @@ async fn observe(
                         Err(error) => publish(Update::AdminError(error)),
                     }
                 },
-                Some(command @ (Command::DeletePreset(_) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::AssignAllPresets(..) | Command::SelectPromptSet(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_) | Command::SectionVisibility(..) | Command::HidePrivate(_) | Command::SaveTts(_) | Command::SaveAsr(..) | Command::SaveCharacterVoice(..) | Command::SelectAsrRecognizer(_))) => {
+                Some(command @ (Command::DeletePreset(_) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::AssignAllPresets(..) | Command::SelectPromptSet(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_) | Command::SectionVisibility(..) | Command::HidePrivate(_) | Command::StructuredDisplay(_) | Command::SetToolOption(..) | Command::SetToolDepth(_) | Command::SaveTts(_) | Command::SaveAsr(..) | Command::SaveCharacterVoice(..) | Command::SelectAsrRecognizer(_))) => {
                     match super::settings::execute(administration, command) {
                         Ok(()) => publish(Update::AdminSaved),
                         Err(error) => publish(Update::AdminError(error)),
@@ -441,6 +461,7 @@ async fn observe(
                     if let Err(error) = result { publish(Update::AdminError(error.to_string())); }
                 },
                 Some(Command::RefreshPromptCatalog) => {},
+                Some(Command::DebugSelect(id)) => { debug_character = id; },
                 Some(Command::OpenPromptFolder(character)) => {
                     if let Some(catalog) = &administration.prompts {
                         let result = (|| -> Result<(), String> {
@@ -558,6 +579,45 @@ async fn observe(
                 publish(Update::RuntimeStatus(status));
             },
         }
+    }
+}
+
+async fn character_debug_snapshot(api: &GuiPresenter, character: CharacterId) -> Update {
+    let result = async {
+        let post_dsl = if let Some(catalog) = api.prompts.as_ref() {
+            let settings = api.settings.snapshot().map_err(|error| error.to_string())?;
+            let selected = settings
+                .values
+                .characters
+                .for_character(character)
+                .prompt_set
+                .as_deref();
+            let name = catalog
+                .resolve_set(character, selected)
+                .map_err(|error| error.to_string())?;
+            catalog
+                .load_post_rules(character, &name)
+                .map_err(|error| error.to_string())?
+        } else {
+            None
+        };
+        api.characters
+            .debug_display(character, post_dsl.as_ref())
+            .await
+            .map_err(|error| error.to_string())
+    }
+    .await;
+    match result {
+        Ok(fields) => Update::CharacterDebug {
+            character,
+            fields,
+            error: None,
+        },
+        Err(error) => Update::CharacterDebug {
+            character,
+            fields: Vec::new(),
+            error: Some(error),
+        },
     }
 }
 

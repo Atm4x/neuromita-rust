@@ -14,6 +14,9 @@ pub(crate) struct RequestRecord {
     pub(crate) cancellation: CancellationToken,
     registry: Weak<RegistryInner>,
     admission: TimelineAdmission,
+    settings_snapshot: Option<Arc<crate::settings::SettingsSnapshot>>,
+    admitted_preset: Option<crate::generation::GenerationPreset>,
+    admitted_prompt: Option<Arc<crate::prompts::PromptSetSnapshot>>,
 }
 
 struct Execution {
@@ -99,6 +102,9 @@ impl RequestRecord {
         message: Box<dyn GenerationCommand>,
         id: RequestId,
         admission: TimelineAdmission,
+        settings_snapshot: Option<Arc<crate::settings::SettingsSnapshot>>,
+        admitted_preset: Option<crate::generation::GenerationPreset>,
+        admitted_prompt: Option<Arc<crate::prompts::PromptSetSnapshot>>,
         registry: Weak<RegistryInner>,
     ) -> Arc<Self> {
         let snapshot = Arc::new(RequestSnapshot {
@@ -110,6 +116,9 @@ impl RequestRecord {
             },
             revision: 0,
             state: RequestState::Pending,
+            streamed_json: None,
+            streamed_text: None,
+            tool_activity: None,
             dataset: DatasetCapture::default(),
             cancel_reason: None,
         });
@@ -138,6 +147,9 @@ impl RequestRecord {
             cancellation: CancellationToken::new(),
             registry,
             admission,
+            settings_snapshot,
+            admitted_preset,
+            admitted_prompt,
         })
     }
 
@@ -155,6 +167,9 @@ impl RequestRecord {
             metadata: inner.snapshot.metadata.clone(),
             revision: inner.snapshot.revision + 1,
             state,
+            streamed_json: None,
+            streamed_text: None,
+            tool_activity: None,
             dataset: inner.dataset.clone(),
             cancel_reason: inner.cancel_reason,
         });
@@ -182,6 +197,17 @@ impl RequestRecord {
         if let Some(trace) = &mut self.inner.lock().expect("request mutex poisoned").trace {
             trace.configure_redaction(values);
         }
+    }
+
+    pub(crate) fn admitted_settings(&self) -> Option<Arc<crate::settings::SettingsSnapshot>> {
+        self.settings_snapshot.clone()
+    }
+    pub(crate) fn admitted_preset(&self) -> Option<crate::generation::GenerationPreset> {
+        self.admitted_preset.clone()
+    }
+
+    pub(crate) fn admitted_prompt(&self) -> Option<Arc<crate::prompts::PromptSetSnapshot>> {
+        self.admitted_prompt.clone()
     }
 
     pub(crate) fn admission(&self) -> TimelineAdmission {
@@ -331,6 +357,9 @@ impl RequestRecord {
             metadata: inner.snapshot.metadata.clone(),
             revision: inner.snapshot.revision + 1,
             state: inner.snapshot.state.clone(),
+            streamed_json: inner.snapshot.streamed_json.clone(),
+            streamed_text: inner.snapshot.streamed_text.clone(),
+            tool_activity: inner.snapshot.tool_activity.clone(),
             cancel_reason: inner.cancel_reason,
             dataset: inner.dataset.clone(),
         });
@@ -419,6 +448,120 @@ impl RequestRecord {
         if let Some(trace) = &mut self.inner.lock().expect("request mutex poisoned").trace {
             trace.provider_requested(request);
         }
+    }
+
+    pub(crate) fn stream_delta(&self, delta: &str) {
+        const LIMIT: usize = 64 * 1024;
+        let mut inner = self.inner.lock().expect("request mutex poisoned");
+        if self.cancellation.is_cancelled()
+            || !matches!(
+                inner.snapshot.state,
+                RequestState::Processing(ProcessingStage::GeneratingText)
+            )
+        {
+            return;
+        }
+        let previous = inner.snapshot.streamed_json.as_deref().unwrap_or("");
+        if delta.is_empty() || previous.len().saturating_add(delta.len()) > LIMIT {
+            return;
+        }
+        let mut combined = String::with_capacity(previous.len() + delta.len());
+        combined.push_str(previous);
+        combined.push_str(delta);
+        let mut snapshot = (*inner.snapshot).clone();
+        snapshot.revision += 1;
+        snapshot.streamed_text = super::stream_preview::spoken_prefix(&combined).map(Arc::from);
+        snapshot.streamed_json = Some(Arc::from(combined));
+        inner.snapshot = Arc::new(snapshot);
+        self.updates.send_replace(Arc::clone(&inner.snapshot));
+    }
+
+    pub(crate) fn tool_started(
+        &self,
+        name: &str,
+        args: &serde_json::Map<String, serde_json::Value>,
+        spoken: &str,
+    ) {
+        const MAX_ARGS_BYTES: usize = 2048;
+        const MAX_SPOKEN_BYTES: usize = 4096;
+        let mut inner = self.inner.lock().expect("request mutex poisoned");
+        if self.cancellation.is_cancelled()
+            || !matches!(
+                inner.snapshot.state,
+                RequestState::Processing(ProcessingStage::GeneratingText)
+            )
+        {
+            return;
+        }
+        let mut display_args = serde_json::to_string(args).unwrap_or_default();
+        if display_args.len() > MAX_ARGS_BYTES {
+            let mut boundary = MAX_ARGS_BYTES.saturating_sub(3);
+            while !display_args.is_char_boundary(boundary) {
+                boundary -= 1;
+            }
+            display_args.truncate(boundary);
+            display_args.push_str("...");
+        }
+        let mut snapshot = (*inner.snapshot).clone();
+        snapshot.revision += 1;
+        snapshot.streamed_json = None;
+        let mut visible = spoken.trim();
+        if visible.len() > MAX_SPOKEN_BYTES {
+            let mut boundary = MAX_SPOKEN_BYTES;
+            while !visible.is_char_boundary(boundary) {
+                boundary -= 1;
+            }
+            visible = &visible[..boundary];
+        }
+        snapshot.streamed_text = (!visible.is_empty()).then(|| Arc::from(visible));
+        let full_json = serde_json::json!({"tool_call": {"name": name, "args": args}}).to_string();
+        let display_json = if full_json.len() > 4096 {
+            serde_json::json!({"tool_call": {"name": name, "args": "[too large to display]"}})
+                .to_string()
+        } else {
+            full_json
+        };
+        snapshot.tool_activity = Some(ToolActivity {
+            name: Arc::from(name),
+            args: Arc::from(display_args),
+            json: Arc::from(display_json),
+            executing: true,
+        });
+        inner.snapshot = Arc::new(snapshot);
+        self.updates.send_replace(Arc::clone(&inner.snapshot));
+    }
+
+    pub(crate) fn tool_finished(&self) {
+        let mut inner = self.inner.lock().expect("request mutex poisoned");
+        if self.cancellation.is_cancelled() || inner.snapshot.state.is_terminal() {
+            return;
+        }
+        let mut snapshot = (*inner.snapshot).clone();
+        let Some(activity) = snapshot.tool_activity.as_mut() else {
+            return;
+        };
+        if !activity.executing {
+            return;
+        }
+        activity.executing = false;
+        snapshot.revision += 1;
+        inner.snapshot = Arc::new(snapshot);
+        self.updates.send_replace(Arc::clone(&inner.snapshot));
+    }
+
+    pub(crate) fn stream_reset(&self) {
+        let mut inner = self.inner.lock().expect("request mutex poisoned");
+        if self.cancellation.is_cancelled() || inner.snapshot.state.is_terminal() {
+            return;
+        }
+        let mut snapshot = (*inner.snapshot).clone();
+        snapshot.revision += 1;
+        snapshot.streamed_json = None;
+        if snapshot.tool_activity.is_none() {
+            snapshot.streamed_text = None;
+        }
+        inner.snapshot = Arc::new(snapshot);
+        self.updates.send_replace(Arc::clone(&inner.snapshot));
     }
 
     pub(crate) fn provider_replied(&self, reply: crate::generation::ProviderReply) {
@@ -588,6 +731,51 @@ mod tests {
         assert!(trace.transitions.iter().any(|transition| {
             transition.phase == EffectPhase::Accepting && transition.revision == snapshot.revision
         }));
+    }
+
+    #[test]
+    fn tool_activity_is_provisional_bounded_and_cleared_on_cancellation() {
+        let registry = RequestRegistry::new(4);
+        let handle = registry.register(
+            Box::new(request()),
+            RequestId::new(),
+            TimelineAdmission {
+                selection: selection(),
+                context_epoch: 0,
+            },
+        );
+        let record = Arc::clone(&handle.record);
+        let args = serde_json::json!({"query": "чай".repeat(2000)});
+        let args = args.as_object().unwrap();
+        let initial = handle.snapshot().revision;
+        record.tool_started("memory_search", args, "Проверю данные");
+        assert_eq!(handle.snapshot().revision, initial);
+        assert!(handle.snapshot().tool_activity.is_none());
+
+        assert!(record.try_start().is_some());
+        record.tool_started("memory_search", args, "Проверю данные");
+        let started = handle.snapshot();
+        let tool = started.tool_activity.as_ref().unwrap();
+        assert_eq!(tool.name.as_ref(), "memory_search");
+        assert!(tool.executing);
+        assert!(tool.args.len() <= 2048);
+        assert!(tool.args.ends_with("..."));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&tool.json).unwrap()["tool_call"]["args"],
+            "[too large to display]"
+        );
+        assert!(tool.args.is_char_boundary(tool.args.len()));
+        assert_eq!(started.streamed_text.as_deref(), Some("Проверю данные"));
+
+        record.stream_reset();
+        assert!(handle.snapshot().tool_activity.as_ref().unwrap().executing);
+        record.tool_finished();
+        assert!(!handle.snapshot().tool_activity.as_ref().unwrap().executing);
+        assert_eq!(handle.cancel(), CancelResult::Requested);
+        record.finish_cancelled();
+        let terminal = handle.snapshot();
+        assert!(matches!(terminal.state, RequestState::Cancelled));
+        assert!(terminal.tool_activity.is_none());
     }
 
     #[test]

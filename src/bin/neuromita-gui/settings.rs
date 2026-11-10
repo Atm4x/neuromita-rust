@@ -1,15 +1,18 @@
 use super::{
-    runtime::Command,
+    runtime::{Command, ToolOption},
     view::{
-        AppWindow, CharacterPresets, PresetItem, PresetParameterItem, PresetTemplateItem,
-        PromptSetItem, SettingsUi,
+        AppWindow, CharacterDebugItem, CharacterPresets, PresetItem, PresetParameterItem,
+        PresetTemplateItem, PromptSetItem, SettingsUi,
     },
 };
 use neuromita::{
     character::CharacterId,
     generation::{PresetConnectionEdit, PresetGenerationEdit, PresetId, PresetRecord},
+    presentation::CharacterDebugField,
     presentation::{GuiPresenter, PresetSlot, PresetsPresenter, PresetsView},
-    settings::{PersistenceState, PresetSelection, SettingsArea, SettingsSnapshot},
+    settings::{
+        PersistenceState, PresetSelection, SettingsArea, SettingsSnapshot, StructuredDisplayMode,
+    },
 };
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::{rc::Rc, sync::Arc};
@@ -175,6 +178,41 @@ pub fn execute(api: &GuiPresenter, command: Command) -> Result<(), String> {
             .hide_private
             .set(value)
             .map_err(|e| e.to_string())?,
+        Command::StructuredDisplay(mode) => api
+            .settings
+            .interface
+            .structured_display
+            .set(mode)
+            .map_err(|e| e.to_string())?,
+        Command::SetToolOption(option, enabled) => {
+            let mut settings = api.settings.tools.state.get();
+            match option {
+                ToolOption::Enabled => settings.enabled = enabled,
+                ToolOption::Calculator => settings.calculator = enabled,
+                ToolOption::MemorySearch => settings.memory_search = enabled,
+                ToolOption::WebSearch => settings.web.search_enabled = enabled,
+                ToolOption::WebReader => settings.web.reader_enabled = enabled,
+            }
+            settings.web.enabled = settings.web.search_enabled || settings.web.reader_enabled;
+            settings.validate().map_err(|error| error.to_string())?;
+            api.settings
+                .tools
+                .state
+                .set(settings)
+                .map_err(|e| e.to_string())?;
+        }
+        Command::SetToolDepth(value) => {
+            if !(1..=5).contains(&value) {
+                return Err("Tool chain depth must be between 1 and 5".into());
+            }
+            let mut settings = api.settings.tools.state.get();
+            settings.max_depth = value;
+            api.settings
+                .tools
+                .state
+                .set(settings)
+                .map_err(|e| e.to_string())?;
+        }
         Command::VoiceName(value) => api
             .settings
             .voice
@@ -465,6 +503,12 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
     let send = dispatch.clone();
     settings.on_prompt_reload(move || send(Command::RefreshPromptCatalog));
     let send = dispatch.clone();
+    settings.on_character_debug_select(move |index| {
+        if let Some(character) = CharacterId::from_index(index) {
+            send(Command::DebugSelect(character));
+        }
+    });
+    let send = dispatch.clone();
     settings.on_prompt_open_folder(move |index| {
         if let Some(character) = CharacterId::from_index(index) {
             send(Command::OpenPromptFolder(character));
@@ -528,6 +572,49 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
         }
     });
     let send = dispatch.clone();
+    let weak = window.as_weak();
+    settings.on_structured_mode_change({
+        let send = dispatch.clone();
+        move |value| {
+            let mode = match value {
+                0 => StructuredDisplayMode::Off,
+                1 => StructuredDisplayMode::Brief,
+                2 => StructuredDisplayMode::Json,
+                _ => return,
+            };
+            send(Command::StructuredDisplay(mode));
+        }
+    });
+    settings.on_tool_option(move |name, enabled| {
+        let option = match name.as_str() {
+            "enabled" => Some(ToolOption::Enabled),
+            "calculator" => Some(ToolOption::Calculator),
+            "memory_search" => Some(ToolOption::MemorySearch),
+            "web_search" => Some(ToolOption::WebSearch),
+            "web_reader" => Some(ToolOption::WebReader),
+            _ => None,
+        };
+        if let Some(option) = option {
+            send(Command::SetToolOption(option, enabled));
+        } else if let Some(window) = weak.upgrade() {
+            window
+                .global::<SettingsUi>()
+                .set_settings_error("Unsupported tool".into());
+        }
+    });
+    let send = dispatch.clone();
+    let weak = window.as_weak();
+    settings.on_tool_depth_change(move |value| match value.parse::<u8>() {
+        Ok(depth) if (1..=5).contains(&depth) => send(Command::SetToolDepth(depth)),
+        _ => {
+            if let Some(window) = weak.upgrade() {
+                window
+                    .global::<SettingsUi>()
+                    .set_settings_error("Tool chain depth must be between 1 and 5".into());
+            }
+        }
+    });
+    let send = dispatch.clone();
     settings.on_section_visibility(move |index, checked| {
         if let Some(area) = area_for_section(index) {
             send(Command::SectionVisibility(area, checked));
@@ -548,6 +635,26 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
     settings.on_voice_name(move |value| dispatch(Command::VoiceName(value.into())));
 }
 
+pub fn render_character_debug(
+    window: &AppWindow,
+    character: CharacterId,
+    fields: &[CharacterDebugField],
+    error: Option<&str>,
+) {
+    let settings = window.global::<SettingsUi>();
+    settings.set_character_debug_character(character.index() as i32);
+    settings.set_character_debug_error(error.unwrap_or_default().into());
+    settings.set_character_debug_values(ModelRc::new(VecModel::from(
+        fields
+            .iter()
+            .map(|field| CharacterDebugItem {
+                label: field.label.as_str().into(),
+                value: field.value.as_str().into(),
+            })
+            .collect::<Vec<_>>(),
+    )));
+}
+
 pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {
     let window = window.global::<SettingsUi>();
     let settings = &model.settings;
@@ -562,6 +669,11 @@ pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {
             .collect::<Vec<_>>(),
     )));
     window.set_hide_private(settings.values.interface.hide_private);
+    window.set_structured_mode(match settings.values.interface.structured_display {
+        StructuredDisplayMode::Off => 0,
+        StructuredDisplayMode::Brief => 1,
+        StructuredDisplayMode::Json => 2,
+    });
     window.set_settings_persistence(match settings.persistence {
         PersistenceState::Pending => 0,
         PersistenceState::Saved(_) => 1,
@@ -575,6 +687,16 @@ pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {
     window.set_settings_voice_launcher(settings.values.voice.in_launcher);
     window.set_settings_voice_game(settings.values.voice.in_game);
     window.set_settings_voice_name(settings.values.voice.voice.as_str().into());
+    let tools = &settings.values.tools;
+    window.set_tool_enabled(tools.enabled);
+    window.set_tool_calculator(tools.calculator);
+    window.set_tool_memory_search(tools.memory_search);
+    window.set_tool_reminder_enabled(settings.values.reminders.enabled);
+    window.set_tool_web_search(tools.web.search_enabled);
+    window.set_tool_web_reader(tools.web.reader_enabled);
+    window.set_tool_search_configured(tools.web.search_endpoint.is_some());
+    window.set_tool_reader_configured(!tools.web.reader_allowed_hosts.is_empty());
+    window.set_tool_max_depth(tools.max_depth.to_string().into());
     let previous = window.get_character_presets();
     let encode = |value: PresetSelection| match value {
         PresetSelection::Active => "active".into(),

@@ -164,6 +164,16 @@ impl GeminiTemplate {
     pub(crate) fn diagnostic_redaction_values(&self) -> Vec<String> {
         vec![self.api_key.to_string()]
     }
+    pub(crate) fn stream_url(&self) -> Url {
+        let mut url = self.request_url();
+        let path = url
+            .path()
+            .replace(":generateContent", ":streamGenerateContent");
+        url.set_path(&path);
+        url.query_pairs_mut().append_pair("alt", "sse");
+        url
+    }
+
     pub(crate) fn request_url(&self) -> Url {
         let mut url = self
             .endpoint

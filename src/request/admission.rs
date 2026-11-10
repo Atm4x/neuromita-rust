@@ -10,8 +10,11 @@ use super::{
     RequestRegistry, SubmitError,
 };
 use crate::{
+    generation::PresetCatalog,
     identity::{CharacterId, EventId, RequestId},
     interaction::{TurnIntent, UserInput},
+    prompts::PromptCatalog,
+    settings::SettingsOwner,
     timeline::{conversation::ConversationMessage, selection::TimelineAdmission},
 };
 
@@ -38,6 +41,9 @@ pub(crate) struct ChatApiState {
     pub(crate) registry: Arc<RequestRegistry>,
     handlers: HashMap<CharacterId, mpsc::Sender<RequestId>>,
     ingress: Arc<dyn RequestIngress>,
+    settings: Arc<SettingsOwner>,
+    presets: Arc<PresetCatalog>,
+    prompts: Option<Arc<PromptCatalog>>,
 }
 
 impl ChatApiState {
@@ -45,12 +51,18 @@ impl ChatApiState {
         registry: Arc<RequestRegistry>,
         handlers: HashMap<CharacterId, mpsc::Sender<RequestId>>,
         ingress: Arc<dyn RequestIngress>,
+        settings: Arc<SettingsOwner>,
+        presets: Arc<PresetCatalog>,
+        prompts: Option<Arc<PromptCatalog>>,
     ) -> Self {
         Self {
             accepting: Mutex::new(true),
             registry,
             handlers,
             ingress,
+            settings,
+            presets,
+            prompts,
         }
     }
 
@@ -62,8 +74,7 @@ impl ChatApiState {
         &self,
         request: impl GenerationCommand + 'static,
     ) -> Result<RequestHandle, SubmitError> {
-        let accepting = self.accepting.lock().expect("admission mutex poisoned");
-        if !*accepting {
+        if !*self.accepting.lock().expect("admission mutex poisoned") {
             return Err(SubmitError::Stopped);
         }
         let handler = self
@@ -74,11 +85,57 @@ impl ChatApiState {
             mpsc::error::TrySendError::Full(_) => SubmitError::QueueFull,
             mpsc::error::TrySendError::Closed(_) => SubmitError::QueueClosed,
         })?;
+        let settings = self
+            .settings
+            .snapshot_all()
+            .map_err(|_| SubmitError::Stopped)?;
+        let preset_id = settings
+            .values
+            .selected_preset(request.character_id(), request.intent());
+        let preset = self
+            .presets
+            .get(preset_id)
+            .map_err(|_| SubmitError::PresetUnavailable)?
+            .ok_or(SubmitError::PresetUnavailable)?;
+        let selected = settings
+            .values
+            .characters
+            .for_character(request.character_id())
+            .prompt_set
+            .as_deref();
+        let prompt = self
+            .prompts
+            .as_ref()
+            .map(|catalog| catalog.capture(request.character_id(), selected))
+            .transpose()
+            .map_err(|error| SubmitError::PromptUnavailable(error.to_string()))?
+            .flatten();
+        // Resource I/O happens before the admission mutex is acquired.
+        if matches!(request.intent(), TurnIntent::React(_))
+            && let Some(snapshot) = &prompt
+            && !snapshot.has_template("react_template.txt")
+        {
+            return Err(SubmitError::PromptUnavailable(format!(
+                "{}/react_template.txt",
+                snapshot.name()
+            )));
+        }
+        let accepting = self.accepting.lock().expect("admission mutex poisoned");
+        if !*accepting {
+            return Err(SubmitError::Stopped);
+        }
         let admission = self
             .ingress
             .admit(request.character_id(), request.intent())?;
         let id = RequestId::new();
-        let handle = self.registry.register(Box::new(request), id, admission);
+        let handle = self.registry.register_with_configuration(
+            Box::new(request),
+            id,
+            admission,
+            Some(settings),
+            Some(preset),
+            prompt,
+        );
         permit.send(id);
         Ok(handle)
     }

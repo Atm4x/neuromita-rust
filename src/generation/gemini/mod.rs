@@ -32,8 +32,15 @@ impl GeminiProvider {
         template: GeminiTemplate,
         observer: &mut dyn GenerationObserver,
     ) -> Result<super::StructuredResponse, GenerationError> {
-        let encoded =
-            wire::encode_observed(context.context, &template, &context.prepared_knowledge);
+        let encoded = wire::encode_observed(
+            context.context,
+            &template,
+            &context.prepared_knowledge,
+            context.prompt.as_ref(),
+            &context.tool_history,
+            &context.native_tool_history,
+            &context.tool_settings,
+        );
         let payload_json = serde_json::to_string(&encoded.body).map_err(|error| {
             GenerationError::Response(format!("cannot encode provider request: {error}"))
         })?;
@@ -58,19 +65,57 @@ impl GeminiProvider {
             payload_json: payload_json.as_str().into(),
             captured_at: SystemTime::now(),
         });
-        let bytes = super::http::send_json(
-            self.client
-                .post(template.request_url())
-                .timeout(template.settings().timeout())
-                .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .body(payload_json),
-            observer,
-            wire::observation_metadata,
-        )
-        .await?;
-        match wire::decode(&bytes) {
-            Ok(response) => Ok(response),
-            Err(error) => {
+        match tokio::time::timeout(template.settings().timeout(), async {
+            let result = if template.options().stream {
+                let mut parser = wire::StreamParser::default();
+                let streamed = super::http::send_sse(
+                    self.client
+                        .post(template.stream_url())
+                        .timeout(template.settings().timeout())
+                        .header(reqwest::header::CONTENT_TYPE, "application/json")
+                        .body(payload_json),
+                    template.options().max_retries,
+                    observer,
+                    |event| parser.event(event),
+                    false,
+                )
+                .await?;
+                if streamed.finish_reason.as_deref() != Some("STOP") {
+                    Err(GenerationError::Response(
+                        "Gemini stream did not complete".into(),
+                    ))
+                } else if let Some(call) = streamed.native_call {
+                    wire::native_structured(call)
+                } else {
+                    super::StructuredResponse::parse(&streamed.text)
+                }
+            } else {
+                let bytes = super::http::send_json(
+                    self.client
+                        .post(template.request_url())
+                        .timeout(template.settings().timeout())
+                        .header(reqwest::header::CONTENT_TYPE, "application/json")
+                        .body(payload_json),
+                    template.options().max_retries,
+                    observer,
+                    wire::observation_metadata,
+                )
+                .await?;
+                wire::decode(&bytes)
+            };
+            match result {
+                Ok(response) => Ok(response),
+                Err(error) => {
+                    observer.failed(&error);
+                    Err(error)
+                }
+            }
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                let error = GenerationError::Transport("LLM request deadline exceeded".into());
                 observer.failed(&error);
                 Err(error)
             }

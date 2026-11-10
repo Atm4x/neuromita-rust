@@ -10,7 +10,9 @@ pub use credentials::{ApplicationPresetCredentials, CredentialReference, SecretK
 mod provider;
 pub mod python_import;
 mod structured;
+mod tools;
 mod transforms;
+mod web_tools;
 pub use effects::ResponseEffect;
 pub use presets::{
     EnvironmentPresetCredentials, GeminiPresetDefinition, JsonPresetRepository, PresetCatalog,
@@ -22,12 +24,14 @@ pub use structured::{
     RESPONSE_PROTOCOL_VERSION, ResponseSegment, SegmentIntent, StructuredResponse, ToolCall,
     WorkingState,
 };
+pub use tools::ToolSettings;
 pub use transforms::{MessageTransform, apply_message_transforms};
+pub use web_tools::WebToolSettings;
 
 pub use provider::{
     GenerationError, GenerationInput, GenerationObserver, GenerationProvider, GenerationRequest,
-    PreparedRequest, PromptMessage, PromptRole, ProposedResponse, ProviderFuture, ProviderReply,
-    ProviderUsage, ResponseGenerator,
+    PreparedPrompt, PreparedRequest, PromptMessage, PromptRole, ProposedResponse, ProviderFuture,
+    ProviderReply, ProviderUsage, ResponseGenerator,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

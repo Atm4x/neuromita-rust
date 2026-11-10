@@ -294,9 +294,23 @@ impl RequestState {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolActivity {
+    pub name: Arc<str>,
+    pub args: Arc<str>,
+    pub json: Arc<str>,
+    pub executing: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct RequestSnapshot {
     pub metadata: RequestMetadata,
+    /// Unvalidated streamed provider JSON, for progress and diagnostics only.
+    pub streamed_json: Option<Arc<str>>,
+    /// Provisional spoken-only text, extracted from streamed JSON. Never accepted as an effect.
+    pub streamed_text: Option<Arc<str>>,
+    /// Request-local UI presentation. Not a committed Timeline event or accepted effect.
+    pub tool_activity: Option<ToolActivity>,
     pub revision: u64,
     pub state: RequestState,
     pub dataset: DatasetCapture,
@@ -358,6 +372,10 @@ pub enum SubmitError {
     CharacterUnavailable,
     #[error("timeline could not accept the request input")]
     TimelineUnavailable,
+    #[error("assigned generation preset is unavailable")]
+    PresetUnavailable,
+    #[error("prompt set unavailable: {0}")]
+    PromptUnavailable(String),
     #[error("target event is not observable or not a message when replying")]
     InvalidTargetEvent,
 }

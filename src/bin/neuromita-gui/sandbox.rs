@@ -241,6 +241,13 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
             window.set_chat_clients(i32::try_from(snapshot.connected_clients).unwrap_or(i32::MAX));
             window.set_chat_server_running(snapshot.running);
         }
+        Update::CharacterDebug {
+            character,
+            fields,
+            error,
+        } => {
+            super::settings::render_character_debug(window, character, &fields, error.as_deref());
+        }
         Update::Administration(snapshot) => {
             super::settings::render(window, &snapshot);
             super::voice::render(window, &snapshot.settings.values.speech.tts);
@@ -406,9 +413,16 @@ fn rows(snapshot: &ConversationSnapshot) -> Vec<ChatRow> {
             can_cancel: request.snapshot.can_cancel(),
             ..Default::default()
         };
+        if let Some(tool) = &request.snapshot.tool_activity {
+            row.tool_name = tool.name.as_ref().into();
+            row.tool_args = tool.args.as_ref().into();
+            row.tool_json = tool.json.as_ref().into();
+            row.tool_executing = tool.executing;
+        }
         row.text = request
             .snapshot
             .provisional_text()
+            .or(request.snapshot.streamed_text.as_deref())
             .unwrap_or_default()
             .into();
         row.status = match &request.snapshot.state {
