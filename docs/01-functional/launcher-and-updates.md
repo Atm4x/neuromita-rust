@@ -51,3 +51,9 @@ Recovery разбирает незавершённые commit phases и либо
 ## Доказательства и пределы
 
 Прочитаны HomePageController целиком, HomePageViewModel dispatch/check/selection/execute/cancel/results/restart/stage по основным диапазонам; updater get info/check install/resume branches, download, overlay/verify/stage, Unity install/recovery; update_activation/app_restart; DirectoryInstallTransaction основные safety/commit/recovery и manifest verify; unity_process_guard/unity_installation; archive dispatch/stdlib ZIP/py7zr. Release selection/revision details, external extractor process implementations, cache cleanup ownership helpers, update settings UI и native launcher/build ещё требуют дочитывания. Никаких updates/downloads/extraction/process termination/restart/build во время аудита не было.
+
+## D60 — штатное завершение Unity, запущенной текущей сессией
+
+На Windows команда **Stop** сначала перечисляет видимые верхнеуровневые окна **только PID дочернего процесса**, созданного текущей `LauncherSession`, и отправляет им `WM_CLOSE`. При успешной отправке ожидает завершения дочернего процесса не более 3 секунд, затем выполняет `Child::kill()` и `wait()`, если приложение не закрылось. При отсутствии окон, невозможности отправки или ошибки проверки сразу используется прежний принудительный fallback через собственный `Child` handle. На Linux поведение не изменено.
+
+Дочерний handle остаётся у сессии; PID внешних найденных установок и процессов с одинаковым именем никогда не используются для Stop. `Drop` сохраняет принудительную уборку без ожидания GUI. Это best-effort graceful request, а не гарантия закрытия без потери несохранённых данных. Требуется отдельный live Windows тест на настоящем окне Unity: интеграционный headless fixture проверяет только fallback, но не доставку `WM_CLOSE` в Unity.

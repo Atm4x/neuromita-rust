@@ -336,6 +336,28 @@ fn already_running_is_rejected_and_stop_completes_the_owned_child() {
     assert_eq!(session.status().expect("post-stop status").identity, None);
 }
 
+#[cfg(windows)]
+#[test]
+fn headless_owned_child_has_a_forced_stop_fallback() {
+    let directory = TestDirectory::new("headless-stop");
+    let root = directory.path().join("install");
+    install_candidate(&root);
+    let mut session = installed_service(&root).session();
+    let started = session
+        .start_with(helper_request(30_000))
+        .expect("launch headless helper");
+    let pid = started.pid().expect("owned child pid");
+    let stopped = session.stop().expect("stop headless child");
+    assert!(matches!(
+        stopped,
+        OwnedProcessState::Finished {
+            requested_stop: true,
+            ..
+        }
+    ));
+    assert!(identity_for_pid(pid).expect("identity after stop").is_none());
+}
+
 #[test]
 fn exact_install_running_outside_the_session_blocks_start_and_is_not_owned() {
     let directory = TestDirectory::new("external");
