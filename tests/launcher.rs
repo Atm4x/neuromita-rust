@@ -652,4 +652,6 @@ fn interactive_cli_persists_selection_and_does_not_auto_start() {
 }
 
 #[cfg(windows)]
-mod launcher_windows_cases;
+mod launcher_windows_cases {
+    include!("support/launcher_windows_cases.rs");
+}

@@ -659,6 +659,9 @@ fn chat_feedback_and_asr_callbacks_are_scoped_to_selection_revision() {
 }
 
 fn settings_render_and_bindings(window: &AppWindow) {
+    use super::super::{memory::MemoryEditor, runtime::Update, sandbox};
+    let editor = std::sync::Arc::new(std::sync::Mutex::new(MemoryEditor::default()));
+    let revision = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     use super::super::view::{AiEngineUi, PresetItem, SettingsUi};
     use neuromita::ai_runtime::{
         AiService,
@@ -688,7 +691,12 @@ fn settings_render_and_bindings(window: &AppWindow) {
             ..Default::default()
         },
     );
-    super::super::ai_engine::runtime_status(window, &runtime);
+    sandbox::apply(
+        window,
+        Update::RuntimeStatus(runtime.clone()),
+        &editor,
+        &revision,
+    );
     let engine = window.global::<AiEngineUi>();
     assert!(engine.get_embedding_failed());
     assert!(
@@ -701,7 +709,7 @@ fn settings_render_and_bindings(window: &AppWindow) {
     engine.set_process_mode("split".into());
     window.global::<SettingsUi>().set_section(6);
     window.set_page(PageId::Settings);
-    window.window().take_snapshot().unwrap();
+    let failed_frame = window.window().take_snapshot().unwrap();
     runtime.services.insert(
         AiService::Embedding,
         ServiceRuntimeStatus {
@@ -713,11 +721,23 @@ fn settings_render_and_bindings(window: &AppWindow) {
             ..Default::default()
         },
     );
-    super::super::ai_engine::runtime_status(window, &runtime);
+    sandbox::apply(
+        window,
+        Update::RuntimeStatus(runtime.clone()),
+        &editor,
+        &revision,
+    );
     assert!(!engine.get_embedding_failed());
     assert!(engine.get_embedding_status().contains("mock_embedding"));
     assert!(!engine.get_embedding_status().contains("Timeout"));
-    super::super::ai_engine::runtime_status(window, &RuntimeSnapshot::default());
+    let recovered_frame = window.window().take_snapshot().unwrap();
+    assert_ne!(failed_frame.as_bytes(), recovered_frame.as_bytes());
+    sandbox::apply(
+        window,
+        Update::RuntimeStatus(RuntimeSnapshot::default()),
+        &editor,
+        &revision,
+    );
     assert_eq!(engine.get_embedding_status(), "Не настроен");
     assert!(!engine.get_embedding_failed());
     let settings = window.global::<SettingsUi>();

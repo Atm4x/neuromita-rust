@@ -33,4 +33,3 @@ NeuroMita может дополнять ответы сохранённым ко
 - [Быстрый старт](./getting-started.md)
 - [Чат, персонажи и промпты](./chat-and-characters.md)
 - [Голос, микрофон, камера и экран](./voice-microphone-camera-and-screen.md)
-

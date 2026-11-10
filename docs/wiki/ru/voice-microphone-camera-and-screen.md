@@ -26,4 +26,3 @@ NeuroMita может озвучивать ответы. Доступны лок�
 
 - [Чат, персонажи и промпты](./chat-and-characters.md)
 - [Память, данные, AI Hub и диагностика](./memory-data-ai-hub-and-debugging.md)
-

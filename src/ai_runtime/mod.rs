@@ -646,10 +646,7 @@ impl AiSupervisor {
                         {
                             continue;
                         }
-                        state.phase = RuntimePhase::Failed;
-                        state.active_model = None;
-                        state.pending_model = None;
-                        state.last_error = Some(reason.clone());
+                        retire_worker_status(state, &reason);
                         changed = true;
                     }
                     changed
@@ -756,10 +753,7 @@ impl AiSupervisor {
                     {
                         continue;
                     }
-                    state.phase = RuntimePhase::Failed;
-                    state.active_model = None;
-                    state.pending_model = None;
-                    state.last_error = Some(reason.clone());
+                    retire_worker_status(state, &reason);
                     changed = true;
                 }
                 changed

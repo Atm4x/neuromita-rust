@@ -456,6 +456,16 @@ impl SemanticMemoryRetriever {
         mode: FusionMode,
         turn: Option<TimelineTurn>,
     ) -> Result<RetrievedMemory, EmbeddingError> {
+        if turn.is_none()
+            && self
+                .cache
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .snapshots
+                .contains_key(&character)
+        {
+            return Err(EmbeddingError::StaleKnowledge);
+        }
         let admitted = memories
             .iter()
             .filter(|record| {

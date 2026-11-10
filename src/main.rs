@@ -147,6 +147,12 @@ async fn main() -> ExitCode {
     }
 }
 
+fn fail(error: impl std::fmt::Display) -> ExitCode {
+    tracing::error!(error = %error, "application failed");
+    eprintln!("error: {error}");
+    ExitCode::FAILURE
+}
+
 async fn run(logging: &neuromita::diagnostics::DiagnosticBootstrap) -> Result<(), Box<dyn Error>> {
     let mut arguments = std::env::args_os().skip(1);
     let command = arguments.next();
