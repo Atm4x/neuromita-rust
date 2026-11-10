@@ -206,14 +206,23 @@ mod tests {
         .unwrap();
 
         owner.submit(LauncherCommand::Toggle).unwrap();
-        entered_receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        entered_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
         assert_eq!(
             owner.submit(LauncherCommand::Toggle).unwrap_err(),
             "launcher operation is already in progress"
         );
         resume_sender.send(()).unwrap();
-        assert!(updates_receiver.recv_timeout(Duration::from_secs(5)).unwrap().busy);
-        let finished = updates_receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            updates_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .busy
+        );
+        let finished = updates_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
         assert!(!finished.busy);
         assert!(finished.error.is_some());
         owner.shutdown().unwrap();
