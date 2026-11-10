@@ -1,0 +1,33 @@
+name: Agent A Cycle71 source increment
+on:
+  push:
+    branches: [bridge/agent-a-cycle71-source-export-20261110]
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 25cd0a13a15d6cb37ebf526730282b2bfc4cd024
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify ancestry and export
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 25cd0a13a15d6cb37ebf526730282b2bfc4cd024
+          git cat-file -e '7af68061150e663fb079fa0b152786a2bfd9675e^{commit}'
+          git merge-base --is-ancestor 7af68061150e663fb079fa0b152786a2bfd9675e HEAD
+          git update-ref refs/heads/agent-a-cycle71-source HEAD
+          git bundle create cycle71-source.bundle refs/heads/agent-a-cycle71-source ^7af68061150e663fb079fa0b152786a2bfd9675e
+          git bundle verify cycle71-source.bundle
+          sha256sum cycle71-source.bundle > cycle71-source.bundle.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-a-cycle71-source-increment
+          path: |
+            cycle71-source.bundle
+            cycle71-source.bundle.sha256
+          retention-days: 1
