@@ -355,7 +355,11 @@ fn headless_owned_child_has_a_forced_stop_fallback() {
             ..
         }
     ));
-    assert!(identity_for_pid(pid).expect("identity after stop").is_none());
+    assert!(
+        identity_for_pid(pid)
+            .expect("identity after stop")
+            .is_none()
+    );
 }
 
 #[test]
