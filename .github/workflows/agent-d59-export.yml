@@ -1,0 +1,34 @@
+name: Agent D59 pinned D58 source delta
+on:
+  push:
+    branches:
+      - bridge/agent-d59-export-d58-20261110
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/agent-d58-cancel-scheduled-handoff-20261110
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Pin original D58
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = e1cfdc21f4a9b0a57e2828d6fc09a43d0456ddb0
+          test "$(git rev-parse HEAD^{tree})" = 37c5dc6fb069d898d11ba890c2f2b72468ec3724
+          test "$(git rev-parse HEAD^)" = 85b081ca858e78e65e9b96c103bb868ec3432c6d
+          git bundle create d59-d58-only.bundle HEAD^..HEAD
+          git bundle verify d59-d58-only.bundle
+          sha256sum d59-d58-only.bundle > d59-d58-only.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: d59-d58-only
+          path: |
+            d59-d58-only.bundle
+            d59-d58-only.sha256
+          retention-days: 2
