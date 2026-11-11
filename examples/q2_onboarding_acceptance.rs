@@ -38,6 +38,21 @@ fn assert_changed(before: &[u8], after: &[u8], scenario: &str) -> Result<(), Str
     Ok(())
 }
 
+fn home_cards(locale: &str, left: bool) -> ModelRc<view::WikiHomeCardEntry> {
+    ModelRc::new(VecModel::from(
+        neuromita::onboarding::wiki::HOME_CARDS
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| (*index % 2 == 0) == left)
+            .map(|(_, card)| view::WikiHomeCardEntry {
+                title: card.title(locale).into(),
+                description: card.body(locale).into(),
+                destination: card.destination.into(),
+            })
+            .collect::<Vec<_>>(),
+    ))
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let output = PathBuf::from(
         std::env::args_os()
@@ -160,6 +175,24 @@ fn main() -> Result<(), Box<dyn Error>> {
                     13 => {
                         let image = shot("wiki-after-anchor")?;
                         assert_changed(&reference.borrow(), &image, "Wiki anchor scroll")?;
+                    }
+                    14 => {
+                        window.set_wiki_current_article("index.md".into());
+                        window.set_wiki_current_title("Главная".into());
+                        window.set_wiki_language("ru".into());
+                        window.set_wiki_home_left(home_cards("ru", true));
+                        window.set_wiki_home_right(home_cards("ru", false));
+                    }
+                    15 => *reference.borrow_mut() = shot("wiki-home-ru")?,
+                    16 => {
+                        window.set_wiki_language("en".into());
+                        window.set_wiki_current_title("Home".into());
+                        window.set_wiki_home_left(home_cards("en", true));
+                        window.set_wiki_home_right(home_cards("en", false));
+                    }
+                    17 => {
+                        let image = shot("wiki-home-en")?;
+                        assert_changed(&reference.borrow(), &image, "Wiki home locale")?;
                     }
                     _ => {
                         *completed.borrow_mut() = Some(Ok(()));
