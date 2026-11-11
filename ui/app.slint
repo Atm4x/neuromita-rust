@@ -590,6 +590,7 @@ export component AppWindow inherits Window {
                     }
                     eula-keys := FocusScope {
                         width: 0px; height: 0px;
+                        init => { self.focus(); }
                         private property <bool> consent-active: root.onboarding-required;
                         changed consent-active => {
                             if root.onboarding-required { self.focus(); }
