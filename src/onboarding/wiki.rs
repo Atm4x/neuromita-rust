@@ -39,11 +39,19 @@ pub struct WikiHomeCardInfo {
 
 impl WikiHomeCardInfo {
     pub fn title(self, locale: &str) -> &'static str {
-        if locale.eq_ignore_ascii_case("ru") { self.title_ru } else { self.title_en }
+        if locale.eq_ignore_ascii_case("ru") {
+            self.title_ru
+        } else {
+            self.title_en
+        }
     }
 
     pub fn body(self, locale: &str) -> &'static str {
-        if locale.eq_ignore_ascii_case("ru") { self.body_ru } else { self.body_en }
+        if locale.eq_ignore_ascii_case("ru") {
+            self.body_ru
+        } else {
+            self.body_en
+        }
     }
 }
 
@@ -306,7 +314,11 @@ mod tests {
             assert!(!card.title("en").is_empty());
             assert!(!card.body("ru").is_empty());
             assert!(!card.body("en").is_empty());
-            assert!(resolve_link(card.destination).is_ok(), "{}", card.destination);
+            assert!(
+                resolve_link(card.destination).is_ok(),
+                "{}",
+                card.destination
+            );
         }
     }
 
