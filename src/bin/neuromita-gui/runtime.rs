@@ -91,6 +91,8 @@ pub enum Command {
     AssignAllPresets(CharacterId, PresetSelection),
     SelectPromptSet(CharacterId, String),
     DebugSelect(CharacterId),
+    SaveCharacterProfile(CharacterId, u64, neuromita::settings::CharacterSettings),
+    RetryCharacterProfileSave(CharacterId),
     RefreshPromptCatalog,
     OpenPromptFolder(CharacterId),
     VoiceInLauncher(bool),
@@ -245,6 +247,7 @@ pub enum Update {
     GuideCompleted,
     PresetSaved(PresetId),
     AdminError(String),
+    CharacterProfileError(CharacterId, String),
     Stopped,
     Connecting,
     Connected(String),
@@ -712,6 +715,13 @@ async fn observe(
             biased;
             _ = stop.cancelled() => return Ok(()),
             command = receive.recv() => match command {
+                Some(command @ Command::SaveCharacterProfile(character, ..)) |
+                Some(command @ Command::RetryCharacterProfileSave(character)) => {
+                    match super::settings::execute(administration, command) {
+                        Ok(()) => publish(Update::AdminSaved),
+                        Err(error) => publish(Update::CharacterProfileError(character, error)),
+                    }
+                },
                 Some(command @ Command::UpdatePreset(id, _)) => {
                     match super::settings::execute(administration, command) {
                         Ok(()) => publish(Update::PresetSaved(id)),

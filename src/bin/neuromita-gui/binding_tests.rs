@@ -821,6 +821,51 @@ fn settings_render_and_bindings(window: &AppWindow) {
     assert_eq!(last_count, commands.borrow().len());
     assert!(!settings.get_settings_error().is_empty());
     settings.set_settings_error("".into());
+    settings.set_character_prompt_sets(ModelRc::new(VecModel::from(
+        vec!["Default".into(); neuromita::character::CharacterId::ALL.len()],
+    )));
+    settings.invoke_character_load(0);
+    assert_eq!(settings.get_character_draft_revision(), "12");
+    assert_eq!(settings.get_character_draft_id(), 0);
+    assert!(!settings.get_character_draft_dirty());
+    settings.set_character_draft_prompt("Alternative".into());
+    assert!(settings.get_character_draft_dirty());
+    settings.invoke_character_load(0);
+    assert!(!settings.get_character_draft_dirty());
+    assert_eq!(settings.get_character_draft_prompt(), "Default");
+    settings.set_character_draft_reply("7".into());
+    settings.set_character_draft_react("7".into());
+    settings.set_character_profile_pending(true);
+    settings.invoke_character_profile_save(
+        0,
+        "12".into(),
+        "Default".into(),
+        "7".into(),
+        "7".into(),
+        "active".into(),
+    );
+    assert!(matches!(
+        commands.borrow().last(),
+        Some(super::super::runtime::Command::SaveCharacterProfile(
+            neuromita::character::CharacterId::Crazy,
+            12,
+            _
+        ))
+    ));
+    let before = commands.borrow().len();
+    settings.invoke_character_load(1);
+    settings.invoke_character_profile_save(
+        0,
+        "12".into(),
+        "Default".into(),
+        "7".into(),
+        "7".into(),
+        "active".into(),
+    );
+    assert_eq!(commands.borrow().len(), before);
+    assert!(!settings.get_character_profile_pending());
+    assert!(!settings.get_character_profile_error().is_empty());
+    settings.invoke_character_load(0);
     settings.invoke_preset_edit("7".into());
     assert_eq!(settings.get_preset_model(), "fixture-model");
     assert_eq!(

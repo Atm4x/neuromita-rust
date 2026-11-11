@@ -223,6 +223,16 @@ pub fn attach(
                     pager.fail(origin, ticket);
                     pager_status(&window, &pager);
                 }
+                Command::SaveCharacterProfile(character, ..)
+                | Command::RetryCharacterProfileSave(character) => {
+                    let ui = window.global::<SettingsUi>();
+                    if ui.get_character_draft_id() == character.index() as i32 {
+                        ui.set_character_profile_pending(false);
+                        ui.set_character_profile_error(
+                            "Desktop command queue is full or closed".into(),
+                        );
+                    }
+                }
                 _ => {}
             }
             window.set_chat_sending(false);
@@ -756,6 +766,13 @@ fn apply_with_catalog(
             window
                 .global::<SettingsUi>()
                 .set_settings_error(error.into());
+        }
+        Update::CharacterProfileError(character, error) => {
+            let ui = window.global::<SettingsUi>();
+            if ui.get_character_draft_id() == character.index() as i32 {
+                ui.set_character_profile_pending(false);
+                ui.set_character_profile_error(error.into());
+            }
         }
         Update::AdminSaved => super::settings::saved(window, None),
         Update::GuideError(error) => window.set_notice(format!("Guide not saved: {error}").into()),
