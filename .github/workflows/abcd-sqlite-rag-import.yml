@@ -1,0 +1,52 @@
+name: ABCD SQLite RAG verified exact import and GUI check
+on:
+  push:
+    branches:
+      - bridge/abcd-sqlite-rag-import-20261111
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify and import exact local Git objects
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f transfer/abcd-sqlite-rag.b64 ]; then exit 0; fi
+          git fetch origin +refs/heads/codex/abcd-core-boundary-fixes-20261110:refs/heads/abcd-base
+          BASE=$(git rev-parse refs/heads/abcd-base)
+          test "$BASE" = "a6612788dcb4a087e0f98957fa66c98585ae22f8"
+          base64 -d transfer/abcd-sqlite-rag.b64 > "$RUNNER_TEMP/abcd-sqlite-rag.bundle"
+          echo "b2671d7289ea8b6f1edcc08609fafff2cfbe20c576cc2c6e757fe48df11155d9  $RUNNER_TEMP/abcd-sqlite-rag.bundle" | sha256sum -c -
+          git bundle verify "$RUNNER_TEMP/abcd-sqlite-rag.bundle"
+          git fetch "$RUNNER_TEMP/abcd-sqlite-rag.bundle" refs/heads/codex/abcd-integration-20261110:refs/heads/abcd-candidate
+          HEAD=$(git rev-parse refs/heads/abcd-candidate)
+          test "$HEAD" = "97d39e8b5578d1678f56eb693146ca8466c08201"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git push origin refs/heads/abcd-candidate:refs/heads/codex/abcd-core-boundary-fixes-20261110
+  gui:
+    if: github.event.head_commit.message == 'bridge-transfer-ready'
+    needs: import
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 97d39e8b5578d1678f56eb693146ca8466c08201
+          fetch-depth: 1
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libasound2-dev libudev-dev libxkbcommon-dev libfontconfig1-dev
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - name: Compile GUI
+        env:
+          CARGO_BUILD_JOBS: 1
+          CARGO_INCREMENTAL: 0
+          CARGO_PROFILE_DEV_DEBUG: 0
+        run: cargo check --features gui --bin neuromita-gui --offline -j1
