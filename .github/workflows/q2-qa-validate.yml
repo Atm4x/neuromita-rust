@@ -1,0 +1,60 @@
+name: Q2 onboarding patch import and GUI validation
+on:
+  push:
+    branches: [bridge/q2-qa-source-20261111]
+permissions:
+  contents: write
+jobs:
+  q2:
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Verify and apply exact Q2 patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp bridge/q2-onboarding-review-patch.zlib.b64 "$RUNNER_TEMP/patch.zlib.b64"
+          git fetch origin refs/heads/main
+          test "$(git rev-parse origin/main)" = "74e505f48862b814628bbb598a63e23a6834427c"
+          git switch --detach origin/main
+          python3 - <<'PY'
+          import base64, pathlib, zlib
+          source=pathlib.Path(__import__('os').environ['RUNNER_TEMP'])/'patch.zlib.b64'
+          dest=source.with_name('q2.patch')
+          dest.write_bytes(zlib.decompress(base64.b64decode(source.read_text().strip())))
+          PY
+          echo "208c00b59668a13287e6bd03970da39123edd43bee603f8a41613f9d0546837c  $RUNNER_TEMP/q2.patch" | sha256sum -c -
+          git apply --check "$RUNNER_TEMP/q2.patch"
+          git apply "$RUNNER_TEMP/q2.patch"
+          git diff --check
+          git diff --stat
+          git config user.name "NeuroMita QA Git Bridge"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ui/app.slint ui/pages/wiki.slint src/bin/neuromita-gui/wiki.rs src/bin/neuromita-gui/binding.rs src/onboarding/wiki.rs
+          git commit -m "fix(onboarding): scroll EULA and render navigable Wiki sections"
+          git push origin HEAD:refs/heads/codex/q2-onboarding-wiki-acceptance-20261111
+          git rev-parse HEAD
+      - name: Install Rust toolchain and system dependencies
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libfontconfig1-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev libx11-dev libxcb1-dev xvfb
+      - name: Rustfmt and GUI bin check
+        env:
+          CARGO_BUILD_JOBS: "2"
+          CARGO_INCREMENTAL: "0"
+        run: |
+          cargo +1.98.1 fmt --all -- --check
+          cargo +1.98.1 check --locked --features gui --bin neuromita-gui
+      - name: Wiki and onboarding behavioral tests
+        env:
+          CARGO_BUILD_JOBS: "1"
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: |
+          cargo +1.98.1 test --locked --features gui --bin neuromita-gui wiki::tests -- --nocapture
+          cargo +1.98.1 test --locked --lib onboarding::wiki::tests -- --nocapture
