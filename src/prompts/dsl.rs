@@ -183,11 +183,11 @@ impl Interpreter {
     fn file(&mut self, name: &str, parent: Option<&Path>) -> Result<String, PromptError> {
         let path = self.resolve(name, parent)?;
         let content = self.read(&path)?;
-        let result = (|| match path.extension().and_then(|ext| ext.to_str()) {
+        let result = match path.extension().and_then(|ext| ext.to_str()) {
             Some("txt") => self.expand(&content, path.parent().unwrap(), true),
             Some("script") | Some("system") => self.script(&content, &path),
             _ => Err(PromptError::Dsl(format!("unsupported prompt file: {name}"))),
-        })();
+        };
         self.recursion.pop();
         result
     }
@@ -438,7 +438,12 @@ impl Interpreter {
             let active = branches.last().is_none_or(|branch| branch.active);
             let condition =
                 |arg: &str, vars: &BTreeMap<String, Value>| -> Result<bool, PromptError> {
-                    let arg = arg.trim().strip_suffix(" THEN").unwrap_or(arg.trim());
+                    let arg = arg.trim();
+                    let arg = if arg.to_ascii_uppercase().ends_with(" THEN") {
+                        &arg[..arg.len() - " THEN".len()]
+                    } else {
+                        arg
+                    };
                     let value = evaluate(arg, vars)?;
                     Ok(match value {
                         Value::Null => false,
@@ -468,6 +473,9 @@ impl Interpreter {
                         branch.taken |= branch.active;
                     }
                     "ELSE" => {
+                        if !arg.trim().is_empty() {
+                            return Err(PromptError::Dsl("ELSE must not have arguments".into()));
+                        }
                         let branch = branches
                             .last_mut()
                             .ok_or_else(|| PromptError::Dsl("ELSE without IF".into()))?;
@@ -481,8 +489,18 @@ impl Interpreter {
                     }
                     _ if !active => {}
                     "SET" => {
-                        let local = arg.trim().starts_with("LOCAL ");
-                        let arg = arg.trim().strip_prefix("LOCAL ").unwrap_or(arg.trim());
+                        let arg = arg.trim();
+                        let local = arg
+                            .split_whitespace()
+                            .next()
+                            .is_some_and(|keyword| keyword.eq_ignore_ascii_case("LOCAL"));
+                        let arg = if local {
+                            arg.split_once(char::is_whitespace)
+                                .map(|(_, rest)| rest.trim())
+                                .unwrap_or_default()
+                        } else {
+                            arg
+                        };
                         let (name, expr) = arg
                             .split_once('=')
                             .ok_or_else(|| PromptError::Dsl("SET requires '='".into()))?;
