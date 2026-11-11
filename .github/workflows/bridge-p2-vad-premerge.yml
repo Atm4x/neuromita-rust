@@ -1,0 +1,60 @@
+name: P2 VAD pre-merge on latest main
+on:
+  push:
+    branches:
+      - bridge/p2-vad-premerge-20261111
+    paths:
+      - .github/workflows/bridge-p2-vad-premerge.yml
+permissions:
+  contents: read
+jobs:
+  verified-merge:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      BASE_SHA: 4efce2c67b69772ec7a3acb354b41853bca7abee
+      SOURCE_SHA: bd7eb132e675ab191f08c3d12392b30f4e2ab401
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install GUI and audio native requirements
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev pkg-config libfontconfig1-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-0 xvfb xauth
+      - name: Rust 1.98.1 pinned
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+          rustup default 1.98.1
+          rustc --version
+      - name: Verify exact merged tree and functional scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin '+refs/heads/main:refs/remotes/origin/main'
+          git fetch origin '+refs/pull/427/head:refs/remotes/origin/p2-vad-head'
+          test "$(git rev-parse refs/remotes/origin/main)" = "$BASE_SHA"
+          test "$(git rev-parse refs/remotes/origin/p2-vad-head)" = "$SOURCE_SHA"
+          git checkout -B p2-premerge "$BASE_SHA"
+          git merge --no-commit --no-ff "$SOURCE_SHA"
+          git diff --check "$BASE_SHA"
+          git diff --name-only "$BASE_SHA" | sort > /tmp/p2-changed
+          cat >/tmp/p2-expected <<'EOF'
+          src/app.rs
+          src/audio/mod.rs
+          src/audio/session.rs
+          src/audio/ticket.rs
+          src/bin/neuromita-gui/runtime.rs
+          tests/audio_pipeline.rs
+          EOF
+          diff -u /tmp/p2-expected /tmp/p2-changed
+          cargo fmt --all -- --check
+          cargo check --locked --offline --features gui --all-targets
+          cargo test --locked --offline --lib -- --test-threads=2
+          cargo test --locked --offline --test audio_pipeline
+          xvfb-run -a cargo test --locked --offline --features gui --bin neuromita-gui -- --test-threads=2
+          git fetch origin main
+          test "$(git rev-parse refs/remotes/origin/main)" = "$BASE_SHA" || { echo 'main advanced; revalidate before merging'; exit 3; }
+          echo "P2 VAD PREMERGE ACCEPTED base=$BASE_SHA source=$SOURCE_SHA"
