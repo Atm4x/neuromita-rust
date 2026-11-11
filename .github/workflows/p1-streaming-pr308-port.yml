@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 4efce2c67b69772ec7a3acb354b41853bca7abee
+          ref: 8230fa2592c6ab1b0a4fc2b805a58ae4b1132417
           fetch-depth: 0
       - name: Exact scoped PR308 port and provenance check
         shell: bash
@@ -31,26 +31,25 @@ jobs:
           git apply --3way /tmp/p1-308.patch
           python - <<'PY'
           from pathlib import Path
-          p = Path("src/bin/neuromita-gui/runtime.rs")
-          s = p.read_text()
-          old = """                    Ok(snapshot) => publish(Update::Snapshot(Box::new(snapshot))),
-                    Err(error) => publish(Update::Error(error.to_string())),"""
-          new = """                    Ok(snapshot) => publish(Update::Snapshot(
-                        ChatOrigin {
-                            character,
-                            selection_revision,
-                        },
-                        Box::new(snapshot),
-                    )),
-                    Err(error) => publish(Update::ChatError(
-                        ChatOrigin {
-                            character,
-                            selection_revision,
-                        },
-                        error.to_string(),
-                    )),"""
-          assert s.count(old) == 1, "runtime request snapshot owner contract changed"
-          p.write_text(s.replace(old, new))
+          path = Path("src/bin/neuromita-gui/runtime.rs")
+          s = path.read_text()
+          start = s.index("            result = requests.changed() => {")
+          end = s.index("            result = settings.changed()", start)
+          original = s[start:end]
+          assert original.count("presenter.snapshot(character).await") == 1
+          assert original.count("Update::Snapshot(Box::new(snapshot))") == 1
+          assert original.count("Update::Error(error.to_string())") == 1
+          revised = original.replace(
+              "match presenter.snapshot(character).await {",
+              "let origin = ChatOrigin { character, selection_revision };\n                match presenter.snapshot(character).await {",
+          ).replace(
+              "Update::Snapshot(Box::new(snapshot))",
+              "Update::Snapshot(origin, Box::new(snapshot))",
+          ).replace(
+              "Update::Error(error.to_string())",
+              "Update::ChatError(origin, error.to_string())",
+          )
+          path.write_text(s[:start] + revised + s[end:])
           PY
           git add src/bin/neuromita-gui/runtime.rs
           git diff --cached --check
