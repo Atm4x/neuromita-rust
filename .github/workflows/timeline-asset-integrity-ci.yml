@@ -1,0 +1,44 @@
+name: Timeline Asset Integrity (Q1)
+
+on:
+  pull_request:
+    paths:
+      - 'src/timeline/**'
+      - 'tests/timeline_asset_process_qa.rs'
+      - 'tests/timeline_assets.rs'
+      - 'tests/timeline_asset_inventory.rs'
+      - 'tests/timeline_archive.rs'
+      - '.github/workflows/timeline-asset-integrity-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backend-integrity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: System dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq pkg-config libasound2-dev
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Verify backend and asset receipt boundaries
+        env:
+          CARGO_BUILD_JOBS: '2'
+          CARGO_INCREMENTAL: '0'
+        run: |
+          set -euo pipefail
+          cargo test --locked --offline --lib timeline::
+          cargo test --locked --offline --test timeline_asset_process_qa
+          cargo test --locked --offline --test timeline_assets
+          cargo test --locked --offline --test timeline_asset_inventory
+          cargo test --locked --offline --test timeline_archive
+          cargo test --locked --offline --test timeline_conversation
