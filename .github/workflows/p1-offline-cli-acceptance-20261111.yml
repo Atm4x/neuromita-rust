@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 018126a1d52e6f0649041d341de054ae07e7e214
+          ref: 484a06d00f405170cdf46ed994febb4577727ca4
       - name: Linux FFI dependencies
         run: |
           sudo apt-get update -qq
