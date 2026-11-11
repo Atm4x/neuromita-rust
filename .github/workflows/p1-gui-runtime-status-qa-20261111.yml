@@ -1,0 +1,26 @@
+name: P1 executable Slint AppWindow AI runtime status and MemoryId QA
+on:
+  push:
+    branches: [bridge/p1-gui-runtime-status-qa-20261111]
+permissions:
+  contents: read
+jobs:
+  gui-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 22
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      RUSTFLAGS: '-C debuginfo=0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: adcc3156a8fd33487d7e886dc26bf5c6d19ba1df
+      - name: GUI Linux dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y pkg-config libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev libxcb-shape0-dev libxcb-xfixes0-dev libfontconfig1-dev libfreetype6-dev
+      - name: Rust 1.98.1
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+      - name: Executable software-render Slint binding tests
+        run: cargo +1.98.1 test --locked --offline --features gui --bin neuromita-gui -- --test-threads=1
