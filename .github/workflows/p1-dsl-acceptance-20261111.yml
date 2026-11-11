@@ -1,0 +1,76 @@
+name: P1 DSL targeted PR307 acceptance
+on:
+  push:
+    branches: [bridge/p1-dsl-acceptance-20261111]
+permissions:
+  contents: write
+jobs:
+  port:
+    runs-on: ubuntu-latest
+    timeout-minutes: 22
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      RUSTFLAGS: '-C debuginfo=0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 3ada9636d2641529d81fbb2b7d73ef0200b484c1
+          fetch-depth: 0
+      - name: Bring only PR307 safe DSL keyword/branch repair and executable tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin refs/pull/307/head:refs/remotes/origin/p1-307
+          test "$(git rev-parse refs/remotes/origin/p1-307)" = 995fe2fcc4cb50be570a7bd2e0bf4215d49a7a7d
+          git diff e38ee3975cee12d2a3b06535df1f2537fdef05ad refs/remotes/origin/p1-307 -- src/prompts/dsl.rs > /tmp/p1-dsl.patch
+          git apply --check /tmp/p1-dsl.patch
+          git apply /tmp/p1-dsl.patch
+          python - <<'PY'
+          import subprocess
+          from pathlib import Path
+          source = subprocess.check_output(["git","show","refs/remotes/origin/p1-307:src/prompts/mod.rs"],text=True)
+          path=Path("src/prompts/mod.rs")
+          original=path.read_text()
+          start="    #[test]\n    fn python_keyword_casing_and_local_updates_match_active_dsl() {"
+          end="    #[test]\n    fn post_rules_use_selected_character_set_and_capture_config() {"
+          assert source.count(start)==1 and source.count(end)==1
+          assert original.count(end)==1 and start not in original
+          path.write_text(original.replace(end,source[source.index(start):source.index(end,source.index(start))]+end))
+          path=Path("src/prompts/dsl.rs")
+          d=path.read_text()
+          edits=[
+            ("    /// Nonlocal SET writes staged until the CharacterHandle accepts a reply.\n    variable_updates: BTreeMap<String, Value>,\n","",1),
+            ("            variable_updates: BTreeMap::new(),\n","",2),
+            ("    pub fn variable_updates(&self) -> BTreeMap<String, Value> {\n        self.variable_updates.clone()\n    }\n\n","",1),
+            ("                                self.vars.insert(name.into(), value.clone());\n                                self.variable_updates.insert(name.into(), value);","                                self.vars.insert(name.into(), value);",1)
+          ]
+          for old,new,count in edits:
+            assert d.count(old)==count, (old,count)
+            d=d.replace(old,new)
+          path.write_text(d)
+          PY
+          git add src/prompts/dsl.rs src/prompts/mod.rs
+          git diff --cached --check
+          git diff --cached --stat
+      - name: Native Rust dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y pkg-config libasound2-dev libudev-dev
+      - name: Rust 1.98.1
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+      - name: Format
+        run: cargo +1.98.1 fmt --all -- --check
+      - name: All target offline check
+        run: cargo +1.98.1 check --locked --offline --all-targets
+      - name: Exact DSL and PostDSL acceptance
+        run: |
+          cargo +1.98.1 test --locked --offline --lib prompts::tests:: -- --test-threads=2
+          cargo +1.98.1 test --locked --offline --lib prompts::post_dsl:: -- --test-threads=2
+      - name: Publish clean targeted branch
+        run: |
+          set -euo pipefail
+          git config user.name "P1 DSL Integrator"
+          git config user.email "p1-dsl-integrator@users.noreply.github.com"
+          git commit -m "fix(prompts): match Python DSL keyword casing and reject ELSE arguments"
+          git push origin HEAD:refs/heads/codex/p1-dsl-keywords-20261111
