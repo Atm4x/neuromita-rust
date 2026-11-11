@@ -1,0 +1,52 @@
+name: P2 Beat Sync premerge current main acceptance
+on:
+  push:
+    branches: [bridge/p2-beat-sync-premerge-20261111]
+    paths: [.github/workflows/bridge-p2-beat-premerge.yml]
+permissions:
+  contents: read
+jobs:
+  test-merged-tree:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      BASE_SHA: 8230fa2592c6ab1b0a4fc2b805a58ae4b1132417
+      SOURCE_SHA: 5812f5b335d6d7bfd15e86844ecccc634da73a6c
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install GUI and ALSA runtime dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev pkg-config libfontconfig1-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-0 xvfb xauth
+      - name: Rust 1.98.1
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+          rustup default 1.98.1
+          rustc --version
+      - name: Check merge and run acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'P2 integration check'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin '+refs/heads/main:refs/remotes/origin/main'
+          git fetch origin '+refs/pull/430/head:refs/remotes/origin/p2-pr430'
+          test "$(git rev-parse refs/remotes/origin/main)" = "$BASE_SHA" || { echo "main advanced before test"; exit 3; }
+          test "$(git rev-parse refs/remotes/origin/p2-pr430)" = "$SOURCE_SHA"
+          git checkout -B verified-merge "$BASE_SHA"
+          git merge --no-commit --no-ff "$SOURCE_SHA"
+          git diff --check "$BASE_SHA"
+          git diff --name-only "$BASE_SHA" | sort
+          cargo fmt --all -- --check
+          cargo check --locked --offline --all-targets
+          cargo check --locked --offline --features gui --all-targets
+          cargo test --locked --offline --test beat_sync_cache --test beat_sync_runtime --test game_beat_sync --test audio_pipeline -- --test-threads=2
+          cargo test --locked --offline --lib -- --test-threads=2
+          xvfb-run -a cargo test --locked --offline --features gui --bin neuromita-gui -- --test-threads=2
+          git fetch origin main
+          test "$(git rev-parse refs/remotes/origin/main)" = "$BASE_SHA" || { echo "main advanced during test"; exit 3; }
+          echo "P2 BEAT SYNC VERIFIED BASE=$BASE_SHA SOURCE=$SOURCE_SHA"
