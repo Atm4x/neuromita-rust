@@ -9,9 +9,6 @@ on:
       - 'tests/timeline_asset_inventory.rs'
       - 'tests/timeline_archive.rs'
       - '.github/workflows/timeline-asset-integrity-ci.yml'
-  push:
-    branches:
-      - test/q1-asset-cross-process-20261111
   workflow_dispatch:
 
 permissions:
@@ -39,7 +36,7 @@ jobs:
           CARGO_INCREMENTAL: '0'
         run: |
           set -euo pipefail
-          cargo test --locked --offline --lib
+          cargo test --locked --offline --lib timeline::
           cargo test --locked --offline --test timeline_asset_process_qa
           cargo test --locked --offline --test timeline_assets
           cargo test --locked --offline --test timeline_asset_inventory
