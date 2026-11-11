@@ -42,6 +42,8 @@ jobs:
           test "$(git rev-parse refs/remotes/origin/p2-beat-source)" = "$SOURCE_SHA"
           if git ls-remote --exit-code --heads origin "refs/heads/$TARGET" >/dev/null; then echo 'target exists; refusing overwrite'; exit 4; fi
           git checkout -B "$TARGET" "$BASE_SHA"
+          git config user.name 'P2 CI Integrator'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git merge --squash --no-commit "$SOURCE_SHA"
           git diff --cached --check
           git diff --cached --name-only | sort > /tmp/actual-beat-paths
