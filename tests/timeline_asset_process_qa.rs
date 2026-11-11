@@ -155,3 +155,96 @@ fn independent_writers_and_upload_before_receipt_keep_one_recoverable_object() {
         vec![0xa7; 2048]
     );
 }
+
+#[test]
+fn q1_asset_exit_before_receipt_worker() {
+    let Some(root) = env::var_os("NEUROMITA_Q1_ASSET_EXIT_ROOT") else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    let store = TimelineAssetStore::new(root.join("assets"), 4096).unwrap();
+    let reference = upload(&store);
+    let marker = root.join("published.json");
+    fs::write(&marker, serde_json::to_vec(&reference).unwrap()).unwrap();
+    fs::File::open(&marker).unwrap().sync_all().unwrap();
+    std::process::exit(47);
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn crash_after_asset_publish_before_sqlite_receipt_is_recoverable() {
+    use neuromita::timeline::{
+        domain::TimelineRepository,
+        storage::{SqliteTimelineRepository, assets::TimelineAssetRef},
+    };
+
+    let temp = TempRoot::new();
+    let binary = env::current_exe().unwrap();
+    let output = Command::new(&binary)
+        .arg("--exact")
+        .arg("q1_asset_exit_before_receipt_worker")
+        .arg("--nocapture")
+        .env("NEUROMITA_Q1_ASSET_EXIT_ROOT", &temp.0)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(47));
+
+    let reference: TimelineAssetRef =
+        serde_json::from_slice(&fs::read(temp.0.join("published.json")).unwrap()).unwrap();
+    let assets = TimelineAssetStore::new(temp.0.join("assets"), 4096).unwrap();
+    assets.verify(&reference).unwrap();
+    let orphan = assets.inventory(&[]).unwrap();
+    assert_eq!(orphan.orphan_candidates.len(), 1);
+    assert_eq!(orphan.orphan_candidates[0].digest, reference.digest);
+
+    let path = temp.0.join("events.sqlite");
+    let branch = BranchId::new();
+    let session = SessionId::new();
+    let event = EventDraft::new(EventKind::PlayerMessage).id;
+    {
+        let mut repo = SqliteTimelineRepository::open(&path).unwrap();
+        repo.create_session(session, branch).unwrap();
+        let mut message = EventDraft::new(EventKind::PlayerMessage);
+        message.id = event;
+        message.actor = Some("player".into());
+        message.observers.insert(CharacterId::Crazy);
+        message.payload.insert(
+            "content".into(),
+            json!([{"type":"image","asset":reference}]),
+        );
+        assert!(
+            assets
+                .append_checked(
+                    &mut repo,
+                    branch,
+                    1,
+                    "recovered-receipt",
+                    json!({}),
+                    vec![message.clone()]
+                )
+                .is_err()
+        );
+        assert_eq!(repo.branch(branch).unwrap().head_sequence, 0);
+        assets
+            .append_checked(
+                &mut repo,
+                branch,
+                0,
+                "recovered-receipt",
+                json!({}),
+                vec![message],
+            )
+            .unwrap();
+    }
+    let reopened = SqliteTimelineRepository::open(&path).unwrap();
+    assert_eq!(reopened.branch(branch).unwrap().head_sequence, 1);
+    let view =
+        TimelineMessageQueries::capture(&reopened, branch, CharacterId::Crazy, None).unwrap();
+    assert_eq!(
+        assets.read_visible(&view, event, &reference).unwrap(),
+        vec![0xa7; 2048]
+    );
+    let retained = assets.inventory(&[reference]).unwrap();
+    assert_eq!(retained.retained.len(), 1);
+    assert!(retained.orphan_candidates.is_empty());
+}
