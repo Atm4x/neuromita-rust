@@ -1,0 +1,698 @@
+import { Theme, Icons } from "../theme.slint";
+import { Label, Icon, ActionSurface } from "../components/controls.slint";
+import { HubImplementation, HubModelIdentity, HubInstallPreview, HubInstallOperation, HubModel, HubPill, HubAction, HubModelCard, HubStat } from "../ai-hub/components.slint";
+import { ScrollView } from "std-widgets.slint";
+import { I18n } from "../i18n.slint";
+import { NativeRevisionPanel, NativeRevisionRow, NativeReleaseRow } from "../ai-hub/native.slint";
+
+export component AiHubPage inherits Rectangle {
+    background: Theme.background;
+    clip: true;
+    private property <string> category: "tts";
+    private property <HubImplementation> runtime-filter: unknown;
+    private property <string> search-text: "";
+    private property <int> category-slot: root.category == "tts" ? 0 : root.category == "asr" ? 1 : root.category == "core" ? 2 : root.category == "rag" ? 3 : 4;
+    private property <int> category-total: root.category-counts.length > root.category-slot ? root.category-counts[root.category-slot] : 0;
+    out property <HubModelIdentity> selected-key;
+    out property <bool> selection-missing: false;
+    private property <bool> selection-changed: false;
+    out property <bool> settings-open: false;
+    private property <bool> confirm-discard: false;
+    private property <string> pending-category: "";
+    out property <bool> dirty: false;
+    private property <string> field-one: "";
+    private property <string> field-two: "";
+    private property <HubModel> selected-model;
+    in property <[HubModel]> entries;
+    in property <[NativeRevisionRow]> native-revisions;
+    in property <[NativeReleaseRow]> native-releases;
+    in property <bool> native-has-active: false;
+    in property <string> native-status;
+    in property <string> native-error;
+    in property <bool> native-download-configured: false;
+    in property <bool> native-download-active: false;
+    in property <string> native-download-summary;
+    in property <int> native-download-progress: -1;
+    callback native-download-requested(string, string, string);
+    callback native-cancel-download-requested();
+    callback native-refresh-requested();
+    callback native-select-requested(string, string, string);
+    callback native-activate-requested(string, string, string);
+    callback native-stop-requested(string, string, string);
+    in property <[int]> category-counts;
+    in-out property <int> review-token: 0;
+    in property <HubInstallPreview> install-preview;
+    in property <HubInstallOperation> install-operation;
+    in-out property <string> dismissed-operation-id: "";
+    private property <bool> review-requested: false;
+    private property <bool> confirm-install: false;
+    private property <bool> install-submitted: false;
+    callback preview-install-requested(HubModelIdentity, int);
+    callback confirm-install-requested(HubModelIdentity, int);
+    in property <bool> can-refresh: false;
+    in property <int> discovery-warning-count: 0;
+    in property <string> loaded-tts-id: "";
+    in property <string> loaded-asr-id: "";
+    callback refresh-requested();
+    callback find-selection-index(HubModelIdentity) -> int;
+    callback use-model-requested(HubModelIdentity);
+    pure function matches(item: HubModel) -> bool {
+        return (item.category == root.category
+                || (root.category == "core" && item.category == "backend")
+                || (root.category == "else" && (item.category == "voices" || item.category == "extras"
+                    || item.category == "beats" || item.category == "deps" || item.category == "dependency")))
+            && (root.runtime-filter == HubImplementation.unknown || item.implementation == root.runtime-filter)
+            && (root.search-text == "" || item.title.to-lowercase().replace-all(root.search-text.to-lowercase(), "") != item.title.to-lowercase()
+                || item.description.to-lowercase().replace-all(root.search-text.to-lowercase(), "") != item.description.to-lowercase()
+                || item.implementation-label.to-lowercase().replace-all(root.search-text.to-lowercase(), "") != item.implementation-label.to-lowercase());
+    }
+    function reconcile-selected() {
+        if !root.settings-open || root.selected-key.id == "" { return; }
+        let index = root.find-selection-index(root.selected-key);
+        if index < 0 {
+            root.selection-missing = true;
+            if root.dirty {
+                root.confirm-discard = true;
+            } else {
+                root.settings-open = false;
+                root.selected-key = { category: "", id: "", implementation: HubImplementation.unknown, revision: "" };
+            }
+            return;
+        }
+        root.selection-missing = false;
+        let fresh = root.entries[index];
+        if root.dirty {
+            root.selection-changed = fresh != root.selected-model;
+        } else {
+            root.field-one = root.entries[index].setting-one-value;
+            root.field-two = root.entries[index].setting-two-value;
+            root.selected-model = fresh;
+            root.selection-changed = false;
+        }
+    }
+    changed dirty => {
+        if root.dirty {
+            root.review-token += 1;
+            root.review-requested = false;
+            root.confirm-install = false;
+            root.install-submitted = false;
+        }
+    }
+    changed entries => {
+        root.review-token += 1;
+        root.review-requested = false;
+        root.confirm-install = false;
+        root.install-submitted = false;
+        root.reconcile-selected();
+    }
+    function open-details(index: int) {
+        root.review-token += 1;
+        root.review-requested = false;
+        root.confirm-install = false;
+        root.install-submitted = false;
+        if index >= 0 && index < root.entries.length {
+            root.selected-model = root.entries[index];
+            root.selected-key = {
+                category: root.selected-model.category,
+                id: root.selected-model.id,
+                implementation: root.selected-model.implementation,
+                revision: root.selected-model.revision,
+            };
+            root.selection-missing = false;
+            root.selection-changed = false;
+            root.field-one = root.selected-model.setting-one-value;
+            root.field-two = root.selected-model.setting-two-value;
+            root.dirty = false;
+            root.confirm-discard = false;
+            root.pending-category = "";
+            root.settings-open = true;
+        }
+    }
+    function close-details() {
+        root.review-token += 1;
+        root.review-requested = false;
+        root.confirm-install = false;
+        root.install-submitted = false;
+        root.pending-category = "";
+        if root.dirty { root.confirm-discard = true; }
+        else { root.settings-open = false; root.selected-key = { category: "", id: "", implementation: HubImplementation.unknown, revision: "" }; }
+    }
+    function discard-and-leave() {
+        root.review-token += 1;
+        root.review-requested = false;
+        root.confirm-install = false;
+        root.install-submitted = false;
+        root.confirm-discard = false;
+        root.dirty = false;
+        root.settings-open = false;
+        root.selected-key = { category: "", id: "", implementation: HubImplementation.unknown, revision: "" };
+        root.selection-missing = false;
+        root.selection-changed = false;
+        if root.pending-category != "" { root.category = root.pending-category; }
+        root.pending-category = "";
+    }
+    VerticalLayout {
+        width: 100%; height: 100%;
+        padding-left: 24px; padding-right: 24px; padding-top: 20px; padding-bottom: 16px;
+        spacing: 13px;
+        HorizontalLayout { height: 52px; spacing: 14px;
+            Rectangle { width: 44px; height: 44px; border-radius: 11px; border-width: 1px; border-color: Theme.accent-border;
+                background: Theme.accent.with-alpha(0.13);
+                VerticalLayout { padding: 0px; alignment: center;
+                    HorizontalLayout { alignment: center;
+                        Icon { source: Icons.ai-hub; colorize: Theme.accent-hover; width: 24px; height: 24px; }
+                    }
+                }
+            }
+            VerticalLayout { spacing: 3px; horizontal-stretch: 1; alignment: center;
+                Label { text: "AI Hub"; font-size: 22px; font-weight: 800; }
+                Label { text: "Установка, обслуживание и управление локальными AI-компонентами"; color: Theme.muted; font-size: 12px; }
+            }
+            if root.discovery-warning-count > 0: HubPill {
+                caption: "Ошибки каталога: " + root.discovery-warning-count;
+                warning: true;
+            }
+        }
+        Rectangle { height: 1px; background: Theme.divider; }
+        if root.install-operation.operation-id != ""
+            && (root.install-operation.stage == "installing"
+                || root.dismissed-operation-id != root.install-operation.operation-id): Rectangle {
+            height: 44px;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: root.install-operation.stage == "failed" || root.install-operation.stage == "unknown" ? Theme.warning.with-alpha(0.4) : Theme.accent-border;
+            background: root.install-operation.stage == "failed" || root.install-operation.stage == "unknown" ? Theme.warning.with-alpha(0.08) : Theme.accent.with-alpha(0.07);
+            HorizontalLayout {
+                padding-left: 12px; padding-right: 8px;
+                spacing: 10px; alignment: stretch;
+                VerticalLayout {
+                    spacing: 2px; alignment: center; horizontal-stretch: 1;
+                    Label {
+                        text: (root.install-operation.stage == "installing" ? "Установка выполняется"
+                            : root.install-operation.stage == "installed" ? "Overlay установлен"
+                            : root.install-operation.stage == "wheel-installed" ? "Wheel-stage установлен"
+                            : root.install-operation.stage == "unknown" ? "Исход установки неизвестен" : "Установка не завершена")
+                            + " · " + root.install-operation.category.to-uppercase() + "/" + root.install-operation.id;
+                        font-size: 12px; font-weight: 700;
+                        color: root.install-operation.stage == "failed" || root.install-operation.stage == "unknown" ? Theme.warning : Theme.text;
+                        overflow: elide;
+                    }
+                    Label {
+                        text: root.install-operation.summary;
+                        font-size: 10px; color: Theme.muted; overflow: elide;
+                    }
+                }
+                Label {
+                    text: root.install-operation.operation-id;
+                    font-size: 10px; color: Theme.muted;
+                    overflow: elide; max-width: 90px;
+                }
+                if root.install-operation.stage != "installing": HubAction {
+                    caption: "Скрыть"; compact: true;
+                    activated => { root.dismissed-operation-id = root.install-operation.operation-id; }
+                }
+            }
+        }
+        Rectangle {
+            height: 60px;
+            background: Theme.sidebar;
+            border-width: 1px; border-color: Theme.border; border-radius: 13px;
+            HorizontalLayout {
+                padding-left: 7px; padding-right: 7px;
+                padding-top: 6px; padding-bottom: 6px;
+                spacing: 5px;
+                for cat in [
+                    { id: "tts", title: "TTS", subtitle: "Синтез", icon: Icons.ai-tts, order: 0 },
+                    { id: "asr", title: "ASR", subtitle: "Речь", icon: Icons.ai-asr, order: 1 },
+                    { id: "core", title: "Core", subtitle: "Ядро", icon: Icons.ai-core, order: 2 },
+                    { id: "rag", title: "RAG", subtitle: "Память", icon: Icons.ai-rag, order: 3 },
+                    { id: "else", title: "Else", subtitle: "Прочее", icon: Icons.ai-else, order: 4 }
+                ]: ActionSurface {
+                    height: 46px;
+                    horizontal-stretch: 1;
+                    min-width: 126px;
+                    max-width: 10000px;
+                    label: cat.title + ", моделей: " + (root.category-counts.length > cat.order ? root.category-counts[cat.order] : 0);
+                    selected: root.category == cat.id;
+                    border-radius: 10px;
+                    border-width: root.category == cat.id ? 1px : 0px;
+                    border-color: Theme.accent-border;
+                    background: root.category == cat.id ? Theme.accent.with-alpha(0.15)
+                        : self.hovered ? Theme.text.with-alpha(0.055) : transparent;
+                    HorizontalLayout {
+                        padding-left: 10px; padding-right: 10px;
+                        padding-top: 5px; padding-bottom: 5px;
+                        spacing: 8px;
+                        alignment: center;
+                        VerticalLayout {
+                            width: 21px; alignment: center;
+                            Icon {
+                                source: cat.icon; width: 20px; height: 20px;
+                                colorize: root.category == cat.id ? Theme.accent-hover : Theme.muted;
+                            }
+                        }
+                        VerticalLayout {
+                            spacing: 1px; alignment: center;
+                            Label {
+                                text: cat.title; height: 18px; font-size: 13px;
+                                font-weight: root.category == cat.id ? 750 : 650;
+                                color: root.category == cat.id ? Theme.text : Theme.muted;
+                            }
+                            Label { text: cat.subtitle; height: 14px; font-size: 10px; color: Theme.muted; }
+                        }
+                        VerticalLayout {
+                            width: max(25px, count-label.preferred-width + 12px);
+                            height: 100%;
+                            alignment: center;
+                            Rectangle {
+                                width: parent.width;
+                                height: 23px;
+                                border-radius: 7px;
+                                background: root.category == cat.id ? Theme.accent.with-alpha(0.21) : Theme.text.with-alpha(0.045);
+                                border-width: 1px;
+                                border-color: root.category == cat.id ? Theme.accent-border : Theme.border;
+                                count-label := Label {
+                                    text: root.category-counts.length > cat.order ? "" + root.category-counts[cat.order] : "0";
+                                    horizontal-alignment: center; font-size: 10px; font-weight: 650;
+                                    color: root.category == cat.id ? Theme.text : Theme.muted;
+                                }
+                            }
+                        }
+                    }
+                    activated => {
+                        if root.category == cat.id {
+                            root.pending-category = "";
+                            root.confirm-discard = false;
+                        } else if !root.settings-open || !root.dirty {
+                            root.category = cat.id;
+                            root.settings-open = false;
+                            root.confirm-discard = false;
+                            root.pending-category = "";
+                        } else {
+                            root.pending-category = cat.id;
+                            root.confirm-discard = true;
+                        }
+                    }
+                }
+            }
+        }
+        if !root.settings-open: VerticalLayout {
+            spacing: 11px;
+            HorizontalLayout {
+                height: 40px; spacing: 10px;
+                Label {
+                    text: root.category == "tts" ? "Синтез речи" : root.category == "asr" ? "Распознавание речи"
+                        : root.category == "core" ? "Системное ядро" : root.category == "rag" ? "Поиск и память"
+                        : "Дополнительные компоненты";
+                    font-size: 19px; font-weight: 700;
+                    horizontal-stretch: 1; min-width: 185px;
+                }
+                Rectangle {
+                    width: 187px; height: 36px;
+                    background: Theme.panel; border-radius: 9px;
+                    border-width: 1px; border-color: Theme.border;
+                    HorizontalLayout {
+                        padding-left: 11px; padding-right: 10px; spacing: 7px;
+                        VerticalLayout {
+                            width: 17px; alignment: center;
+                            Icon {
+                                source: root.runtime-filter == HubImplementation.unknown ? Icons.ai-hub
+                                    : root.runtime-filter == HubImplementation.python ? Icons.python : Icons.rust;
+                                colorize: Theme.accent-hover;
+                                width: 16px; height: 16px;
+                            }
+                        }
+                        Label {
+                            text: root.runtime-filter == HubImplementation.unknown ? "Все реализации"
+                                : root.runtime-filter == HubImplementation.python ? "Python" : "Rust";
+                            font-size: 12px; font-weight: 600;
+                            horizontal-stretch: 1; min-width: 0px;
+                        }
+                        VerticalLayout {
+                            width: 12px; alignment: center;
+                            Icon { source: Icons.chevron-down; width: 12px; height: 12px; colorize: Theme.muted; }
+                        }
+                    }
+                    TouchArea { mouse-cursor: pointer; clicked => { filter-menu.show(); } }
+                    filter-menu := PopupWindow {
+                        y: parent.height + 5px; width: parent.width; height: 120px;
+                        close-policy: close-on-click-outside;
+                        Rectangle {
+                            background: Theme.sidebar; border-radius: 10px;
+                            border-width: 1px; border-color: Theme.border;
+                            VerticalLayout {
+                                padding: 4px; spacing: 2px;
+                                for filter in [
+                                    { id: HubImplementation.unknown, label: "Все реализации", icon: Icons.ai-hub },
+                                    { id: HubImplementation.python, label: "Python", icon: Icons.python },
+                                    { id: HubImplementation.rust, label: "Rust", icon: Icons.rust }
+                                ]: ActionSurface {
+                                    label: filter.label;
+                                    height: 36px; border-radius: 7px;
+                                    selected: root.runtime-filter == filter.id;
+                                    background: root.runtime-filter == filter.id ? Theme.accent.with-alpha(0.15)
+                                        : self.hovered ? Theme.hover : transparent;
+                                    HorizontalLayout {
+                                        padding-left: 10px; padding-right: 8px; spacing: 10px;
+                                        VerticalLayout { width: 16px; alignment: center;
+                                            Icon { source: filter.icon; width: 16px; height: 16px; colorize: Theme.accent-hover; }
+                                        }
+                                        Label { text: filter.label; font-size: 12px; horizontal-stretch: 1; }
+                                        if root.runtime-filter == filter.id: Icon {
+                                            source: Icons.check; width: 13px; height: 13px; colorize: Theme.accent-hover;
+                                        }
+                                    }
+                                    activated => { root.runtime-filter = filter.id; filter-menu.close(); }
+                                }
+                            }
+                        }
+                    }
+                }
+                Rectangle {
+                    width: 245px; height: 36px;
+                    border-radius: 9px; border-width: 1px;
+                    border-color: Theme.border; background: Theme.panel;
+                    HorizontalLayout {
+                        padding-left: 11px; padding-right: 10px; spacing: 9px;
+                        VerticalLayout { width: 16px; alignment: center;
+                            Icon { source: Icons.ai-search; colorize: Theme.muted; width: 15px; height: 15px; }
+                        }
+                        Rectangle {
+                            horizontal-stretch: 1; min-width: 0px;
+                            height: 34px; background: transparent;
+                            if root.search-text == "": Label {
+                                text: "Поиск в категории…";
+                                color: Theme.muted; font-size: 12px;
+                                width: parent.width; height: parent.height;
+                                vertical-alignment: center;
+                                horizontal-alignment: left;
+                            }
+                            TextInput {
+                                text <=> root.search-text; single-line: true;
+                                width: parent.width; height: parent.height;
+                                color: Theme.text; font-size: 12px;
+                                vertical-alignment: center;
+                                horizontal-alignment: left;
+                            }
+                        }
+                    }
+                }
+                Rectangle {
+                    width: 36px; height: 36px;
+                    refresh-icon := ActionSurface {
+                        width: 100%; height: 100%;
+                        label: root.can-refresh ? "Обновить список моделей" : "Обновление станет доступно после подключения каталога";
+                        enabled: root.can-refresh;
+                        border-radius: 9px; border-width: 1px;
+                        border-color: Theme.border;
+                        background: self.hovered ? Theme.accent.with-alpha(0.14) : Theme.panel;
+                        VerticalLayout { alignment: center;
+                            HorizontalLayout { alignment: center;
+                                Icon { source: Icons.refresh; width: 16px; height: 16px;
+                                    colorize: root.can-refresh ? Theme.accent-hover : Theme.muted; }
+                            }
+                        }
+                        activated => { root.refresh-requested(); }
+                    }
+                    hover-target := TouchArea {
+                        mouse-cursor: root.can-refresh ? pointer : default;
+                        clicked => { if root.can-refresh { root.refresh-requested(); } }
+                        changed has-hover => {
+                            if self.has-hover { refresh-tooltip.show(); }
+                            else { refresh-tooltip.close(); }
+                        }
+                    }
+                    refresh-tooltip := PopupWindow {
+                        x: -205px; y: parent.height + 5px;
+                        width: 241px; height: 29px;
+                        close-policy: close-on-click-outside;
+                        Rectangle {
+                            background: Theme.sidebar;
+                            border-radius: 7px; border-width: 1px; border-color: Theme.border;
+                            Label {
+                                width: 100%; height: 100%;
+                                text: root.can-refresh ? "Обновить список моделей" : "Обновление доступно после подключения";
+                                font-size: 11px; color: Theme.muted;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+            if root.entries.length == 0 || root.category-total == 0: Rectangle {
+                vertical-stretch: 1; background: Theme.panel; border-width: 1px; border-color: Theme.border; border-radius: 14px;
+                VerticalLayout { alignment: center; padding: 24px; spacing: 10px;
+                    Label {
+                        text: root.category != "tts" && root.category != "asr" ? "Каталог категории пока не подключён"
+                            : root.can-refresh ? "В этой категории нет обнаруженных моделей" : "Каталог моделей пока не подключён";
+                        font-size: 17px; font-weight: 700; horizontal-alignment: center;
+                    }
+                    Label {
+                        text: root.category != "tts" && root.category != "asr" ? "Для этого раздела пока нет Core-owned источника моделей."
+                            : root.can-refresh ? "Список обновлён; для этой категории Core не обнаружил доступных плагинов."
+                            : "AI Hub ожидает каталог; установка и настройка пока недоступны.";
+                        font-size: 12px; color: Theme.muted; horizontal-alignment: center; wrap: word-wrap;
+                    }
+                }
+            }
+            if root.entries.length > 0 && root.category-total > 0: Rectangle { horizontal-stretch: 1; vertical-stretch: 1; clip: true;
+                ScrollView { width: 100%; height: 100%; content-width: self.visible-width;
+                    VerticalLayout {
+                        padding-right: 9px; padding-top: 2px; padding-bottom: 4px;
+                        spacing: 0px; alignment: start;
+                        for model[index] in root.entries: VerticalLayout {
+                            min-height: root.matches(model) ? 93px : 0px;
+                            preferred-height: root.matches(model) ? 93px : 0px;
+                            max-height: root.matches(model) ? 93px : 0px;
+                            padding-bottom: root.matches(model) ? 9px : 0px;
+                            spacing: 0px;
+                            if root.matches(model): HubModelCard {
+                                horizontal-stretch: 1;
+                                entry: model;
+                                inference-ready: (model.implementation == HubImplementation.python && model.category == "tts" && root.loaded-tts-id != "" && model.id == root.loaded-tts-id)
+                                    || (model.implementation == HubImplementation.python && model.category == "asr" && root.loaded-asr-id != "" && model.id == root.loaded-asr-id);
+                                open-settings => { root.open-details(index); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if root.settings-open: Rectangle {
+            vertical-stretch: 1; horizontal-stretch: 1;
+            clip: true; background: Theme.panel;
+            border-radius: 14px; border-width: 1px; border-color: Theme.accent-border;
+            VerticalLayout {
+                padding: 22px; spacing: 15px;
+                HorizontalLayout { height: 38px; spacing: 10px;
+                    HubAction { caption: "← К моделям"; compact: true; activated => { root.close-details(); } }
+                    Rectangle { horizontal-stretch: 1; }
+                    HubPill { caption: "Параметры модели"; accent: true; }
+                    if root.dirty: HubPill { caption: "Есть изменения"; warning: true; }
+                }
+                Rectangle { height: 1px; background: Theme.divider; }
+                ScrollView { horizontal-stretch: 1; vertical-stretch: 1; content-width: self.visible-width;
+                    VerticalLayout { padding-right: 8px; spacing: 16px; alignment: start;
+                        HorizontalLayout { height: 66px; spacing: 14px;
+                            Rectangle { width: 54px; height: 54px; border-radius: 13px; background: Theme.accent.with-alpha(0.13);
+                                border-width: 1px; border-color: Theme.accent-border;
+                                VerticalLayout { alignment: center;
+                                    HorizontalLayout { alignment: center;
+                                        Icon { source: Icons.settings; width: 25px; height: 25px; colorize: Theme.accent-hover; }
+                                    }
+                                }
+                            }
+                            VerticalLayout { spacing: 4px; alignment: center; horizontal-stretch: 1;
+                                Label { text: root.selected-model.title; font-size: 22px; font-weight: 700; }
+                                Label { text: "Компонент · " + root.selected-model.implementation-label + " · " + root.selected-model.id; color: Theme.muted; font-size: 11px; }
+                            }
+                        }
+                        Text { text: root.selected-model.description; color: Theme.muted; font-size: 12px; wrap: word-wrap; }
+                        HorizontalLayout { spacing: 8px; height: 28px;
+                            HubPill { caption: root.selected-model.implementation-label; accent: true; }
+                            if (root.selected-model.implementation == HubImplementation.python && root.selected-model.category == "tts" && root.loaded-tts-id != "" && root.selected-model.id == root.loaded-tts-id)
+                                || (root.selected-model.implementation == HubImplementation.python && root.selected-model.category == "asr" && root.loaded-asr-id != "" && root.selected-model.id == root.loaded-asr-id): HubPill {
+                                caption: "Модель загружена"; accent: true;
+                            }
+                            if root.selected-model.language != "": HubPill { caption: root.selected-model.language; }
+                            HubPill { caption: root.selected-model.state == "ready" ? "Установлено"
+                                : root.selected-model.state == "package-assets" ? "Окружение и файлы проверены"
+                                : root.selected-model.state == "package-only" ? "Окружение обнаружено"
+                                : root.selected-model.state == "assets-only" ? "Файлы проверены"
+                                : root.selected-model.state == "discovered" ? "Не установлено" : "Статус не проверен"; }
+                        }
+                        if root.selected-model.location != "": Rectangle { border-radius: 10px; border-width: 1px; border-color: Theme.border; background: Theme.hover; height: 66px;
+                            VerticalLayout { padding: 12px; spacing: 6px;
+                                Label { text: "Расположение на диске (типовой каталог)"; color: Theme.muted; font-size: 10px; }
+                                Label { text: root.selected-model.location; font-size: 12px; font-weight: 600; }
+                            }
+                        }
+                        if root.selection-missing || root.selection-changed: Rectangle {
+                            height: 54px;
+                            border-radius: 9px;
+                            border-width: 1px;
+                            border-color: Theme.warning.with-alpha(0.4);
+                            background: Theme.warning.with-alpha(0.08);
+                            VerticalLayout {
+                                padding-left: 12px; padding-right: 12px;
+                                alignment: center;
+                                Label {
+                                    text: root.selection-missing
+                                        ? "Модель отсутствует в обновлённом каталоге"
+                                        : "Модель изменилась после открытия формы";
+                                    color: Theme.warning; font-size: 12px; font-weight: 700;
+                                }
+                                Label {
+                                    text: "Черновик сохранён только в окне. Запись в Core заблокирована.";
+                                    color: Theme.muted; font-size: 11px;
+                                }
+                            }
+                        }
+                        if root.selected-model.category == "tts" || root.selected-model.category == "asr": HubAction {
+                            label: I18n.i18n("ai-hub.use-model", "Использовать выбранную модель");
+                            activated => { root.use-model-requested(root.selected-key); }
+                        }
+                        if root.selected-model.implementation == HubImplementation.rust: NativeRevisionPanel {
+                            height: 540px;
+                            model-filter-id: root.selected-model.id;
+                            model-filter-revision: root.selected-model.revision;
+                            model-service: root.selected-model.category;
+                            revisions: root.native-revisions;
+                            releases: root.native-releases;
+                            has-active: root.native-has-active;
+                            status: root.native-status;
+                            error: root.native-error;
+                            download-configured: root.native-download-configured;
+                            download-active: root.native-download-active;
+                            download-summary: root.native-download-summary;
+                            download-progress: root.native-download-progress;
+                            download-requested(id, sha, backend) => { root.native-download-requested(id, sha, backend); }
+                            cancel-download-requested => { root.native-cancel-download-requested(); }
+                            refresh-requested => { root.native-refresh-requested(); }
+                            select-requested(id, sha, backend) => { root.native-select-requested(id, sha, backend); }
+                            activate-requested(id, service, revision) => { root.native-activate-requested(id, service, revision); }
+                            stop-requested(service, id, revision) => { root.native-stop-requested(service, id, revision); }
+                        }
+                        if root.selected-model.implementation == HubImplementation.python: Rectangle {
+                            height: root.review-requested && root.install-preview.token == root.review-token
+                                && root.install-preview.category == root.selected-key.category
+                                && root.install-preview.id == root.selected-key.id ? 260px : 82px;
+                            border-radius: 10px; border-width: 1px; border-color: Theme.border;
+                            background: Theme.text.with-alpha(0.028);
+                            VerticalLayout {
+                                padding: 12px; spacing: 8px;
+                                HorizontalLayout { height: 34px; spacing: 12px;
+                                    VerticalLayout { alignment: center; horizontal-stretch: 1;
+                                        Label { text: "План установки"; font-size: 13px; font-weight: 700; }
+                                        Label { text: "Настройки по умолчанию · выполняется installplan.py"; font-size: 10px; color: Theme.muted; }
+                                    }
+                                    HubAction {
+                                        caption: "Проверить план"; compact: true;
+                                        enabled: !root.dirty && !root.selection-missing && !root.selection-changed;
+                                        activated => {
+                                            root.review-token += 1;
+                                            root.confirm-install = false;
+                                            root.install-submitted = false;
+                                            root.review-requested = true;
+                                            root.preview-install-requested(root.selected-key, root.review-token);
+                                        }
+                                    }
+                                }
+                                if root.review-requested: Text {
+                                    text: root.install-preview.token != root.review-token
+                                        ? "Получение реального плана через установленный Python SDK…"
+                                        : root.install-preview.error != "" ? root.install-preview.error : root.install-preview.summary;
+                                    color: root.install-preview.error != "" ? Theme.warning : Theme.muted;
+                                    font-size: 11px; wrap: word-wrap;
+                                    overflow: elide;
+                                    vertical-stretch: 1;
+                                }
+                                if root.review-requested && root.install-preview.token == root.review-token
+                                    && root.install-preview.category == root.selected-key.category
+                                    && root.install-preview.id == root.selected-key.id
+                                    && (root.install-preview.stage == "review" || root.install-preview.stage == "wheel-review") && root.install-preview.can-install && !root.install-submitted: HorizontalLayout {
+                                    height: 35px; spacing: 10px;
+                                    if !root.confirm-install: HubAction {
+                                        caption: root.install-preview.stage == "wheel-review" ? "Установить wheel" : "Установить overlay"; primary: true; compact: true;
+                                        activated => { root.confirm-install = true; }
+                                    }
+                                    if root.confirm-install: HubAction {
+                                        caption: "Подтвердить"; primary: true; compact: true;
+                                        activated => {
+                                            root.confirm-install = false;
+                                            root.install-submitted = true;
+                                            root.confirm-install-requested(root.selected-key, root.review-token);
+                                        }
+                                    }
+                                    if root.confirm-install: HubAction {
+                                        caption: "Отмена"; compact: true;
+                                        activated => { root.confirm-install = false; }
+                                    }
+                                    Text {
+                                        text: root.install-preview.stage == "wheel-review"
+                                            ? "Только один проверенный wheel-stage. Модель, зависимости и worker не устанавливаются."
+                                            : root.confirm-install
+                                                ? "Будет установлен только plugin overlay. Worker не запускается."
+                                                : "Только remote-api overlay без зависимостей, моделей и действий.";
+                                        font-size: 10px; color: Theme.muted; wrap: word-wrap;
+                                        horizontal-stretch: 1;
+                                    }
+                                }
+                            }
+                        }
+                        Label { text: "ПАРАМЕТРЫ"; color: Theme.accent-hover; font-size: 11px; font-weight: 750; }
+                        if root.selected-model.setting-one != "" && root.selected-model.setting-two != "": Rectangle { min-height: 152px; border-radius: 10px; border-width: 1px; border-color: Theme.border; background: Theme.text.with-alpha(0.028);
+                            VerticalLayout { padding: 15px; spacing: 12px;
+                                VerticalLayout { spacing: 5px;
+                                    Label { text: root.selected-model.setting-one; font-size: 12px; font-weight: 600; }
+                                    Rectangle { height: 36px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.background;
+                                        HorizontalLayout { padding-left: 12px; padding-right: 12px;
+                                            TextInput { text <=> root.field-one; single-line: true; color: Theme.text; font-size: 12px; vertical-alignment: center;
+                                                edited => { root.dirty = true; }
+                                            }
+                                        }
+                                    }
+                                }
+                                VerticalLayout { spacing: 5px;
+                                    Label { text: root.selected-model.setting-two; font-size: 12px; font-weight: 600; }
+                                    Rectangle { height: 36px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.background;
+                                        HorizontalLayout { padding-left: 12px; padding-right: 12px;
+                                            TextInput { text <=> root.field-two; single-line: true; color: Theme.text; font-size: 12px; vertical-alignment: center;
+                                                edited => { root.dirty = true; }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Text { text: root.selected-model.setting-one == "" ? "Параметры не загружены: модель обнаружена в каталоге, но схема настроек и сохранение ещё не подключены." : "Демонстрационная форма. Поля и валидаторы будут построены из settings_schema установленного плагина; сейчас значения не сохраняются.";
+                            color: Theme.muted; font-size: 11px; wrap: word-wrap;
+                        }
+                    }
+                }
+                HorizontalLayout { height: 42px; spacing: 10px;
+                    Label { text: root.dirty ? "Черновик изменён · не сохранён" : "Демо без подключения к каталогу"; color: Theme.muted; font-size: 11px; horizontal-stretch: 1; }
+                    HubAction { caption: "Сбросить"; enabled: root.selected-model.setting-one != ""; activated => { root.field-one = root.selected-model.setting-one-value; root.field-two = root.selected-model.setting-two-value; root.dirty = false; } }
+                    HubAction { caption: "Сохранить"; primary: true; enabled: false; }
+                }
+                if root.confirm-discard: Rectangle {
+                    height: 98px; border-radius: 10px; border-width: 1px; border-color: Theme.accent-border; background: Theme.accent.with-alpha(0.15);
+                    HorizontalLayout { padding: 14px; spacing: 16px;
+                        VerticalLayout { spacing: 4px; horizontal-stretch: 1; alignment: center;
+                            Label { text: "Отменить несохранённые изменения?"; font-size: 13px; font-weight: 700; }
+                            Label { text: "Черновик текущей модели будет сброшен."; font-size: 11px; color: Theme.muted; }
+                        }
+                        HubAction { caption: "Остаться"; activated => { root.confirm-discard = false; root.pending-category = ""; } }
+                        HubAction { caption: "Сбросить и выйти"; primary: true; activated => { root.discard-and-leave(); } }
+                    }
+                }
+            }
+        }
+        HorizontalLayout { height: 68px; spacing: 10px;
+            HubStat { caption: "Установлено"; value: "—"; hint: "Не подключено"; }
+            HubStat { caption: "GPU"; value: "—"; hint: "Проверка не запускалась"; }
+            HubStat { caption: "Свободно на диске"; value: "—"; hint: "Нет данных"; }
+            HubStat { caption: "Последняя проверка"; value: "—"; hint: "Статусы не получены"; }
+        }
+    }
+}

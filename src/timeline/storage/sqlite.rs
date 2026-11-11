@@ -6,11 +6,19 @@ use uuid::Uuid;
 use crate::identity::{CharacterId, EventId};
 use crate::timeline::domain::{
     AppendGuard, Branch, BranchId, BranchInfo, EventDraft, EventKind, KnownEvent, Receipt,
-    SessionId, TimelineError, TimelineFact, TimelineRepository, TimelineStore, WorldLookup,
+    SessionId, SessionProvenance, TimelineError, TimelineFact, TimelineRepository, TimelineStore,
+    WorldLookup,
 };
-use crate::timeline::selection::{TimelineSelection, TimelineSelectionRepository};
+use crate::timeline::selection::{
+    SessionWorkspace, TimelineSelection, TimelineSelectionRepository, TimelineTurn,
+};
+use crate::timeline::{KnowledgeDispatchSource, RegenerateAdmissionReceipt};
 
+mod backup;
+mod maintenance;
 mod native;
+pub use backup::{VerifiedTimelineBackup, VerifiedTimelineRestore};
+pub use maintenance::{DerivedIndexDrift, DerivedIndexPreview};
 use native::Connection;
 
 const SCHEMA: &str = "
@@ -20,6 +28,10 @@ CREATE TABLE IF NOT EXISTS timeline_revision(
     revision INTEGER NOT NULL CHECK(revision>=0)
 );
 INSERT OR IGNORE INTO timeline_revision(slot,revision) VALUES(1,0);
+CREATE TABLE IF NOT EXISTS timeline_session_provenance(
+    session_id TEXT PRIMARY KEY,
+    metadata_json TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS timeline_branches(
     branch_id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL,
@@ -30,6 +42,8 @@ CREATE TABLE IF NOT EXISTS timeline_branches(
 );
 CREATE UNIQUE INDEX IF NOT EXISTS timeline_session_roots
     ON timeline_branches(session_id) WHERE parent_id IS NULL;
+CREATE INDEX IF NOT EXISTS timeline_session_child_branches
+    ON timeline_branches(session_id,branch_id) WHERE parent_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS timeline_events(
     branch_id TEXT NOT NULL,
     sequence INTEGER NOT NULL,
@@ -37,6 +51,18 @@ CREATE TABLE IF NOT EXISTS timeline_events(
     PRIMARY KEY(branch_id, sequence),
     FOREIGN KEY(branch_id) REFERENCES timeline_branches(branch_id)
 );
+CREATE INDEX IF NOT EXISTS timeline_regenerate_events_by_request
+    ON timeline_events(branch_id, json_extract(fact_json,'$.draft.payload.request_id'), sequence)
+    WHERE json_extract(fact_json,'$.draft.payload.request_id') IS NOT NULL;
+CREATE INDEX IF NOT EXISTS timeline_regenerate_markers_by_character
+    ON timeline_events(json_extract(fact_json,'$.draft.payload.regenerate_admission.character'),branch_id,sequence)
+    WHERE json_extract(fact_json,'$.draft.payload.regenerate_admission.character') IS NOT NULL;
+CREATE INDEX IF NOT EXISTS timeline_regenerate_markers_by_request
+    ON timeline_events(json_extract(fact_json,'$.draft.payload.regenerate_admission.request'),branch_id,sequence)
+    WHERE json_extract(fact_json,'$.draft.payload.regenerate_admission.request') IS NOT NULL;
+CREATE INDEX IF NOT EXISTS timeline_same_branch_regenerate_by_request
+    ON timeline_events(json_extract(fact_json,'$.draft.payload.same_branch_regenerate_admission.request'),branch_id,sequence)
+    WHERE json_extract(fact_json,'$.draft.payload.same_branch_regenerate_admission.request') IS NOT NULL;
 CREATE TABLE IF NOT EXISTS timeline_observers(
     branch_id TEXT NOT NULL,
     sequence INTEGER NOT NULL,
@@ -80,6 +106,23 @@ CREATE TABLE IF NOT EXISTS timeline_resets(
 );
 CREATE INDEX IF NOT EXISTS timeline_resets_by_character
     ON timeline_resets(branch_id,character_id,sequence);
+CREATE TABLE IF NOT EXISTS timeline_knowledge_forgets(
+    branch_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    character_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    PRIMARY KEY(branch_id,sequence,character_id,event_id)
+);
+CREATE INDEX IF NOT EXISTS timeline_knowledge_forgets_by_event
+    ON timeline_knowledge_forgets(branch_id,character_id,event_id,sequence);
+CREATE TABLE IF NOT EXISTS timeline_knowledge_epochs(
+    branch_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    character_id TEXT NOT NULL,
+    PRIMARY KEY(branch_id,sequence,character_id)
+);
+CREATE INDEX IF NOT EXISTS timeline_knowledge_epochs_by_character
+    ON timeline_knowledge_epochs(branch_id,character_id,sequence);
 CREATE TABLE IF NOT EXISTS timeline_active_selection(
     slot TEXT PRIMARY KEY CHECK(slot='core'),
     branch_id TEXT NOT NULL,
@@ -87,6 +130,20 @@ CREATE TABLE IF NOT EXISTS timeline_active_selection(
     FOREIGN KEY(branch_id) REFERENCES timeline_branches(branch_id)
 );
 ";
+
+/// A canonical Timeline dispatch boundary. While held, SQLite's write reservation
+/// prevents *any* other SQLite connection from committing a visibility change,
+/// including connections that do not use our repository implementation.
+/// Cancellation and unwinding release the reservation through Drop.
+pub(crate) struct SqliteKnowledgeDispatchLease {
+    connection: Connection,
+}
+
+impl Drop for SqliteKnowledgeDispatchLease {
+    fn drop(&mut self) {
+        let _ = self.connection.exec("ROLLBACK");
+    }
+}
 
 fn storage(message: impl Into<String>) -> TimelineError {
     TimelineError::Storage(message.into())
@@ -108,6 +165,7 @@ fn encode<T: serde::Serialize>(value: &T) -> Result<String, TimelineError> {
 
 /// SQLite is a replaceable transaction owner, not a second implementation of timeline rules.
 /// SQLite sources are bundled through rusqlite when the sqlite-system feature is enabled.
+#[derive(Clone)]
 pub struct SqliteTimelineRepository {
     path: PathBuf,
 }
@@ -172,6 +230,248 @@ impl SqliteTimelineRepository {
         }
         result?;
         Ok(repo)
+    }
+
+    /// Explicitly reconstructs all read-only lookup tables from canonical Timeline facts.
+    /// Failure rolls back the whole rebuild, never replacing or rewriting the events,
+    /// receipts, branch selection or the logical Timeline revision.
+    pub fn rebuild_derived_indexes(&mut self) -> Result<(), TimelineError> {
+        let connection = self.connection()?;
+        connection.exec("BEGIN IMMEDIATE")?;
+        let result = maintenance::rebuild_in_transaction(&connection);
+        match result {
+            Ok(()) => connection.exec("COMMIT"),
+            Err(error) => {
+                connection.exec("ROLLBACK")?;
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) fn archive_snapshot(&self) -> Result<TimelineStore, TimelineError> {
+        self.read_snapshot(load)
+    }
+
+    /// Publish every new branch in the same SQLite transaction; a failed
+    /// validation or storage write leaves no partially restored session.
+    pub(crate) fn archive_install_with_provenance(
+        &mut self,
+        branches: Vec<Branch>,
+        provenance: Option<SessionProvenance>,
+    ) -> Result<(), TimelineError> {
+        let session = branches.first().map(|branch| branch.info.session_id);
+        let ids = branches
+            .iter()
+            .map(|branch| branch.info.id)
+            .collect::<Vec<_>>();
+        self.with_write(move |connection, store| {
+            store.install_archive_branches_with_provenance(branches, provenance)?;
+            for id in ids {
+                save_branch(connection, store, id)?;
+            }
+            if let Some(session) = session
+                && let Some(provenance) = store.session_provenance(session)
+            {
+                connection.write(
+                    "INSERT INTO timeline_session_provenance(session_id,metadata_json) VALUES(?,?)",
+                    &[&session.0.to_string(), &encode(provenance)?],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn fork_and_select_checkpoint(
+        &mut self,
+        parent: BranchId,
+        expected_parent_head: u64,
+        checkpoint: EventId,
+        child: BranchId,
+        expected: TimelineSelection,
+    ) -> Result<TimelineSelection, TimelineError> {
+        self.fork_and_select_anchor(
+            parent,
+            expected_parent_head,
+            checkpoint,
+            None,
+            child,
+            expected,
+            None,
+        )
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn fork_and_select_player_input(
+        &mut self,
+        parent: BranchId,
+        expected_parent_head: u64,
+        input: EventId,
+        character: CharacterId,
+        child: BranchId,
+        expected: TimelineSelection,
+    ) -> Result<TimelineSelection, TimelineError> {
+        self.fork_and_select_anchor(
+            parent,
+            expected_parent_head,
+            input,
+            Some(character),
+            child,
+            expected,
+            None,
+        )
+    }
+
+    pub(crate) fn fork_and_select_regenerate_input(
+        &mut self,
+        parent: BranchId,
+        expected_parent_head: u64,
+        input: EventId,
+        character: CharacterId,
+        child: BranchId,
+        expected: TimelineSelection,
+        receipt: &RegenerateAdmissionReceipt,
+    ) -> Result<TimelineSelection, TimelineError> {
+        self.fork_and_select_anchor(
+            parent,
+            expected_parent_head,
+            input,
+            Some(character),
+            child,
+            expected,
+            Some(receipt),
+        )
+    }
+
+    /// Fork, active selection and timeline revision commit in one SQLite
+    /// BEGIN IMMEDIATE transaction; even an injected selection failure rolls
+    /// back the new branch and its inherited prefix.
+    fn fork_and_select_anchor(
+        &mut self,
+        parent: BranchId,
+        expected_parent_head: u64,
+        anchor: EventId,
+        player_recipient: Option<CharacterId>,
+        child: BranchId,
+        expected: TimelineSelection,
+        admission: Option<&RegenerateAdmissionReceipt>,
+    ) -> Result<TimelineSelection, TimelineError> {
+        self.with_write(|connection, store| {
+            if expected.branch_id != parent || read_selection(connection)? != Some(expected) {
+                return Err(TimelineError::ConcurrentWrite);
+            }
+            if store.branch(parent)?.head_sequence != expected_parent_head {
+                return Err(TimelineError::ConcurrentWrite);
+            }
+            if store.branch(child).is_ok() {
+                return Err(TimelineError::Conflict);
+            }
+            match (player_recipient, admission) {
+                (Some(character), Some(receipt)) => {
+                    if receipt.parent_head != expected_parent_head
+                        || receipt.parent_generation != expected.generation
+                    {
+                        return Err(TimelineError::ConcurrentWrite);
+                    }
+                    store.fork_at_regenerate_input(parent, anchor, character, child, receipt)?
+                }
+                (Some(character), None) => {
+                    store.fork_at_player_input(parent, anchor, character, child)?
+                }
+                (None, None) => store.fork(parent, anchor, child)?,
+                (None, Some(_)) => {
+                    return Err(TimelineError::Invalid("regenerate requires player input"));
+                }
+            };
+            save_branch(connection, store, child)?;
+            select_branch_in_transaction(connection, child, Some(expected))
+        })
+    }
+
+    /// Validate the exact pinned view under the SAME SQLite reservation that
+    /// stays active until the provider operation has completed or been dropped.
+    /// A plain SELECT/re-read before an external await is not sufficient in WAL.
+    pub(crate) fn admit_knowledge_dispatch(
+        &self,
+        turn: TimelineTurn,
+        sources: &[KnowledgeDispatchSource],
+    ) -> Result<SqliteKnowledgeDispatchLease, TimelineError> {
+        let connection = Connection::open_existing(&self.path)?;
+        connection.exec("BEGIN IMMEDIATE")?;
+        let validation = (|| {
+            if read_selection(&connection)? != Some(turn.selection) {
+                return Err(TimelineError::ConcurrentWrite);
+            }
+            let store = load(&connection)?;
+            if store.branch(turn.selection.branch_id)?.head_sequence < turn.context_head {
+                return Err(TimelineError::ConcurrentWrite);
+            }
+            SessionWorkspace::from_selection(turn.selection).assert_current(&store, turn)?;
+            if !sources.is_empty() {
+                let needs_memories = sources
+                    .iter()
+                    .any(|source| matches!(source, KnowledgeDispatchSource::Memory(..)));
+                let needs_history = sources
+                    .iter()
+                    .any(|source| matches!(source, KnowledgeDispatchSource::History(..)));
+                let memories = if needs_memories {
+                    crate::character::projection::character_memories_at(
+                        &store.world(turn.selection.branch_id)?,
+                        turn.character,
+                    )?
+                    .all()
+                } else {
+                    Vec::new()
+                };
+                let history = if needs_history {
+                    let world = store.world(turn.selection.branch_id)?;
+                    let head = store.branch(turn.selection.branch_id)?.head_sequence;
+                    crate::timeline::view::MitaView::from_facts(
+                        turn.selection.branch_id,
+                        head,
+                        turn.character,
+                        &world,
+                    )
+                    .messages()
+                } else {
+                    Vec::new()
+                };
+                for source in sources {
+                    let admitted = match source {
+                        KnowledgeDispatchSource::Memory(id, content) => {
+                            memories.iter().any(|record| {
+                                record.id == *id
+                                    && record.content == *content
+                                    && record.state == crate::memory::MemoryState::Active
+                                    && matches!(
+                                        record.kind,
+                                        crate::memory::MemoryKind::Fact
+                                            | crate::memory::MemoryKind::RagOnly
+                                    )
+                            })
+                        }
+                        KnowledgeDispatchSource::History(id, content) => {
+                            history.iter().any(|message| {
+                                message.event_id == *id
+                                    && !content.is_empty()
+                                    && message.content.starts_with(content)
+                            })
+                        }
+                    };
+                    if !admitted {
+                        return Err(TimelineError::ConcurrentWrite);
+                    }
+                }
+            }
+            Ok(())
+        })();
+        match validation {
+            Ok(()) => Ok(SqliteKnowledgeDispatchLease { connection }),
+            Err(error) => {
+                let _ = connection.exec("ROLLBACK");
+                Err(error)
+            }
+        }
     }
 
     fn connection(&self) -> Result<Connection, TimelineError> {
@@ -281,7 +581,17 @@ fn load(connection: &Connection) -> Result<TimelineStore, TimelineError> {
         }
         branches.push(Branch { info, events, receipts });
     }
-    TimelineStore::load_persisted(branches)
+    let mut provenance = Vec::new();
+    for row in connection.query(
+        "SELECT session_id,metadata_json FROM timeline_session_provenance",
+        &[],
+    )? {
+        provenance.push((
+            SessionId(parse_uuid(&row[0])?),
+            decode::<SessionProvenance>(&row[1])?,
+        ));
+    }
+    TimelineStore::load_persisted_with_provenance(branches, provenance)
 }
 
 /// Materialized *facts*, not domain decisions. These indexes are derived from
@@ -305,8 +615,19 @@ fn index_fact(conn: &Connection, fact: &TimelineFact) -> Result<(), TimelineErro
                 &[&branch, &sequence, &character],
             )?;
         }
-        {
-            let acquired = change.acquired;
+        if !change.forgotten.is_empty() || !change.revealed.is_empty() {
+            conn.write(
+                "INSERT INTO timeline_knowledge_epochs(branch_id,sequence,character_id) VALUES(?,?,?)",
+                &[&branch, &sequence, &character],
+            )?;
+        }
+        for forgotten in change.forgotten {
+            conn.write(
+                "INSERT INTO timeline_knowledge_forgets(branch_id,sequence,character_id,event_id) VALUES(?,?,?,?)",
+                &[&branch, &sequence, &character, &forgotten.0.to_string()],
+            )?;
+        }
+        for acquired in std::iter::once(change.acquired).chain(change.revealed) {
             conn.write(
                 "INSERT INTO timeline_acquisitions(branch_id,sequence,character_id,event_id) VALUES(?,?,?,?)",
                 &[&branch, &sequence, &character, &acquired.0.to_string()],
@@ -368,9 +689,42 @@ impl<'a> IndexedWorld<'a> {
     }
 
     fn latest_reset(&self, character: CharacterId) -> Result<u64, TimelineError> {
-        Ok(self
-            .max_position("timeline_resets", character, None)?
-            .unwrap_or(0))
+        let reset = self.max_position("timeline_resets", character, None)?;
+        let mut changed = None;
+        for (branch, cutoff) in &self.lineage {
+            let rows = self.connection.query(
+                "SELECT max(sequence) FROM timeline_knowledge_epochs WHERE branch_id=? AND character_id=? AND sequence<=?",
+                &[&branch.0.to_string(), &character.to_string(), &cutoff.to_string()],
+            )?;
+            if let Some(row) = rows.first()
+                && !row[0].is_empty()
+            {
+                let position = parse_u64(&row[0])?;
+                changed = Some(changed.map_or(position, |previous: u64| previous.max(position)));
+            }
+        }
+        Ok(reset.unwrap_or(0).max(changed.unwrap_or(0)))
+    }
+
+    fn max_forget(
+        &self,
+        character: CharacterId,
+        event: EventId,
+    ) -> Result<Option<u64>, TimelineError> {
+        let mut maximum = None;
+        for (branch, cutoff) in &self.lineage {
+            let rows = self.connection.query(
+                "SELECT max(sequence) FROM timeline_knowledge_forgets WHERE branch_id=? AND character_id=? AND event_id=? AND sequence<=?",
+                &[&branch.0.to_string(), &character.to_string(), &event.0.to_string(), &cutoff.to_string()],
+            )?;
+            if let Some(row) = rows.first()
+                && !row[0].is_empty()
+            {
+                let position = parse_u64(&row[0])?;
+                maximum = Some(maximum.map_or(position, |previous: u64| previous.max(position)));
+            }
+        }
+        Ok(maximum)
     }
 
     fn max_position(
@@ -460,7 +814,11 @@ impl WorldLookup for IndexedWorld<'_> {
     fn knows(&self, character: CharacterId, event: EventId) -> Result<bool, TimelineError> {
         let acquired = self.max_position("timeline_acquisitions", character, Some(event))?;
         let reset = self.max_position("timeline_resets", character, None)?;
-        Ok(acquired.is_some_and(|position| reset.is_none_or(|reset| position >= reset)))
+        let forgotten = self.max_forget(character, event)?;
+        Ok(acquired.is_some_and(|position| {
+            reset.is_none_or(|reset| position >= reset)
+                && forgotten.is_none_or(|forgotten| position > forgotten)
+        }))
     }
 }
 
@@ -704,6 +1062,38 @@ impl SqliteTimelineRepository {
             if info.head_sequence != expected_head {
                 return Err(TimelineError::ConcurrentWrite);
             }
+            if let Some(marker) = drafts
+                .iter()
+                .find(|draft| draft.kind == EventKind::RegenerateAdmitted)
+            {
+                let admitted =
+                    crate::timeline::regenerate_receipt::SameBranchRegenerateReceipt::from_fact(
+                        marker,
+                    )?;
+                let session_id = info.session_id.0.to_string();
+                let request = admitted.request.0.to_string();
+                let existing = connection.query(
+                    "SELECT 1 FROM timeline_events e JOIN timeline_branches b ON b.branch_id=e.branch_id WHERE b.session_id=? AND (json_extract(e.fact_json,'$.draft.payload.same_branch_regenerate_admission.request')=? OR json_extract(e.fact_json,'$.draft.payload.regenerate_admission.request')=?) LIMIT 1",
+                    &[&session_id, &request, &request],
+                )?;
+                if !existing.is_empty() {
+                    return Err(TimelineError::Conflict);
+                }
+            }
+            if drafts.iter().any(|draft| {
+                matches!(
+                    draft.kind,
+                    EventKind::RegenerateAdmitted
+                        | EventKind::RegenerateAbandoned
+                        | EventKind::RegenerateMayHaveDispatched
+                ) || (draft.kind == EventKind::CharacterMessage
+                    && draft.payload.contains_key("request_id"))
+            }) {
+                let existing = read_page(&connection, branch, 0, None, i64::MAX as usize, None)?;
+                crate::timeline::domain::validate_regenerate_transition(
+                    branch, &existing, &drafts,
+                )?;
+            }
             let world = IndexedWorld::new(&connection, branch)?;
             let facts = TimelineStore::validate_batch(info, expected_head, &drafts, &world)?;
             let receipt = Receipt::new(command, drafts, facts.clone());
@@ -747,6 +1137,137 @@ impl TimelineRepository for SqliteTimelineRepository {
     }
     fn branch(&self, id: BranchId) -> Result<BranchInfo, TimelineError> {
         branch_info(&self.connection()?, id)
+    }
+    fn regenerate_admission_branches(
+        &self,
+        session: SessionId,
+        character: CharacterId,
+    ) -> Result<Vec<BranchId>, TimelineError> {
+        self.read_snapshot(|connection| {
+            let rows = connection.query(
+                "SELECT b.branch_id,e.fact_json FROM timeline_branches b JOIN timeline_events e ON e.branch_id=b.branch_id AND e.sequence=b.fork_sequence+1 WHERE b.session_id=? AND b.parent_id IS NOT NULL ORDER BY b.branch_id",
+                &[&session.0.to_string()],
+            )?;
+            let mut result = Vec::new();
+            for row in rows {
+                let branch = BranchId(parse_uuid(&row[0])?);
+                let marker: TimelineFact = decode(&row[1])?;
+                if marker.branch_id != branch || marker.draft.kind != EventKind::BranchCreated {
+                    return Err(TimelineError::Invalid("invalid fork marker"));
+                }
+                if let Some(receipt) = RegenerateAdmissionReceipt::from_marker(&marker.draft.payload)?
+                    && receipt.character == character
+                {
+                    result.push(branch);
+                }
+            }
+            Ok(result)
+        })
+    }
+    fn regenerate_admission_branches_page(
+        &self,
+        session: SessionId,
+        character: CharacterId,
+        after: Option<BranchId>,
+        limit: usize,
+    ) -> Result<Vec<BranchId>, TimelineError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        self.read_snapshot(|connection| {
+            let rows = connection.query(
+                "SELECT e.branch_id,e.fact_json FROM timeline_events e INDEXED BY timeline_regenerate_markers_by_character JOIN timeline_branches b ON b.branch_id=e.branch_id WHERE json_extract(e.fact_json,'$.draft.payload.regenerate_admission.character')=? AND json_extract(e.fact_json,'$.draft.payload.regenerate_admission.character') IS NOT NULL AND e.branch_id>? AND b.session_id=? AND b.parent_id IS NOT NULL AND e.sequence=b.fork_sequence+1 ORDER BY e.branch_id LIMIT ?",
+                &[character.as_str(), &after.map_or_else(String::new, |branch| branch.0.to_string()), &session.0.to_string(), &limit.to_string()],
+            )?;
+            rows.into_iter().map(|row| {
+                let branch = BranchId(parse_uuid(&row[0])?);
+                let marker: TimelineFact = decode(&row[1])?;
+                if marker.branch_id != branch || marker.draft.kind != EventKind::BranchCreated {
+                    return Err(TimelineError::Invalid("invalid indexed admission marker"));
+                }
+                let receipt = RegenerateAdmissionReceipt::from_marker(&marker.draft.payload)?
+                    .ok_or(TimelineError::Invalid("missing indexed regenerate receipt"))?;
+                if receipt.character != character || receipt.child_branch != branch {
+                    return Err(TimelineError::Invalid("indexed admission identity mismatch"));
+                }
+                Ok(branch)
+            }).collect()
+        })
+    }
+    fn regenerate_admission_request_duplicate(
+        &self,
+        session: SessionId,
+        child: BranchId,
+        request: Uuid,
+    ) -> Result<bool, TimelineError> {
+        self.read_snapshot(|connection| {
+            let rows = connection.query(
+                "SELECT e.branch_id FROM timeline_events e INDEXED BY timeline_regenerate_markers_by_request JOIN timeline_branches b ON b.branch_id=e.branch_id WHERE json_extract(e.fact_json,'$.draft.payload.regenerate_admission.request')=? AND json_extract(e.fact_json,'$.draft.payload.regenerate_admission.request') IS NOT NULL AND b.session_id=? AND b.parent_id IS NOT NULL AND e.sequence=b.fork_sequence+1 AND e.branch_id<>? LIMIT 1",
+                &[&request.to_string(), &session.0.to_string(), &child.0.to_string()],
+            )?;
+            Ok(!rows.is_empty())
+        })
+    }
+    fn accepted_reply_at(
+        &self,
+        branch: BranchId,
+        character: CharacterId,
+        request: Uuid,
+        through: Option<u64>,
+    ) -> Result<Option<TimelineFact>, TimelineError> {
+        self.read_snapshot(|connection| {
+            let lineage = IndexedWorld::through(connection, branch, through)?;
+            let mut accepted = None;
+            for (local_branch, ceiling) in lineage.lineage.iter().rev() {
+                let historical_ceiling = (*ceiling).min(through.unwrap_or(u64::MAX));
+                let rows = connection.query(
+                    "SELECT fact_json FROM timeline_events WHERE branch_id=? AND json_extract(fact_json,'$.draft.payload.request_id')=? AND json_extract(fact_json,'$.draft.payload.request_id') IS NOT NULL AND sequence<=? ORDER BY sequence",
+                    &[
+                        &local_branch.0.to_string(),
+                        &request.to_string(),
+                        &historical_ceiling.to_string(),
+                    ],
+                )?;
+                for row in rows {
+                    let fact: TimelineFact = decode(&row[0])?;
+                    if crate::timeline::domain::accepted_reply_request(&fact, character)
+                        == Some(request)
+                    {
+                        if accepted.replace(fact).is_some() {
+                            return Err(TimelineError::Conflict);
+                        }
+                    }
+                }
+            }
+            Ok(accepted)
+        })
+    }
+    fn regenerate_request_facts(
+        &self,
+        branch: BranchId,
+        request: Uuid,
+    ) -> Result<Vec<TimelineFact>, TimelineError> {
+        self.read_snapshot(|connection| {
+            let info = branch_info(connection, branch)?;
+            let rows = connection.query(
+                "SELECT fact_json FROM timeline_events WHERE branch_id=? AND json_extract(fact_json,'$.draft.payload.request_id')=? AND json_extract(fact_json,'$.draft.payload.request_id') IS NOT NULL ORDER BY sequence",
+                &[&branch.0.to_string(), &request.to_string()],
+            )?;
+            rows.into_iter()
+                .map(|row| {
+                    let fact: TimelineFact = decode(&row[0])?;
+                    if fact.branch_id != branch || fact.sequence > info.head_sequence {
+                        return Err(TimelineError::Invalid(
+                            "indexed regenerate fact is outside admitted branch",
+                        ));
+                    }
+                    Ok(fact)
+                })
+                .collect()
+        })
+    }
+    fn enumeration_revision(&self) -> Result<Option<u64>, TimelineError> {
+        self.read_snapshot(revision).map(Some)
     }
     fn world(&self, id: BranchId) -> Result<Vec<TimelineFact>, TimelineError> {
         let connection = self.connection()?;
@@ -818,6 +1339,33 @@ impl TimelineRepository for SqliteTimelineRepository {
             Ok(info)
         })
     }
+    fn fork_at_player_input(
+        &mut self,
+        parent: BranchId,
+        input: EventId,
+        character: CharacterId,
+        child: BranchId,
+    ) -> Result<BranchInfo, TimelineError> {
+        self.with_write(|connection, store| {
+            let info = store.fork_at_player_input(parent, input, character, child)?;
+            save_branch(connection, store, child)?;
+            Ok(info)
+        })
+    }
+    fn fork_at_regenerate_input(
+        &mut self,
+        parent: BranchId,
+        input: EventId,
+        character: CharacterId,
+        child: BranchId,
+        receipt: &RegenerateAdmissionReceipt,
+    ) -> Result<BranchInfo, TimelineError> {
+        self.with_write(|connection, store| {
+            let info = store.fork_at_regenerate_input(parent, input, character, child, receipt)?;
+            save_branch(connection, store, child)?;
+            Ok(info)
+        })
+    }
     fn view(
         &self,
         branch: BranchId,
@@ -859,6 +1407,30 @@ fn read_selection(connection: &Connection) -> Result<Option<TimelineSelection>, 
     }
 }
 
+fn select_branch_in_transaction(
+    connection: &Connection,
+    branch: BranchId,
+    expected: Option<TimelineSelection>,
+) -> Result<TimelineSelection, TimelineError> {
+    branch_info(connection, branch)?;
+    let current = read_selection(connection)?;
+    if current != expected {
+        return Err(TimelineError::ConcurrentWrite);
+    }
+    let generation = current
+        .map_or(Some(1), |value| value.generation.checked_add(1))
+        .filter(|value| *value <= i64::MAX as u64)
+        .ok_or(TimelineError::Invalid("selection generation overflow"))?;
+    connection.write(
+        "INSERT INTO timeline_active_selection(slot,branch_id,generation) VALUES('core', ?, ?) ON CONFLICT(slot) DO UPDATE SET branch_id=excluded.branch_id,generation=excluded.generation",
+        &[&branch.0.to_string(), &generation.to_string()],
+    )?;
+    Ok(TimelineSelection {
+        branch_id: branch,
+        generation,
+    })
+}
+
 impl TimelineSelectionRepository for SqliteTimelineRepository {
     fn selection(&self) -> Result<Option<TimelineSelection>, TimelineError> {
         read_selection(&self.connection()?)
@@ -871,25 +1443,7 @@ impl TimelineSelectionRepository for SqliteTimelineRepository {
     ) -> Result<TimelineSelection, TimelineError> {
         let connection = self.connection()?;
         connection.exec("BEGIN IMMEDIATE")?;
-        let result = (|| {
-            branch_info(&connection, branch)?;
-            let current = read_selection(&connection)?;
-            if current != expected {
-                return Err(TimelineError::ConcurrentWrite);
-            }
-            let generation = current
-                .map_or(Some(1), |value| value.generation.checked_add(1))
-                .filter(|value| *value <= i64::MAX as u64)
-                .ok_or(TimelineError::Invalid("selection generation overflow"))?;
-            connection.write(
-                "INSERT INTO timeline_active_selection(slot,branch_id,generation) VALUES('core', ?, ?) ON CONFLICT(slot) DO UPDATE SET branch_id=excluded.branch_id,generation=excluded.generation",
-                &[&branch.0.to_string(), &generation.to_string()],
-            )?;
-            Ok(TimelineSelection {
-                branch_id: branch,
-                generation,
-            })
-        })();
+        let result = select_branch_in_transaction(&connection, branch, expected);
         if result.is_ok() {
             connection.exec("COMMIT")?;
         } else {
@@ -919,6 +1473,767 @@ mod tests {
                 let _ = std::fs::remove_file(format!("{}{}", self.0.display(), suffix));
             }
         }
+    }
+
+    #[test]
+    fn dispatch_reservation_blocks_independent_sqlite_writer_until_release() {
+        use crate::timeline::selection::{SessionWorkspace, TimelineSelectionRepository};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let path = TestDb::new();
+        let mut owner = SqliteTimelineRepository::open(&path.0).unwrap();
+        let session = SessionId::new();
+        let branch = BranchId::new();
+        owner.create_session(session, branch).unwrap();
+        let selected = owner.select_branch(branch, None).unwrap();
+        let turn = SessionWorkspace::from_selection(selected)
+            .capture(&owner, CharacterId::Crazy, None)
+            .unwrap();
+        let mut foreign = SqliteTimelineRepository::open(&path.0).unwrap();
+        let lease = owner.admit_knowledge_dispatch(turn, &[]).unwrap();
+        let (started, entered) = mpsc::channel();
+        let (finished, completed) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            let result = foreign.select_branch(branch, Some(selected));
+            finished.send(result).unwrap();
+        });
+        entered.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(matches!(
+            completed.recv_timeout(Duration::from_millis(150)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        drop(lease);
+        let next = completed
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap()
+            .unwrap();
+        handle.join().unwrap();
+        assert!(next.generation > selected.generation);
+        assert!(matches!(
+            owner.admit_knowledge_dispatch(turn, &[]),
+            Err(TimelineError::ConcurrentWrite)
+        ));
+    }
+
+    #[test]
+    fn foreign_selection_before_dispatch_is_rejected_at_sqlite_boundary() {
+        use crate::timeline::selection::{SessionWorkspace, TimelineSelectionRepository};
+
+        let path = TestDb::new();
+        let mut owner = SqliteTimelineRepository::open(&path.0).unwrap();
+        let branch = BranchId::new();
+        owner.create_session(SessionId::new(), branch).unwrap();
+        let selected = owner.select_branch(branch, None).unwrap();
+        let turn = SessionWorkspace::from_selection(selected)
+            .capture(&owner, CharacterId::Crazy, None)
+            .unwrap();
+        let mut foreign = SqliteTimelineRepository::open(&path.0).unwrap();
+        foreign.select_branch(branch, Some(selected)).unwrap();
+        assert!(matches!(
+            owner.admit_knowledge_dispatch(turn, &[]),
+            Err(TimelineError::ConcurrentWrite)
+        ));
+    }
+
+    #[test]
+    fn stale_memory_payload_cannot_enter_provider_after_foreign_delete() {
+        use crate::memory::{MemoryChange, MemoryId, MemoryPriority, MemoryRecord};
+        use crate::timeline::KnowledgeDispatchSource;
+        use crate::timeline::selection::{SessionWorkspace, TimelineSelectionRepository};
+
+        let path = TestDb::new();
+        let mut owner = SqliteTimelineRepository::open(&path.0).unwrap();
+        let branch = BranchId::new();
+        owner.create_session(SessionId::new(), branch).unwrap();
+        let selected = owner.select_branch(branch, None).unwrap();
+        let id = MemoryId::new();
+        let mut initial = EventDraft::new(EventKind::CharacterMemoryChanged);
+        initial.actor = Some(CharacterId::Crazy.to_string());
+        initial.observers.insert(CharacterId::Crazy);
+        initial.payload.insert(
+            "change".into(),
+            json!(MemoryChange::Upsert(MemoryRecord::fact(
+                id,
+                MemoryPriority::High,
+                "private text"
+            ))),
+        );
+        owner
+            .append(branch, 0, "first-memory", json!({}), vec![initial])
+            .unwrap();
+        let turn = SessionWorkspace::from_selection(selected)
+            .capture(&owner, CharacterId::Crazy, None)
+            .unwrap();
+        let evidence = [KnowledgeDispatchSource::Memory(
+            id,
+            "private text".to_owned(),
+        )];
+        drop(owner.admit_knowledge_dispatch(turn, &evidence).unwrap());
+
+        let mut foreign = SqliteTimelineRepository::open(&path.0).unwrap();
+        let mut deletion = EventDraft::new(EventKind::CharacterMemoryChanged);
+        deletion.actor = Some(CharacterId::Crazy.to_string());
+        deletion.observers.insert(CharacterId::Crazy);
+        deletion
+            .payload
+            .insert("change".into(), json!(MemoryChange::Delete(id)));
+        foreign
+            .append(branch, 1, "delete-memory", json!({}), vec![deletion])
+            .unwrap();
+        assert!(matches!(
+            owner.admit_knowledge_dispatch(turn, &evidence),
+            Err(TimelineError::ConcurrentWrite)
+        ));
+    }
+
+    #[test]
+    fn forged_document_text_is_rejected_under_same_sqlite_reservation() {
+        use crate::memory::{MemoryChange, MemoryId, MemoryPriority, MemoryRecord};
+        use crate::timeline::KnowledgeDispatchSource;
+        use crate::timeline::selection::{SessionWorkspace, TimelineSelectionRepository};
+
+        let path = TestDb::new();
+        let mut owner = SqliteTimelineRepository::open(&path.0).unwrap();
+        let branch = BranchId::new();
+        owner.create_session(SessionId::new(), branch).unwrap();
+        let selected = owner.select_branch(branch, None).unwrap();
+        let id = MemoryId::new();
+        let mut initial = EventDraft::new(EventKind::CharacterMemoryChanged);
+        initial.actor = Some(CharacterId::Crazy.to_string());
+        initial.observers.insert(CharacterId::Crazy);
+        initial.payload.insert(
+            "change".into(),
+            json!(MemoryChange::Upsert(MemoryRecord::fact(
+                id,
+                MemoryPriority::High,
+                "authorized"
+            ))),
+        );
+        owner
+            .append(branch, 0, "memory", json!({}), vec![initial])
+            .unwrap();
+        let turn = SessionWorkspace::from_selection(selected)
+            .capture(&owner, CharacterId::Crazy, None)
+            .unwrap();
+        let forged = [KnowledgeDispatchSource::Memory(
+            id,
+            "unauthorized".to_owned(),
+        )];
+        assert!(matches!(
+            owner.admit_knowledge_dispatch(turn, &forged),
+            Err(TimelineError::ConcurrentWrite)
+        ));
+    }
+
+    fn memory_draft(content: &str) -> EventDraft {
+        use crate::memory::{MemoryChange, MemoryId, MemoryPriority, MemoryRecord};
+
+        let mut draft = EventDraft::new(EventKind::CharacterMemoryChanged);
+        draft.actor = Some(CharacterId::Crazy.to_string());
+        draft.observers.insert(CharacterId::Crazy);
+        draft.payload.insert(
+            "change".into(),
+            json!(MemoryChange::Upsert(MemoryRecord::fact(
+                MemoryId::new(),
+                MemoryPriority::High,
+                content,
+            ))),
+        );
+        draft
+    }
+
+    fn checkpoint() -> EventDraft {
+        let mut draft = EventDraft::new(EventKind::Checkpoint);
+        draft.payload.insert("snapshot".into(), json!({}));
+        draft
+    }
+
+    #[test]
+    fn malformed_persisted_memory_blocks_new_memory_writes_until_repaired() {
+        let db = TestDb::new();
+        let mut repo = SqliteTimelineRepository::open(&db.0).unwrap();
+        let branch = BranchId::new();
+        repo.create_session(SessionId::new(), branch).unwrap();
+        let original = repo
+            .append(
+                branch,
+                0,
+                "original-memory",
+                json!({}),
+                vec![memory_draft("Original fact")],
+            )
+            .unwrap();
+        let original_json = encode(&original[0]).unwrap();
+        let mut malformed = serde_json::to_value(&original[0]).unwrap();
+        malformed["draft"]["payload"]["change"]["value"]["content"] = json!(" ");
+        let malformed_json = encode(&malformed).unwrap();
+        let conn = Connection::open(&db.0).unwrap();
+        conn.write(
+            "UPDATE timeline_events SET fact_json=? WHERE branch_id=? AND sequence=1",
+            &[&malformed_json, &branch.0.to_string()],
+        )
+        .unwrap();
+
+        drop(repo);
+        let mut repo = SqliteTimelineRepository::open(&db.0).unwrap();
+        let proposed = memory_draft("Second fact");
+        let before_revision = revision(&conn).unwrap();
+        assert_eq!(
+            repo.append(
+                branch,
+                1,
+                "second-memory",
+                json!({}),
+                vec![proposed.clone()],
+            ),
+            Err(TimelineError::Invalid("invalid memory record"))
+        );
+        assert_eq!(repo.branch(branch).unwrap().head_sequence, 1);
+        assert_eq!(revision(&conn).unwrap(), before_revision);
+        assert_eq!(
+            conn.query(
+                "SELECT 1 FROM timeline_receipts WHERE branch_id=? AND operation_key=?",
+                &[&branch.0.to_string(), "second-memory"],
+            )
+            .unwrap()
+            .len(),
+            0
+        );
+
+        conn.write(
+            "UPDATE timeline_events SET fact_json=? WHERE branch_id=? AND sequence=1",
+            &[&original_json, &branch.0.to_string()],
+        )
+        .unwrap();
+        assert_eq!(
+            repo.append(branch, 1, "second-memory", json!({}), vec![proposed],)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(repo.world(branch).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn invalid_second_memory_change_rolls_back_entire_batch_and_allows_retry() {
+        let db = TestDb::new();
+        let mut repo = SqliteTimelineRepository::open(&db.0).unwrap();
+        let branch = BranchId::new();
+        repo.create_session(SessionId::new(), branch).unwrap();
+        let valid = memory_draft("Valid fact");
+        let invalid = memory_draft(" ");
+        let conn = Connection::open(&db.0).unwrap();
+        let before_revision = revision(&conn).unwrap();
+        assert_eq!(
+            repo.append(
+                branch,
+                0,
+                "batched-memory",
+                json!({}),
+                vec![valid.clone(), invalid],
+            ),
+            Err(TimelineError::Invalid("invalid memory record"))
+        );
+        assert_eq!(repo.branch(branch).unwrap().head_sequence, 0);
+        assert!(repo.world(branch).unwrap().is_empty());
+        assert_eq!(revision(&conn).unwrap(), before_revision);
+        assert!(
+            conn.query("SELECT 1 FROM timeline_receipts", &[])
+                .unwrap()
+                .is_empty()
+        );
+
+        let committed = repo
+            .append(
+                branch,
+                0,
+                "batched-memory",
+                json!({}),
+                vec![valid, memory_draft("Another valid fact")],
+            )
+            .unwrap();
+        assert_eq!(committed.len(), 2);
+        assert_eq!(repo.branch(branch).unwrap().head_sequence, 2);
+        drop(repo);
+        assert_eq!(
+            SqliteTimelineRepository::open(&db.0)
+                .unwrap()
+                .world(branch)
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn second_sqlite_insert_failure_rolls_back_memory_and_variables_together() {
+        let db = TestDb::new();
+        let mut repo = SqliteTimelineRepository::open(&db.0).unwrap();
+        let branch = BranchId::new();
+        repo.create_session(SessionId::new(), branch).unwrap();
+        let memory = memory_draft("Durable memory");
+        let mut variables = EventDraft::new(EventKind::CharacterVariablesChanged);
+        variables.actor = Some(CharacterId::Crazy.to_string());
+        variables.observers.insert(CharacterId::Crazy);
+        variables
+            .payload
+            .insert("variables".into(), json!({"user_locale": "ru"}));
+
+        let conn = Connection::open(&db.0).unwrap();
+        let before_revision = revision(&conn).unwrap();
+        conn.exec(
+            "CREATE TRIGGER deny_second_portable_event \
+             BEFORE INSERT ON timeline_events \
+             WHEN NEW.sequence = 2 \
+             BEGIN SELECT RAISE(ABORT, 'injected portable second insert failure'); END",
+        )
+        .unwrap();
+        assert!(matches!(
+            repo.append(
+                branch,
+                0,
+                "portable-atomic-retry",
+                json!({}),
+                vec![memory.clone(), variables.clone()]
+            ),
+            Err(TimelineError::Storage(_))
+        ));
+        assert_eq!(repo.branch(branch).unwrap().head_sequence, 0);
+        assert!(repo.world(branch).unwrap().is_empty());
+        assert_eq!(revision(&conn).unwrap(), before_revision);
+        assert!(
+            conn.query("SELECT 1 FROM timeline_events", &[])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            conn.query("SELECT 1 FROM timeline_receipts", &[])
+                .unwrap()
+                .is_empty()
+        );
+
+        conn.exec("DROP TRIGGER deny_second_portable_event")
+            .unwrap();
+        let committed = repo
+            .append(
+                branch,
+                0,
+                "portable-atomic-retry",
+                json!({}),
+                vec![memory, variables],
+            )
+            .unwrap();
+        assert_eq!(committed.len(), 2);
+        assert_eq!(committed[0].draft.kind, EventKind::CharacterMemoryChanged);
+        assert_eq!(
+            committed[1].draft.kind,
+            EventKind::CharacterVariablesChanged
+        );
+        drop(repo);
+        let reopened = SqliteTimelineRepository::open(&db.0).unwrap();
+        assert_eq!(reopened.branch(branch).unwrap().head_sequence, 2);
+        assert_eq!(reopened.world(branch).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn receipt_write_failure_rolls_back_all_portable_facts_indexes_and_head() {
+        let db = TestDb::new();
+        let mut repo = SqliteTimelineRepository::open(&db.0).unwrap();
+        let branch = BranchId::new();
+        repo.create_session(SessionId::new(), branch).unwrap();
+        let memory = memory_draft("Fact before failed receipt");
+        let mut variables = EventDraft::new(EventKind::CharacterVariablesChanged);
+        variables.actor = Some(CharacterId::Crazy.to_string());
+        variables.observers.insert(CharacterId::Crazy);
+        variables
+            .payload
+            .insert("variables".into(), json!({"user_locale": "ru"}));
+
+        let conn = Connection::open(&db.0).unwrap();
+        let before_revision = revision(&conn).unwrap();
+        conn.exec(
+            "CREATE TRIGGER reject_portable_receipt \
+             BEFORE INSERT ON timeline_receipts \
+             WHEN NEW.operation_key = 'portable-receipt-retry' \
+             BEGIN SELECT RAISE(ABORT, 'injected receipt failure'); END",
+        )
+        .unwrap();
+        assert!(matches!(
+            repo.append(
+                branch,
+                0,
+                "portable-receipt-retry",
+                json!({}),
+                vec![memory.clone(), variables.clone()],
+            ),
+            Err(TimelineError::Storage(_))
+        ));
+        assert_eq!(repo.branch(branch).unwrap().head_sequence, 0);
+        assert!(repo.world(branch).unwrap().is_empty());
+        assert_eq!(revision(&conn).unwrap(), before_revision);
+        for table in [
+            "timeline_events",
+            "timeline_fact_keys",
+            "timeline_observers",
+            "timeline_acquisitions",
+            "timeline_receipts",
+        ] {
+            assert!(
+                conn.query(&format!("SELECT 1 FROM {table}"), &[])
+                    .unwrap()
+                    .is_empty(),
+                "{table} was not rolled back"
+            );
+        }
+        drop(repo);
+        assert_eq!(
+            SqliteTimelineRepository::open(&db.0)
+                .unwrap()
+                .branch(branch)
+                .unwrap()
+                .head_sequence,
+            0
+        );
+        conn.exec("DROP TRIGGER reject_portable_receipt").unwrap();
+        let mut reopened = SqliteTimelineRepository::open(&db.0).unwrap();
+        let committed = reopened
+            .append(
+                branch,
+                0,
+                "portable-receipt-retry",
+                json!({}),
+                vec![memory, variables],
+            )
+            .unwrap();
+        assert_eq!(committed.len(), 2);
+        assert_eq!(reopened.branch(branch).unwrap().head_sequence, 2);
+        drop(reopened);
+        let final_repo = SqliteTimelineRepository::open(&db.0).unwrap();
+        assert_eq!(final_repo.world(branch).unwrap(), committed);
+        assert_eq!(
+            conn.query("SELECT 1 FROM timeline_receipts", &[])
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn explicit_rebuild_restores_missing_lookup_rows_without_changing_canonical_events() {
+        let db = TestDb::new();
+        let mut repo = SqliteTimelineRepository::open(&db.0).unwrap();
+        let branch = BranchId::new();
+        repo.create_session(SessionId::new(), branch).unwrap();
+        let memory = memory_draft("Durable canonical memory");
+        let memory_id = memory.id;
+        let mut observed = EventDraft::new(EventKind::UnityEvent);
+        observed.observers.insert(CharacterId::Kind);
+        let observed_id = observed.id;
+        let original = repo
+            .append(
+                branch,
+                0,
+                "canonical-pair",
+                json!({}),
+                vec![memory, observed],
+            )
+            .unwrap();
+        let conn = Connection::open(&db.0).unwrap();
+        let initial_revision = revision(&conn).unwrap();
+        assert!(
+            repo.knows(branch, CharacterId::Crazy, memory_id, None)
+                .unwrap()
+        );
+        assert_eq!(
+            repo.read(branch, 0, None, 10, Some(CharacterId::Kind))
+                .unwrap()
+                .len(),
+            1
+        );
+
+        conn.exec("DROP TABLE timeline_fact_keys; DELETE FROM timeline_observers; DELETE FROM timeline_acquisitions; DELETE FROM timeline_resets").unwrap();
+        drop(repo);
+        let mut repo = SqliteTimelineRepository::open(&db.0).unwrap();
+        assert_eq!(repo.event(branch, memory_id), Err(TimelineError::NotFound));
+        assert!(
+            !repo
+                .knows(branch, CharacterId::Crazy, memory_id, None)
+                .unwrap()
+        );
+        assert!(
+            repo.read(branch, 0, None, 10, Some(CharacterId::Kind))
+                .unwrap()
+                .is_empty()
+        );
+
+        repo.rebuild_derived_indexes().unwrap();
+        assert_eq!(revision(&conn).unwrap(), initial_revision);
+        assert_eq!(repo.world(branch).unwrap(), original);
+        assert_eq!(repo.event(branch, observed_id).unwrap(), original[1]);
+        assert!(
+            repo.knows(branch, CharacterId::Crazy, memory_id, None)
+                .unwrap()
+        );
+        assert_eq!(
+            repo.read(branch, 0, None, 10, Some(CharacterId::Kind))
+                .unwrap(),
+            vec![original[1].clone()]
+        );
+        drop(repo);
+        let mut reopened = SqliteTimelineRepository::open(&db.0).unwrap();
+        assert_eq!(reopened.event(branch, memory_id).unwrap(), original[0]);
+        reopened.rebuild_derived_indexes().unwrap();
+        assert_eq!(revision(&conn).unwrap(), initial_revision);
+        assert_eq!(reopened.world(branch).unwrap(), original);
+    }
+
+    #[test]
+    fn derived_rebuild_rolls_back_all_tables_on_injected_insert_failure() {
+        let db = TestDb::new();
+        let mut repo = SqliteTimelineRepository::open(&db.0).unwrap();
+        let branch = BranchId::new();
+        repo.create_session(SessionId::new(), branch).unwrap();
+        let fact = repo
+            .append(
+                branch,
+                0,
+                "durable",
+                json!({}),
+                vec![memory_draft("Retained")],
+            )
+            .unwrap();
+        let conn = Connection::open(&db.0).unwrap();
+        let original_revision = revision(&conn).unwrap();
+        conn.exec("DELETE FROM timeline_fact_keys").unwrap();
+        conn.exec("CREATE TRIGGER fail_derived_rebuild BEFORE INSERT ON timeline_observers BEGIN SELECT RAISE(ABORT, 'injected rebuild failure'); END").unwrap();
+        assert!(matches!(
+            repo.rebuild_derived_indexes(),
+            Err(TimelineError::Storage(_))
+        ));
+        assert!(
+            conn.query("SELECT 1 FROM timeline_fact_keys", &[])
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            conn.query("SELECT 1 FROM timeline_observers", &[])
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(revision(&conn).unwrap(), original_revision);
+        assert_eq!(repo.world(branch).unwrap(), fact);
+        conn.exec("DROP TRIGGER fail_derived_rebuild").unwrap();
+        repo.rebuild_derived_indexes().unwrap();
+        assert_eq!(repo.event(branch, fact[0].draft.id).unwrap(), fact[0]);
+        assert_eq!(revision(&conn).unwrap(), original_revision);
+    }
+
+    #[test]
+    fn derived_rebuild_restores_context_reset_barrier_after_reopen() {
+        let db = TestDb::new();
+        let mut repo = SqliteTimelineRepository::open(&db.0).unwrap();
+        let branch = BranchId::new();
+        repo.create_session(SessionId::new(), branch).unwrap();
+        let memory = memory_draft("Remembered before reset");
+        let id = memory.id;
+        repo.append(branch, 0, "acquire", json!({}), vec![memory])
+            .unwrap();
+        let mut reset = EventDraft::new(EventKind::CharacterContextReset);
+        reset.observers.insert(CharacterId::Crazy);
+        repo.append(branch, 1, "reset", json!({}), vec![reset])
+            .unwrap();
+        assert_eq!(repo.context_epoch(branch, CharacterId::Crazy), Ok(2));
+        assert_eq!(repo.knows(branch, CharacterId::Crazy, id, None), Ok(false));
+
+        let conn = Connection::open(&db.0).unwrap();
+        let revision_before = revision(&conn).unwrap();
+        conn.exec("DELETE FROM timeline_resets").unwrap();
+        drop(repo);
+        let mut reopened = SqliteTimelineRepository::open(&db.0).unwrap();
+        assert_eq!(reopened.context_epoch(branch, CharacterId::Crazy), Ok(0));
+        assert_eq!(
+            reopened.knows(branch, CharacterId::Crazy, id, None),
+            Ok(true)
+        );
+        reopened.rebuild_derived_indexes().unwrap();
+        assert_eq!(reopened.context_epoch(branch, CharacterId::Crazy), Ok(2));
+        assert_eq!(
+            reopened.knows(branch, CharacterId::Crazy, id, None),
+            Ok(false)
+        );
+        assert_eq!(revision(&conn).unwrap(), revision_before);
+    }
+
+    #[test]
+    fn invalid_canonical_fact_blocks_rebuild_without_destroying_existing_indexes() {
+        let db = TestDb::new();
+        let mut repo = SqliteTimelineRepository::open(&db.0).unwrap();
+        let branch = BranchId::new();
+        repo.create_session(SessionId::new(), branch).unwrap();
+        let facts = repo
+            .append(
+                branch,
+                0,
+                "durable",
+                json!({}),
+                vec![memory_draft("Canonical")],
+            )
+            .unwrap();
+        let conn = Connection::open(&db.0).unwrap();
+        let previous = conn
+            .query("SELECT event_id FROM timeline_fact_keys", &[])
+            .unwrap();
+        let original = encode(&facts[0]).unwrap();
+        conn.write(
+            "UPDATE timeline_events SET fact_json=? WHERE branch_id=? AND sequence=1",
+            &[&"{}", &branch.0.to_string()],
+        )
+        .unwrap();
+        assert!(matches!(
+            repo.rebuild_derived_indexes(),
+            Err(TimelineError::Storage(_))
+        ));
+        assert_eq!(
+            conn.query("SELECT event_id FROM timeline_fact_keys", &[])
+                .unwrap(),
+            previous
+        );
+        conn.write(
+            "UPDATE timeline_events SET fact_json=? WHERE branch_id=? AND sequence=1",
+            &[&original, &branch.0.to_string()],
+        )
+        .unwrap();
+        repo.rebuild_derived_indexes().unwrap();
+        assert_eq!(repo.event(branch, facts[0].draft.id).unwrap(), facts[0]);
+    }
+
+    #[test]
+    fn checkpoint_fork_selection_is_one_durable_transaction() {
+        let db = TestDb::new();
+        let parent = BranchId::new();
+        let child = BranchId::new();
+        let mut repo = SqliteTimelineRepository::open(&db.0).unwrap();
+        repo.create_session(SessionId::new(), parent).unwrap();
+        let initial = repo.select_branch(parent, None).unwrap();
+        let mut secret = EventDraft::new(EventKind::PlayerMessage);
+        secret.actor = Some("player".into());
+        secret.observers.insert(CharacterId::Crazy);
+        secret.payload.insert(
+            "media".into(),
+            json!([{"asset_id": "asset-unchanged", "mime": "image/png"}]),
+        );
+        let original_draft = secret.clone();
+        let original = secret.id;
+        repo.append(parent, 0, "original", json!({}), vec![secret])
+            .unwrap();
+        let mark = checkpoint();
+        let checkpoint_id = mark.id;
+        repo.append(parent, 1, "mark", json!({}), vec![mark])
+            .unwrap();
+        let mut later = EventDraft::new(EventKind::CharacterContextReset);
+        later.observers.insert(CharacterId::Crazy);
+        repo.append(parent, 2, "later", json!({}), vec![later])
+            .unwrap();
+        let chosen = repo
+            .fork_and_select_checkpoint(parent, 3, checkpoint_id, child, initial)
+            .unwrap();
+        assert_eq!(chosen.branch_id, child);
+        assert_eq!(chosen.generation, initial.generation + 1);
+        let reopened = SqliteTimelineRepository::open(&db.0).unwrap();
+        assert_eq!(reopened.selection().unwrap(), Some(chosen));
+        assert_eq!(reopened.branch(child).unwrap().fork_sequence, 2);
+        assert_eq!(reopened.branch(child).unwrap().head_sequence, 3);
+        assert_eq!(reopened.world(parent).unwrap().len(), 3);
+        assert_eq!(reopened.world(child).unwrap().len(), 3);
+        assert_eq!(
+            reopened.event(child, original).unwrap().draft,
+            original_draft
+        );
+        assert_eq!(
+            reopened.knows(child, CharacterId::Crazy, original, None),
+            Ok(true)
+        );
+        assert_eq!(
+            reopened.knows(child, CharacterId::Kind, original, None),
+            Ok(false)
+        );
+        assert_eq!(reopened.context_epoch(child, CharacterId::Crazy), Ok(0));
+        assert_eq!(reopened.context_epoch(parent, CharacterId::Crazy), Ok(3));
+    }
+
+    #[test]
+    fn failed_selection_insert_rolls_back_fork_and_revision() {
+        let db = TestDb::new();
+        let parent = BranchId::new();
+        let child = BranchId::new();
+        let mut repo = SqliteTimelineRepository::open(&db.0).unwrap();
+        repo.create_session(SessionId::new(), parent).unwrap();
+        let selection = repo.select_branch(parent, None).unwrap();
+        let mark = checkpoint();
+        let checkpoint_id = mark.id;
+        repo.append(parent, 0, "mark", json!({}), vec![mark])
+            .unwrap();
+        let before = revision(&Connection::open(&db.0).unwrap()).unwrap();
+        let connection = Connection::open(&db.0).unwrap();
+        connection.exec("CREATE TRIGGER fail_fork_selection BEFORE UPDATE ON timeline_active_selection BEGIN SELECT RAISE(ABORT, 'selection injection'); END").unwrap();
+        assert!(matches!(
+            repo.fork_and_select_checkpoint(parent, 1, checkpoint_id, child, selection),
+            Err(TimelineError::Storage(_))
+        ));
+        drop(connection);
+        let reopened = SqliteTimelineRepository::open(&db.0).unwrap();
+        assert_eq!(reopened.branch(child), Err(TimelineError::NotFound));
+        assert_eq!(reopened.selection().unwrap(), Some(selection));
+        assert_eq!(revision(&Connection::open(&db.0).unwrap()).unwrap(), before);
+        Connection::open(&db.0)
+            .unwrap()
+            .exec("DROP TRIGGER fail_fork_selection")
+            .unwrap();
+        repo.fork_and_select_checkpoint(parent, 1, checkpoint_id, child, selection)
+            .unwrap();
+        assert!(repo.branch(child).is_ok());
+    }
+
+    #[test]
+    fn checkpoint_fork_rejects_stale_head_and_aba_selection_without_mutation() {
+        let db = TestDb::new();
+        let parent = BranchId::new();
+        let mut repo = SqliteTimelineRepository::open(&db.0).unwrap();
+        repo.create_session(SessionId::new(), parent).unwrap();
+        let selection = repo.select_branch(parent, None).unwrap();
+        let mark = checkpoint();
+        let checkpoint_id = mark.id;
+        repo.append(parent, 0, "mark", json!({}), vec![mark])
+            .unwrap();
+        let stale_head_child = BranchId::new();
+        assert_eq!(
+            repo.fork_and_select_checkpoint(parent, 0, checkpoint_id, stale_head_child, selection),
+            Err(TimelineError::ConcurrentWrite)
+        );
+        assert_eq!(repo.branch(stale_head_child), Err(TimelineError::NotFound));
+        let other = BranchId::new();
+        let later = repo
+            .fork_and_select_checkpoint(parent, 1, checkpoint_id, other, selection)
+            .unwrap();
+        let again = repo.select_branch(parent, Some(later)).unwrap();
+        assert_eq!(again.branch_id, parent);
+        let aba_child = BranchId::new();
+        assert_eq!(
+            repo.fork_and_select_checkpoint(parent, 1, checkpoint_id, aba_child, selection),
+            Err(TimelineError::ConcurrentWrite)
+        );
+        assert_eq!(repo.branch(aba_child), Err(TimelineError::NotFound));
+        let ok = repo
+            .fork_and_select_checkpoint(parent, 1, checkpoint_id, aba_child, again)
+            .unwrap();
+        assert_eq!(ok.generation, again.generation + 1);
+        assert_eq!(
+            repo.fork_and_select_checkpoint(parent, 1, checkpoint_id, aba_child, again),
+            Err(TimelineError::ConcurrentWrite)
+        );
     }
 
     #[test]
@@ -1019,6 +2334,8 @@ mod tests {
             "timeline_fact_keys",
             "timeline_acquisitions",
             "timeline_resets",
+            "timeline_knowledge_forgets",
+            "timeline_knowledge_epochs",
         ] {
             conn.write(&format!("DELETE FROM {table}"), &[]).unwrap();
         }
@@ -1046,6 +2363,103 @@ mod tests {
                 .world(branch)
                 .unwrap(),
             facts
+        );
+    }
+
+    #[test]
+    fn regenerate_dispatch_sql_abort_leaves_no_permit_and_retries_exactly_once() {
+        use crate::timeline::{SessionTimeline, TimelineConfig};
+        let db = TestDb::new();
+        let session = SessionId::new();
+        let root = BranchId::new();
+        let mut timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+            database: db.0.clone(),
+            session,
+            root,
+        })
+        .unwrap();
+        let (_, child, request) =
+            crate::timeline::regenerate_owner_tests::admitted_recovery_source(&mut timeline);
+        let selected = timeline.selection();
+        let connection = Connection::open(&db.0).unwrap();
+        let before = revision(&connection).unwrap();
+        connection.exec("CREATE TRIGGER b65_dispatch_abort BEFORE INSERT ON timeline_events BEGIN SELECT RAISE(ABORT, 'b65 injection'); END").unwrap();
+        assert!(matches!(
+            timeline.permit_regenerate_dispatch(child, request, selected),
+            Err(TimelineError::Storage(_))
+        ));
+        assert_eq!(timeline.store.branch(child).unwrap().head_sequence, 2);
+        assert_eq!(revision(&connection).unwrap(), before);
+        assert!(
+            crate::timeline::domain::dispatch_may_have_started(
+                &timeline.store.world(child).unwrap(),
+                request.0
+            )
+            .unwrap()
+            .is_none()
+        );
+        connection.exec("DROP TRIGGER b65_dispatch_abort").unwrap();
+        let granted = timeline
+            .permit_regenerate_dispatch(child, request, selected)
+            .unwrap();
+        assert_eq!(revision(&connection).unwrap(), before + 1);
+        assert_eq!(timeline.store.branch(child).unwrap().head_sequence, 3);
+        assert_eq!(
+            timeline.permit_regenerate_dispatch(child, request, selected),
+            Err(TimelineError::Conflict)
+        );
+        assert_eq!(
+            timeline
+                .reconcile_regenerate(child, request)
+                .unwrap()
+                .outcome,
+            crate::timeline::RegenerateRecoveryOutcome::MayHaveDispatched(granted)
+        );
+    }
+
+    #[test]
+    fn abandoned_regenerate_sql_failure_rolls_back_receipt_and_revision() {
+        use crate::timeline::{SessionTimeline, TimelineConfig};
+        let db = TestDb::new();
+        let session = SessionId::new();
+        let root = BranchId::new();
+        let mut timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+            database: db.0.clone(),
+            session,
+            root,
+        })
+        .unwrap();
+        let (_, child, request) =
+            crate::timeline::regenerate_owner_tests::admitted_recovery_source(&mut timeline);
+        let selected = timeline.selection();
+        let connection = Connection::open(&db.0).unwrap();
+        let previous_revision = revision(&connection).unwrap();
+        connection.exec("CREATE TRIGGER deny_b64_abandon BEFORE INSERT ON timeline_events WHEN NEW.branch_id IS NOT NULL BEGIN SELECT RAISE(ABORT, 'b64 injected abort'); END").unwrap();
+        assert!(matches!(
+            timeline.abandon_regenerate(child, request, selected),
+            Err(TimelineError::Storage(_))
+        ));
+        assert_eq!(timeline.store.branch(child).unwrap().head_sequence, 2);
+        assert_eq!(revision(&connection).unwrap(), previous_revision);
+        assert!(
+            crate::timeline::domain::abandoned_regenerate(
+                &timeline.store.world(child).unwrap(),
+                request.0
+            )
+            .unwrap()
+            .is_none()
+        );
+        connection.exec("DROP TRIGGER deny_b64_abandon").unwrap();
+        let accepted = timeline
+            .abandon_regenerate(child, request, selected)
+            .unwrap();
+        assert_eq!(revision(&connection).unwrap(), previous_revision + 1);
+        assert_eq!(
+            timeline
+                .reconcile_regenerate(child, request)
+                .unwrap()
+                .outcome,
+            crate::timeline::RegenerateRecoveryOutcome::Abandoned(accepted)
         );
     }
 
@@ -1197,5 +2611,81 @@ mod tests {
             Err(TimelineError::ConcurrentWrite),
         );
         assert_eq!(repo.world(branch).unwrap(), stored);
+    }
+}
+
+#[cfg(all(test, feature = "sqlite-system"))]
+mod historical_input_fork_tests {
+    use super::*;
+    use crate::timeline::conversation::{ConversationMessage, ConversationSpeaker};
+    use serde_json::json;
+
+    #[test]
+    fn historical_input_sqlite_transaction_rolls_back_and_rejects_two_writers() {
+        let db = std::env::temp_dir().join(format!("neuromita-b59-sql-{}.db", Uuid::new_v4()));
+        let parent = BranchId::new();
+        let mut repo = SqliteTimelineRepository::open(&db).unwrap();
+        repo.create_session(SessionId::new(), parent).unwrap();
+        let selection = repo.select_branch(parent, None).unwrap();
+        let message = ConversationMessage::new(
+            "source",
+            ConversationSpeaker::Player,
+            json!("image and text"),
+            [CharacterId::Crazy],
+        );
+        let input = message.id;
+        repo.append(
+            parent,
+            0,
+            "source",
+            json!({}),
+            vec![message.into_draft().unwrap()],
+        )
+        .unwrap();
+        let before = revision(&Connection::open(&db).unwrap()).unwrap();
+        Connection::open(&db).unwrap().exec("CREATE TRIGGER fail_selection BEFORE UPDATE ON timeline_active_selection BEGIN SELECT RAISE(ABORT, 'fail'); END").unwrap();
+        let failed = BranchId::new();
+        assert!(matches!(
+            repo.fork_and_select_player_input(
+                parent,
+                1,
+                input,
+                CharacterId::Crazy,
+                failed,
+                selection
+            ),
+            Err(TimelineError::Storage(_))
+        ));
+        assert_eq!(repo.branch(failed), Err(TimelineError::NotFound));
+        assert_eq!(repo.selection().unwrap(), Some(selection));
+        assert_eq!(revision(&Connection::open(&db).unwrap()).unwrap(), before);
+        Connection::open(&db)
+            .unwrap()
+            .exec("DROP TRIGGER fail_selection")
+            .unwrap();
+        let winner = BranchId::new();
+        let loser = BranchId::new();
+        let mut second_writer = SqliteTimelineRepository::open(&db).unwrap();
+        let committed = repo
+            .fork_and_select_player_input(parent, 1, input, CharacterId::Crazy, winner, selection)
+            .unwrap();
+        assert_eq!(
+            second_writer.fork_and_select_player_input(
+                parent,
+                1,
+                input,
+                CharacterId::Crazy,
+                loser,
+                selection
+            ),
+            Err(TimelineError::ConcurrentWrite)
+        );
+        assert_eq!(repo.branch(loser), Err(TimelineError::NotFound));
+        assert_eq!(repo.selection().unwrap(), Some(committed));
+        assert_eq!(repo.event(winner, input).unwrap().draft.id, input);
+        drop((repo, second_writer));
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
+        }
     }
 }

@@ -21,10 +21,10 @@ import { GameSettingsPage } from "../settings/game-page.slint";
 import { ModelsSettingsPage } from "../settings/models-page.slint";
 import { ImagesSettingsPage } from "../settings/images-page.slint";
 
-import { SettingsUi, CharacterPresets, PresetItem, PresetTemplateItem, PromptSetItem } from "../settings/presets-state.slint";
+import { SettingsUi, CharacterPresets, PresetItem, PresetTemplateItem, PromptSetItem, CharacterDebugItem } from "../settings/presets-state.slint";
 import { ApiPresetsWorkspace } from "../settings/api-presets.slint";
 import { Card, SettingsLabel, SettingsField, SettingsButton, EditorField, SectionHeading } from "../settings/form-controls.slint";
-export { SettingsUi, CharacterPresets, PresetItem, PresetTemplateItem, PromptSetItem }
+export { SettingsUi, CharacterPresets, PresetItem, PresetTemplateItem, PromptSetItem, CharacterDebugItem }
 
 export struct SettingsHeaderInfo { title: string, description: string, glyph: string }
 
@@ -102,6 +102,7 @@ component CharacterWorkspace inherits HorizontalLayout {
     in-out property <string> search;
     in-out property <bool> prompt-expanded: true;
     in-out property <bool> provider-expanded;
+    in-out property <bool> debug-expanded;
     in-out property <bool> maintenance-expanded;
     in-out property <bool> danger-expanded;
     spacing: 9px;
@@ -140,7 +141,7 @@ component CharacterWorkspace inherits HorizontalLayout {
                                 SettingsLabel { text: "id: " + entry.id; color: SettingsTheme.muted; font-size: 11px; }
                             }
                         }
-                        activated => { root.character = entry.index; if (root.connected) { MemoryUi.select(entry.index); } }
+                        activated => { root.character = entry.index; SettingsUi.character-debug-select(entry.index); if (root.connected) { MemoryUi.select(entry.index); } }
                     }
                     if CharacterCatalog.matches(entry, root.search): Rectangle { height: 6px; }
                     }
@@ -211,6 +212,32 @@ VerticalLayout {
                                     glyph: Fa.refresh; enabled: root.connected;
                                     horizontal-stretch: 1; height: 34px; border-radius: 10px;
                                     activated => { SettingsUi.prompt-reload(); }
+                                }
+                            }
+                        }
+                    }
+                    CollapsibleSettingsSection { title: I18n.i18n("settings.characters.debug-values", "Переменные персонажа"); glyph: "\u{f121}"; expanded <=> root.debug-expanded;
+                        VerticalLayout {
+                            padding: 0px; spacing: 8px;
+                            if SettingsUi.character-debug-character != root.character: SettingsLabel {
+                                text: I18n.i18n("settings.characters.debug-loading", "Получение переменных…");
+                                color: SettingsTheme.muted;
+                            }
+                            if SettingsUi.character-debug-character == root.character && SettingsUi.character-debug-error != "": SettingsLabel {
+                                text: SettingsUi.character-debug-error;
+                                color: SettingsTheme.muted;
+                                wrap: word-wrap;
+                            }
+                            if SettingsUi.character-debug-character == root.character && SettingsUi.character-debug-error == "" && SettingsUi.character-debug-values.length == 0: SettingsLabel {
+                                text: I18n.i18n("settings.characters.debug-empty", "Нет переменных для отображения");
+                                color: SettingsTheme.muted;
+                            }
+                            if SettingsUi.character-debug-character == root.character && SettingsUi.character-debug-error == "": VerticalLayout {
+                                padding: 0px; spacing: 6px;
+                                for item in SettingsUi.character-debug-values: HorizontalLayout {
+                                    spacing: 10px;
+                                    SettingsLabel { text: item.label; color: SettingsTheme.muted; horizontal-stretch: 1; wrap: word-wrap; }
+                                    SettingsLabel { text: item.value; font-weight: 600; wrap: word-wrap; }
                                 }
                             }
                         }
@@ -442,7 +469,7 @@ export component SettingsPage inherits Rectangle {
                 }
                 if SettingsUi.section == 2: VerticalLayout {
                     padding: 2px; spacing: 12px;
-                    CharacterWorkspace { character <=> SettingsUi.selected-character; prompt-expanded <=> SettingsUi.character-prompt-expanded; connected: root.connected; }
+                    CharacterWorkspace { character <=> SettingsUi.selected-character; prompt-expanded <=> SettingsUi.character-prompt-expanded; debug-expanded <=> SettingsUi.character-debug-expanded; connected: root.connected; }
                 }
                 if SettingsUi.section == 3: voice-scroll := SettingsScrollView {
                     content-height: voice-page.preferred-height;
@@ -464,7 +491,7 @@ export component SettingsPage inherits Rectangle {
                     language-selected(code) => { root.language-selected(code); }
                 }
                 if SettingsUi.section == 7: GameSettingsPage {}
-                if SettingsUi.section == 8: ModelsSettingsPage {}
+                if SettingsUi.section == 8: ModelsSettingsPage { rag-open <=> SettingsUi.models-rag-open; }
                 if SettingsUi.section == 9: ImagesSettingsPage {}
                 if SettingsUi.section > 9: VerticalLayout { padding: 2px; spacing: 12px; alignment: start;
                     SettingsLabel { text: I18n.i18n("settings.section-unavailable", "Этот раздел пока недоступен."); color: SettingsTheme.muted; }

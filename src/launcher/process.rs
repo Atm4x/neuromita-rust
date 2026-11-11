@@ -39,6 +39,11 @@ pub fn identity_for_pid(pid: u32) -> Result<Option<ProcessIdentity>, LauncherErr
     platform::identity(pid)
 }
 
+#[cfg(windows)]
+pub(crate) fn request_owned_window_close(pid: u32) -> bool {
+    platform::request_window_close(pid)
+}
+
 pub(crate) fn inspect_identity(identity: &ProcessIdentity) -> Result<IdentityProbe, LauncherError> {
     platform::inspect(identity)
 }
@@ -80,6 +85,9 @@ mod platform {
                 QueryFullProcessImageNameW,
             },
         },
+        UI::WindowsAndMessaging::{
+            EnumWindows, GetWindowThreadProcessId, IsWindowVisible, PostMessageW, WM_CLOSE,
+        },
     };
 
     use super::{IdentityProbe, ProcessIdentity, ProcessScan, classify};
@@ -100,6 +108,35 @@ mod platform {
                 }
             }
         }
+    }
+
+    struct CloseRequest {
+        pid: u32,
+        posted: usize,
+    }
+
+    unsafe extern "system" fn close_matching_window(hwnd: *mut c_void, parameter: isize) -> i32 {
+        let request = unsafe { &mut *(parameter as *mut CloseRequest) };
+        let mut owner_pid = 0;
+        unsafe { GetWindowThreadProcessId(hwnd, &mut owner_pid) };
+        if owner_pid == request.pid
+            && unsafe { IsWindowVisible(hwnd) } != 0
+            && unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) } != 0
+        {
+            request.posted += 1;
+        }
+        1
+    }
+
+    pub(super) fn request_window_close(pid: u32) -> bool {
+        let mut request = CloseRequest { pid, posted: 0 };
+        let enumerated = unsafe {
+            EnumWindows(
+                Some(close_matching_window),
+                &raw mut request as *mut CloseRequest as isize,
+            )
+        };
+        enumerated != 0 && request.posted > 0
     }
 
     pub(super) fn scan(executable: &std::path::Path) -> Result<ProcessScan, LauncherError> {

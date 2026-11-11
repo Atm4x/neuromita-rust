@@ -1,0 +1,457 @@
+use std::{ffi::OsString, io, path::PathBuf};
+
+use neuromita::{
+    character::CharacterId,
+    document_revision::DocumentRevisionApi,
+    knowledge::document_index::{self, SearchStatus},
+};
+
+#[derive(Debug, PartialEq, Eq)]
+enum Action {
+    Import {
+        root: PathBuf,
+        character: CharacterId,
+        source: PathBuf,
+        name: String,
+    },
+    ForkAdd {
+        root: PathBuf,
+        character: CharacterId,
+        source: PathBuf,
+        name: String,
+        output: PathBuf,
+    },
+    ForkRemove {
+        root: PathBuf,
+        character: CharacterId,
+        name: String,
+        expected_sha256: String,
+        output: PathBuf,
+    },
+    ForkReplace {
+        root: PathBuf,
+        character: CharacterId,
+        source: PathBuf,
+        name: String,
+        expected_sha256: String,
+        output: PathBuf,
+    },
+    Reindex {
+        root: PathBuf,
+        character: CharacterId,
+        revisions_directory: PathBuf,
+    },
+    Build {
+        root: PathBuf,
+        character: CharacterId,
+        index: PathBuf,
+    },
+    Verify {
+        root: PathBuf,
+        character: CharacterId,
+        index: PathBuf,
+    },
+    Query {
+        root: PathBuf,
+        character: CharacterId,
+        index: PathBuf,
+        text: String,
+        limit: usize,
+    },
+    Help,
+}
+
+fn parse(args: Vec<OsString>) -> Result<Action, String> {
+    let mut args = args.into_iter();
+    let mode = args.next().ok_or(
+        "expected import, fork-add, fork-replace, fork-remove, build, reindex, verify or query",
+    )?;
+    if mode == "--help" {
+        return if args.next().is_none() {
+            Ok(Action::Help)
+        } else {
+            Err("unknown help arguments".into())
+        };
+    }
+    if mode != "fork-add"
+        && mode != "fork-replace"
+        && mode != "fork-remove"
+        && mode != "import"
+        && mode != "build"
+        && mode != "reindex"
+        && mode != "verify"
+        && mode != "query"
+    {
+        return Err(
+            "expected import, fork-add, fork-replace, fork-remove, build, reindex, verify or query"
+                .into(),
+        );
+    }
+    let mut expected_sha256 = None;
+    let mut output = None;
+    let mut source = None;
+    let mut name = None;
+    let mut root = None;
+    let mut character = None;
+    let mut index = None;
+    let mut revisions_directory = None;
+    let mut text = None;
+    let mut limit = None;
+    while let Some(flag) = args.next() {
+        let value = args.next().ok_or("missing option value")?;
+        match flag.to_str() {
+            Some("--root") if root.is_none() => root = Some(PathBuf::from(value)),
+            Some("--source")
+                if (mode == "import" || mode == "fork-replace" || mode == "fork-add")
+                    && source.is_none() =>
+            {
+                source = Some(PathBuf::from(value));
+            }
+            Some("--name")
+                if (mode == "import"
+                    || mode == "fork-replace"
+                    || mode == "fork-remove"
+                    || mode == "fork-add")
+                    && name.is_none() =>
+            {
+                name = Some(value.into_string().map_err(|_| "invalid document name")?);
+            }
+            Some("--expected-sha256")
+                if (mode == "fork-replace" || mode == "fork-remove")
+                    && expected_sha256.is_none() =>
+            {
+                expected_sha256 = Some(value.into_string().map_err(|_| "invalid digest")?);
+            }
+            Some("--output")
+                if (mode == "fork-replace" || mode == "fork-remove" || mode == "fork-add")
+                    && output.is_none() =>
+            {
+                output = Some(PathBuf::from(value));
+            }
+            Some("--index") if index.is_none() => index = Some(PathBuf::from(value)),
+            Some("--revisions-dir") if mode == "reindex" && revisions_directory.is_none() => {
+                revisions_directory = Some(PathBuf::from(value));
+            }
+            Some("--character") if character.is_none() => {
+                let name = value.into_string().map_err(|_| "invalid character")?;
+                character = Some(CharacterId::parse(&name).ok_or("unknown character")?);
+            }
+            Some("--text") if mode == "query" && text.is_none() => {
+                text = Some(value.into_string().map_err(|_| "invalid query text")?);
+            }
+            Some("--limit") if mode == "query" && limit.is_none() => {
+                let value = value.into_string().map_err(|_| "invalid limit")?;
+                limit = Some(value.parse::<usize>().map_err(|_| "invalid limit")?);
+            }
+            _ => return Err("unknown or duplicate documents option".into()),
+        }
+    }
+    let root = root.ok_or("--root is required")?;
+    let character = character.ok_or("--character is required")?;
+    if !root.is_absolute() {
+        return Err("source path must be absolute".into());
+    }
+    if mode == "fork-add" {
+        let source = source.ok_or("--source is required")?;
+        let output = output.ok_or("--output is required")?;
+        if !source.is_absolute()
+            || !output.is_absolute()
+            || expected_sha256.is_some()
+            || index.is_some()
+            || revisions_directory.is_some()
+            || text.is_some()
+            || limit.is_some()
+        {
+            return Err(
+                "fork-add needs absolute --source and --output and no digest/index options".into(),
+            );
+        }
+        return Ok(Action::ForkAdd {
+            root,
+            character,
+            source,
+            output,
+            name: name.ok_or("--name is required")?,
+        });
+    }
+    if mode == "fork-replace" {
+        let source = source.ok_or("--source is required")?;
+        let output = output.ok_or("--output is required")?;
+        if !source.is_absolute()
+            || !output.is_absolute()
+            || index.is_some()
+            || revisions_directory.is_some()
+            || text.is_some()
+            || limit.is_some()
+        {
+            return Err(
+                "fork-replace needs absolute --source and --output and no index options".into(),
+            );
+        }
+        return Ok(Action::ForkReplace {
+            root,
+            character,
+            source,
+            output,
+            name: name.ok_or("--name is required")?,
+            expected_sha256: expected_sha256.ok_or("--expected-sha256 is required")?,
+        });
+    }
+    if mode == "fork-remove" {
+        let output = output.ok_or("--output is required")?;
+        if !output.is_absolute()
+            || source.is_some()
+            || index.is_some()
+            || revisions_directory.is_some()
+            || text.is_some()
+            || limit.is_some()
+        {
+            return Err("fork-remove needs absolute --output and no source/index options".into());
+        }
+        return Ok(Action::ForkRemove {
+            root,
+            character,
+            output,
+            name: name.ok_or("--name is required")?,
+            expected_sha256: expected_sha256.ok_or("--expected-sha256 is required")?,
+        });
+    }
+    if mode == "import" {
+        if index.is_some() || revisions_directory.is_some() || text.is_some() || limit.is_some() {
+            return Err("import accepts only --source and --name".into());
+        }
+        let source = source.ok_or("--source is required")?;
+        if !source.is_absolute() {
+            return Err("document input path must be absolute".into());
+        }
+        return Ok(Action::Import {
+            root,
+            character,
+            source,
+            name: name.ok_or("--name is required")?,
+        });
+    }
+    if expected_sha256.is_some() || output.is_some() {
+        return Err("unexpected fork-replace option".into());
+    }
+    if mode == "reindex" {
+        if index.is_some() || text.is_some() || limit.is_some() {
+            return Err("reindex accepts only a revisions directory, not an index path".into());
+        }
+        let revisions_directory = revisions_directory.ok_or("--revisions-dir is required")?;
+        if !revisions_directory.is_absolute() {
+            return Err("revisions directory must be absolute".into());
+        }
+        return Ok(Action::Reindex {
+            root,
+            character,
+            revisions_directory,
+        });
+    }
+    let index = index.ok_or("--index is required")?;
+    if !index.is_absolute() {
+        return Err("index path must be absolute".into());
+    }
+    match mode.to_str() {
+        Some("build") => Ok(Action::Build {
+            root,
+            character,
+            index,
+        }),
+        Some("verify") => Ok(Action::Verify {
+            root,
+            character,
+            index,
+        }),
+        Some("query") => Ok(Action::Query {
+            root,
+            character,
+            index,
+            text: text.ok_or("--text is required")?,
+            limit: limit.unwrap_or(5),
+        }),
+        _ => Err("unknown action".into()),
+    }
+}
+
+pub fn run(args: Vec<OsString>) -> Result<(), Box<dyn std::error::Error>> {
+    let action = parse(args).map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+    match action {
+        Action::Help => println!(
+            "neuromita documents fork-add --root ABSOLUTE_OLD_CORPUS --character Kind --name NEW_DOCUMENT.md --source ABSOLUTE_NEW_TEXT_FILE --output NEW_ABSOLUTE_CORPUS_DIRECTORY\nneuromita documents fork-remove --root ABSOLUTE_OLD_CORPUS --character Kind --name DOCUMENT.md --expected-sha256 OLD_SHA256 --output NEW_ABSOLUTE_CORPUS_DIRECTORY\nneuromita documents fork-replace --root ABSOLUTE_OLD_CORPUS --character Kind --name DOCUMENT.md --expected-sha256 OLD_SHA256 --source ABSOLUTE_NEW_TEXT_FILE --output NEW_ABSOLUTE_CORPUS_DIRECTORY\nneuromita documents import --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --source ABSOLUTE_INPUT_TEXT_PATH --name NEW_FILENAME.md\nneuromita documents reindex --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --revisions-dir EXISTING_ABSOLUTE_DIRECTORY\nneuromita documents build --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --index NEW_ABSOLUTE_PATH\nneuromita documents verify --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --index ABSOLUTE_PATH\nneuromita documents query --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --index ABSOLUTE_PATH --text QUERY [--limit 5]\n\nExplicit lexical-only Documents source. .txt/.md only, single directory, source-verified derived index; reindex never activates. Activate a receipt through DocumentRevisionApi and SettingsApi in a trusted running application."
+        ),
+        Action::ForkAdd {
+            root,
+            character,
+            name,
+            source,
+            output,
+        } => {
+            let result =
+                document_index::fork_adding_document(&root, character, &name, &source, &output)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        Action::ForkRemove {
+            root,
+            character,
+            name,
+            expected_sha256,
+            output,
+        } => {
+            let result = document_index::fork_removing_document(
+                &root,
+                character,
+                &name,
+                &expected_sha256,
+                &output,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        Action::ForkReplace {
+            root,
+            character,
+            source,
+            name,
+            expected_sha256,
+            output,
+        } => {
+            let result = document_index::fork_replacing_document(
+                &root,
+                character,
+                &name,
+                &expected_sha256,
+                &source,
+                &output,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        Action::Import {
+            root,
+            character,
+            source,
+            name,
+        } => {
+            let imported = document_index::import_new_document(&root, character, &source, &name)?;
+            println!("{}", serde_json::to_string_pretty(&imported)?);
+        }
+        Action::Reindex {
+            root,
+            character,
+            revisions_directory,
+        } => {
+            let receipt = DocumentRevisionApi::prepare(&root, character, &revisions_directory)?;
+            println!("{}", serde_json::to_string_pretty(&receipt)?);
+        }
+        Action::Build {
+            root,
+            character,
+            index,
+        } => {
+            let built = document_index::build_new(&root, character, &index)?;
+            println!(
+                "indexed {} documents for {character}: {}",
+                built.documents.len(),
+                index.display()
+            );
+        }
+        Action::Verify {
+            root,
+            character,
+            index,
+        } => {
+            let verified = document_index::load_verified(&root, character, &index)?;
+            println!(
+                "verified {} documents for {character}",
+                verified.documents.len()
+            );
+        }
+        Action::Query {
+            root,
+            character,
+            index,
+            text,
+            limit,
+        } => {
+            let result = document_index::search_verified(&root, character, &index, &text, limit)?;
+            let hits = result
+                .hits
+                .into_iter()
+                .map(|hit| {
+                    serde_json::json!({
+                        "id":hit.key.id,
+                        "source":"Document",
+                        "content":hit.content,
+                        "score":hit.score,
+                        "metadata":hit.metadata,
+                    })
+                })
+                .collect::<Vec<_>>();
+            let status = match result.status {
+                SearchStatus::EmptyCorpus => "empty_corpus",
+                SearchStatus::NoMatches => "no_matches",
+                SearchStatus::Selected => "selected",
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({"status":status,"documents":result.documents,"hits":hits})
+                )?
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_rejects_ambiguous_or_unsafe_requests() {
+        let p = |values: &[&str]| parse(values.iter().map(OsString::from).collect());
+        assert_eq!(p(&["--help"]), Ok(Action::Help));
+        for args in [
+            vec![
+                "query",
+                "--root",
+                "/tmp/docs",
+                "--character",
+                "Kind",
+                "--index",
+                "/tmp/index",
+            ],
+            vec![
+                "build",
+                "--root",
+                "docs",
+                "--character",
+                "Kind",
+                "--index",
+                "/tmp/index",
+            ],
+            vec![
+                "build",
+                "--root",
+                "/tmp/docs",
+                "--character",
+                "Wrong",
+                "--index",
+                "/tmp/index",
+            ],
+            vec![
+                "build",
+                "--root",
+                "/tmp/docs",
+                "--character",
+                "Kind",
+                "--index",
+                "/tmp/index",
+                "--index",
+                "/tmp/index2",
+            ],
+            vec!["verify", "--root", "/tmp/docs", "--character", "Kind"],
+        ] {
+            assert!(p(&args).is_err(), "{args:?}");
+        }
+    }
+}

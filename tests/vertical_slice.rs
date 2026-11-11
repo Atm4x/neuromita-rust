@@ -50,18 +50,15 @@ async fn explicit_prompt_set_requires_a_catalog_before_provider_invocation() {
         .prompt_set
         .set(Some("Default".into()))
         .unwrap();
-    let request = app
+    let result = app
         .presenter()
         .conversation
-        .reply(CharacterId::Crazy, "Test prompt selection".into())
-        .unwrap();
-    let result = timeout(Duration::from_secs(2), request.wait())
-        .await
-        .unwrap()
-        .unwrap();
+        .reply(CharacterId::Crazy, "Test prompt selection".into());
     assert!(matches!(
-        result.state,
-        RequestState::Finished(RequestOutcome::InternalError(_))
+        result,
+        Err(neuromita::presentation::PresenterError::Submit(
+            SubmitError::PromptUnavailable(_)
+        ))
     ));
     assert!(
         server.calls.try_recv().is_err(),
@@ -524,7 +521,7 @@ impl GenerationProvider for CheckedProvider {
 async fn finished(handle: &RequestHandle) -> Arc<neuromita::request::RequestSnapshot> {
     timeout(Duration::from_secs(10), handle.wait())
         .await
-        .unwrap()
+        .unwrap_or_else(|_| panic!("request did not finish: {:?}", handle.snapshot()))
         .unwrap()
 }
 
@@ -555,6 +552,293 @@ fn user_texts(body: &Value) -> Vec<&str> {
         .filter(|item| item["role"] == "user")
         .map(|item| item["parts"][0]["text"].as_str().unwrap())
         .collect()
+}
+
+#[tokio::test]
+async fn conversation_retry_reuses_input_event_and_rejects_duplicate_or_stale_attempts() {
+    use neuromita::{
+        presentation::{ConversationError, PresenterError},
+        request::TurnIntent,
+        timeline::domain::EventKind,
+    };
+
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+        preset(&server.endpoint),
+        ResponseGenerator::new([
+            Arc::new(GeminiProvider::new().unwrap()) as Arc<dyn GenerationProvider>
+        ])
+        .unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+    let conversation = &app.presenter().conversation;
+    let source = conversation
+        .reply(CharacterId::Crazy, "Retry me".into())
+        .unwrap();
+    let original = source.snapshot().metadata.intent;
+    let call = server.next().await;
+    call.respond.send(Reply::Status(400)).unwrap();
+    assert!(matches!(
+        finished(&source).await.state,
+        RequestState::Finished(RequestOutcome::TextGenerationFailed(_))
+    ));
+    shown(&app.presenter().chat, source.id(), true).await;
+    let before = conversation.snapshot(CharacterId::Crazy).await.unwrap();
+    let user_ids = before
+        .messages
+        .iter()
+        .filter(|message| message.kind == EventKind::PlayerMessage)
+        .map(|message| message.event_id)
+        .collect::<Vec<_>>();
+    assert_eq!(user_ids.len(), 1);
+    assert_eq!(original, TurnIntent::Reply(user_ids[0]));
+
+    let retry = conversation
+        .retry_failed(CharacterId::Crazy, source.id())
+        .await
+        .unwrap();
+    assert_ne!(retry.id(), source.id());
+    assert_eq!(retry.snapshot().metadata.intent, original);
+    assert!(matches!(
+        conversation
+            .retry_failed(CharacterId::Crazy, source.id())
+            .await,
+        Err(ConversationError::Presenter(
+            PresenterError::RetryAlreadyUsed
+        ))
+    ));
+    let call = server.next().await;
+    assert_eq!(user_texts(&call.body), ["Retry me"]);
+    call.respond.send(Reply::Text("Recovered reply")).unwrap();
+    assert!(matches!(
+        finished(&retry).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    shown(&app.presenter().chat, retry.id(), true).await;
+    let after = conversation.snapshot(CharacterId::Crazy).await.unwrap();
+    let after_ids = after
+        .messages
+        .iter()
+        .filter(|message| message.kind == EventKind::PlayerMessage)
+        .map(|message| message.event_id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        after_ids, user_ids,
+        "retry must not append another user event"
+    );
+    assert!(matches!(
+        conversation
+            .retry_failed(CharacterId::Crazy, retry.id())
+            .await,
+        Err(ConversationError::Presenter(
+            PresenterError::RetryUnavailable
+        ))
+    ));
+
+    let other = conversation
+        .reply(CharacterId::Crazy, "Will be superseded".into())
+        .unwrap();
+    let call = server.next().await;
+    call.respond.send(Reply::Status(400)).unwrap();
+    assert!(matches!(
+        finished(&other).await.state,
+        RequestState::Finished(RequestOutcome::TextGenerationFailed(_))
+    ));
+    shown(&app.presenter().chat, other.id(), true).await;
+    let old_head = app.at();
+    let old_selection = *conversation.observe_selection().unwrap().borrow();
+    ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("newer input".into()).unwrap(),
+    )
+    .unwrap();
+    let guarded = ChatApi::reply(
+        ReplyRequest::new(CharacterId::Crazy, user_ids[0], RequestSource::Presenter)
+            .expect_timeline(neuromita::request::TimelineFence {
+                at: old_head,
+                selection: old_selection,
+            }),
+    );
+    assert!(matches!(guarded, Err(SubmitError::StaleTimeline)));
+
+    assert!(matches!(
+        conversation
+            .retry_failed(CharacterId::Crazy, other.id())
+            .await,
+        Err(ConversationError::RetrySuperseded)
+    ));
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn accepted_regenerate_preview_binds_canonical_reply_and_rejects_stale_or_foreign_targets() {
+    use neuromita::{
+        presentation::ConversationError, request::TimelineFence, timeline::domain::EventKind,
+    };
+
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+        preset(&server.endpoint),
+        ResponseGenerator::new([
+            Arc::new(GeminiProvider::new().unwrap()) as Arc<dyn GenerationProvider>
+        ])
+        .unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+    let conversation = &app.presenter().conversation;
+    let request = conversation
+        .reply(CharacterId::Crazy, "Canonical regenerate input".into())
+        .unwrap();
+    let call = server.next().await;
+    call.respond.send(Reply::Text("Accepted answer")).unwrap();
+    assert!(matches!(
+        finished(&request).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    shown(&app.presenter().chat, request.id(), true).await;
+
+    let before = conversation.snapshot(CharacterId::Crazy).await.unwrap();
+    let user = before
+        .messages
+        .iter()
+        .find(|message| message.kind == EventKind::PlayerMessage)
+        .unwrap()
+        .event_id;
+    let accepted = before
+        .messages
+        .iter()
+        .find(|message| {
+            message.kind == EventKind::CharacterMessage && message.request_id == Some(request.id())
+        })
+        .unwrap()
+        .event_id;
+    let fence = TimelineFence {
+        at: before.at,
+        selection: before.selection,
+    };
+
+    let preview = conversation
+        .preview_regenerate(CharacterId::Crazy, accepted, fence)
+        .await
+        .unwrap();
+    assert_eq!(preview.character(), CharacterId::Crazy);
+    assert_eq!(preview.accepted_message(), accepted);
+    assert_eq!(preview.accepted_request(), request.id());
+    assert_eq!(preview.original_input(), user);
+    assert_eq!(preview.timeline_fence(), fence);
+    assert_eq!(preview.visible_downstream(), 0);
+    assert!(matches!(
+        conversation
+            .preview_regenerate(CharacterId::Kind, accepted, fence)
+            .await,
+        Err(ConversationError::RegenerateUnavailable)
+    ));
+    assert!(matches!(
+        conversation
+            .preview_regenerate(
+                CharacterId::Crazy,
+                neuromita::timeline::EventId::new(),
+                fence
+            )
+            .await,
+        Err(ConversationError::RegenerateUnavailable)
+    ));
+
+    ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("Later message".into()).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        conversation
+            .preview_regenerate(CharacterId::Crazy, accepted, fence)
+            .await,
+        Err(ConversationError::StalePreview)
+    ));
+    let after = conversation.snapshot(CharacterId::Crazy).await.unwrap();
+    let new_fence = TimelineFence {
+        at: after.at,
+        selection: after.selection,
+    };
+    let renewed = conversation
+        .preview_regenerate(CharacterId::Crazy, accepted, new_fence)
+        .await
+        .unwrap();
+    assert_eq!(renewed.visible_downstream(), 1);
+    assert_eq!(renewed.original_input(), user);
+    assert_eq!(
+        after
+            .messages
+            .iter()
+            .filter(|message| message.event_id == user)
+            .count(),
+        1
+    );
+    assert_eq!(after.messages.len(), before.messages.len() + 1);
+
+    let selected_again = app
+        .select_timeline_branch(after.selection.branch_id, after.selection)
+        .unwrap();
+    assert_ne!(selected_again.generation, after.selection.generation);
+    assert!(matches!(
+        conversation
+            .preview_regenerate(CharacterId::Crazy, accepted, new_fence)
+            .await,
+        Err(ConversationError::StalePreview)
+    ));
+    let reselection_fence = TimelineFence {
+        at: after.at,
+        selection: selected_again,
+    };
+    assert_eq!(
+        conversation
+            .preview_regenerate(CharacterId::Crazy, accepted, reselection_fence)
+            .await
+            .unwrap()
+            .original_input(),
+        user
+    );
+
+    let second = conversation
+        .reply(CharacterId::Crazy, "A newer accepted turn".into())
+        .unwrap();
+    server
+        .next()
+        .await
+        .respond
+        .send(Reply::Text("Newer accepted answer"))
+        .unwrap();
+    assert!(matches!(
+        finished(&second).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    shown(&app.presenter().chat, second.id(), true).await;
+    let later = conversation.snapshot(CharacterId::Crazy).await.unwrap();
+    assert!(matches!(
+        conversation
+            .preview_regenerate(
+                CharacterId::Crazy,
+                accepted,
+                TimelineFence {
+                    at: later.at,
+                    selection: later.selection,
+                }
+            )
+            .await,
+        Err(ConversationError::RegenerateUnavailable)
+    ));
+
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -714,7 +998,7 @@ async fn presenter_to_provider_observation_cancellation_and_commit() {
         .next()
         .await
         .respond
-        .send(Reply::Status(503))
+        .send(Reply::Status(400))
         .unwrap();
     assert!(matches!(
         finished(&failed).await.state,
@@ -1229,6 +1513,109 @@ async fn typed_memories_are_atomic_and_visible_in_followup_context() {
             .unwrap()
             .state,
         neuromita::memory::MemoryState::Deleted
+    );
+
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn model_memory_settings_capture_policy_through_live_generation() {
+    use neuromita::settings::{MemorySettings, SettingsApi};
+
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let provider: Arc<dyn GenerationProvider> = Arc::new(GeminiProvider::new().unwrap());
+    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+        preset(&server.endpoint),
+        ResponseGenerator::new([provider]).unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+
+    let settings = SettingsApi::snapshot::<MemorySettings>().unwrap().value;
+    assert!(!settings.model_add_dedup_enabled);
+    assert_eq!(settings.threshold_per_mille, 800);
+    SettingsApi::edit::<MemorySettings>(|value| value.model_add_dedup_enabled = true).unwrap();
+
+    let first = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Crazy, "Remember tea".into())
+        .unwrap();
+    server.next().await.respond.send(Reply::Structured(
+        r#"{"segments":[{"text":"saved"}],"memory_add":["normal|The player prefers jasmine tea"]}"#,
+    )).unwrap();
+    assert!(matches!(
+        finished(&first).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    let before = app
+        .character(CharacterId::Crazy)
+        .unwrap()
+        .get_context(app.at())
+        .await
+        .unwrap()
+        .memories;
+    assert_eq!(before.len(), 1);
+
+    let second = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Crazy, "Again".into())
+        .unwrap();
+    let pending_provider_call = server.next().await;
+    SettingsApi::edit::<MemorySettings>(|value| value.model_add_dedup_enabled = false).unwrap();
+    pending_provider_call.respond.send(Reply::Structured(
+        r#"{"segments":[{"text":"updated"}],"memory_add":["high|The player really prefers jasmine tea"]}"#,
+    )).unwrap();
+    assert!(matches!(
+        finished(&second).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    let after_lexical = app
+        .character(CharacterId::Crazy)
+        .unwrap()
+        .get_context(app.at())
+        .await
+        .unwrap()
+        .memories;
+    assert_eq!(
+        after_lexical.len(),
+        1,
+        "model memory must dedup when enabled"
+    );
+    assert_eq!(after_lexical[0].id, before[0].id);
+    assert_eq!(
+        after_lexical[0].content,
+        "The player really prefers jasmine tea"
+    );
+
+    let third = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Crazy, "Ordinary add".into())
+        .unwrap();
+    server.next().await.respond.send(Reply::Structured(
+        r#"{"segments":[{"text":"another"}],"memory_add":["normal|The player always really prefers jasmine tea"]}"#,
+    )).unwrap();
+    assert!(matches!(
+        finished(&third).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    let after_ordinary = app
+        .character(CharacterId::Crazy)
+        .unwrap()
+        .get_context(app.at())
+        .await
+        .unwrap()
+        .memories;
+    assert_eq!(
+        after_ordinary.len(),
+        2,
+        "disabled dedup must retain ordinary insert"
     );
 
     app.shutdown().await.unwrap();
@@ -2529,7 +2916,248 @@ async fn generated_character_messages_use_shared_conversation_audience() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn preset_is_resolved_only_when_queued_generation_begins() {
+async fn selected_prompt_post_dsl_persists_only_accepted_changes() {
+    use neuromita::prompts::PromptCatalog;
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let root = std::env::temp_dir().join(format!("neuromita-postdsl-{}", Uuid::new_v4()));
+    let set = root.join("Crazy/Default");
+    std::fs::create_dir_all(set.join("PostScripts")).unwrap();
+    std::fs::create_dir_all(set.join("Main")).unwrap();
+    std::fs::write(set.join("main_template.txt"), "[<Main/identity.txt>]").unwrap();
+    std::fs::write(set.join("Main/identity.txt"), "Love is [{Love}]").unwrap();
+    std::fs::write(set.join("config.json"), r#"{"custom_params":[{"name":"Love","change_command":"love_change","initial":10,"op":"add","type":"int"}]}"#).unwrap();
+    std::fs::write(
+        set.join("PostScripts/main_rules.postscript"),
+        "RULE strip\n MATCH REGEX \"\\*\\*\"\n ACTIONS\n REMOVE_MATCH\n END_ACTIONS\nEND_RULE\n",
+    )
+    .unwrap();
+    let config = ApplicationConfig::minimal(
+        preset(&server.endpoint),
+        ResponseGenerator::new([
+            Arc::new(GeminiProvider::new().unwrap()) as Arc<dyn GenerationProvider>
+        ])
+        .unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    )
+    .with_prompt_catalog(PromptCatalog::new(&root));
+    let app = ApplicationLifecycle::start(config).await.unwrap();
+
+    let accepted = app
+        .presenter()
+        .conversation
+        .reply(CharacterId::Crazy, "first".into())
+        .unwrap();
+    let call = server.next().await;
+    assert!(call.body.to_string().contains("Love is 10"));
+    call.respond
+        .send(Reply::Structured(
+            r#"{"segments":[{"text":"**hello**"}],"custom_fields":{"love_change":5}}"#,
+        ))
+        .unwrap();
+    assert!(matches!(
+        finished(&accepted).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    let snapshot = app
+        .character(CharacterId::Crazy)
+        .unwrap()
+        .get_context(app.at())
+        .await
+        .unwrap();
+    assert!(
+        snapshot
+            .view
+            .messages()
+            .iter()
+            .any(|message| message.content == "hello")
+    );
+
+    let rejected = app
+        .presenter()
+        .conversation
+        .reply(CharacterId::Crazy, "second".into())
+        .unwrap();
+    let call = server.next().await;
+    assert!(call.body.to_string().contains("Love is 15"));
+    call.respond
+        .send(Reply::Structured(
+            r#"{"segments":[{"text":"bad"}],"custom_fields":{"unknown_field":999}}"#,
+        ))
+        .unwrap();
+    assert!(matches!(
+        finished(&rejected).await.state,
+        RequestState::Finished(RequestOutcome::TextGenerationFailed(_))
+    ));
+    let third = app
+        .presenter()
+        .conversation
+        .reply(CharacterId::Crazy, "third".into())
+        .unwrap();
+    let call = server.next().await;
+    assert!(call.body.to_string().contains("Love is 15"));
+    call.respond.send(Reply::Text("third accepted")).unwrap();
+    assert!(matches!(
+        finished(&third).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn queued_prompt_snapshot_survives_hot_reload_and_freezes_post_dsl() {
+    use neuromita::{
+        prompts::PromptCatalog,
+        settings::{CharactersSettings, SettingsApi},
+    };
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let root = std::env::temp_dir().join(format!("neuromita-snapshot-{}", Uuid::new_v4()));
+    let set = root.join("Crazy/Default");
+    std::fs::create_dir_all(set.join("PostScripts")).unwrap();
+    std::fs::create_dir_all(set.join("Main")).unwrap();
+    std::fs::write(
+        set.join("config.json"),
+        r#"{"variables":{"player_name":"Old"}}"#,
+    )
+    .unwrap();
+    std::fs::write(set.join("main_template.txt"), "[<Main/identity.txt>]").unwrap();
+    std::fs::write(set.join("Main/identity.txt"), "Name [{player_name}]").unwrap();
+    std::fs::write(set.join("PostScripts/main_rules.postscript"),
+        "RULE rewrite\n MATCH TEXT \"hello\"\n ACTIONS\n REPLACE_MATCH WITH \"cached\"\n END_ACTIONS\nEND_RULE").unwrap();
+    let alternate = root.join("Crazy/Alternative");
+    std::fs::create_dir_all(alternate.join("PostScripts")).unwrap();
+    std::fs::write(
+        alternate.join("config.json"),
+        r#"{"variables":{"player_name":"New"}}"#,
+    )
+    .unwrap();
+    std::fs::write(alternate.join("main_template.txt"), "[<identity.txt>]").unwrap();
+    std::fs::write(alternate.join("identity.txt"), "Alternate [{player_name}]").unwrap();
+    std::fs::write(alternate.join("PostScripts/main_rules.postscript"),
+        "RULE rewrite\n MATCH TEXT \"hello\"\n ACTIONS\n REPLACE_MATCH WITH \"fresh\"\n END_ACTIONS\nEND_RULE").unwrap();
+    let app = ApplicationLifecycle::start(
+        ApplicationConfig::minimal(
+            preset(&server.endpoint),
+            ResponseGenerator::new([
+                Arc::new(GeminiProvider::new().unwrap()) as Arc<dyn GenerationProvider>
+            ])
+            .unwrap(),
+            limits(),
+            "127.0.0.1:0".parse().unwrap(),
+        )
+        .with_prompt_catalog(PromptCatalog::new(&root)),
+    )
+    .await
+    .unwrap();
+    let first = app
+        .presenter()
+        .conversation
+        .reply(CharacterId::Crazy, "first".into())
+        .unwrap();
+    let first_call = server.next().await;
+    assert!(first_call.body.to_string().contains("Name Old"));
+    let queued = app
+        .presenter()
+        .conversation
+        .reply(CharacterId::Crazy, "queued".into())
+        .unwrap();
+    std::fs::write(
+        set.join("config.json"),
+        r#"{"variables":{"player_name":"New"}}"#,
+    )
+    .unwrap();
+    std::fs::write(set.join("Main/identity.txt"), "Changed [{player_name}]").unwrap();
+    std::fs::write(set.join("PostScripts/main_rules.postscript"),
+        "RULE rewrite\n MATCH TEXT \"hello\"\n ACTIONS\n REPLACE_MATCH WITH \"fresh\"\n END_ACTIONS\nEND_RULE").unwrap();
+    SettingsApi::edit::<CharactersSettings>(|settings| {
+        settings.crazy.prompt_set = Some("Alternative".into());
+    })
+    .unwrap();
+    first_call.respond.send(Reply::Text("hello")).unwrap();
+    assert!(matches!(
+        finished(&first).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    let queued_call = server.next().await;
+    assert!(
+        queued_call.body.to_string().contains("Name Old"),
+        "queued prompt must retain old resources"
+    );
+    assert!(!queued_call.body.to_string().contains("Changed New"));
+    queued_call.respond.send(Reply::Text("hello")).unwrap();
+    assert!(matches!(
+        finished(&queued).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    let next = app
+        .presenter()
+        .conversation
+        .reply(CharacterId::Crazy, "new".into())
+        .unwrap();
+    let new_call = server.next().await;
+    assert!(new_call.body.to_string().contains("Alternate New"));
+    new_call.respond.send(Reply::Text("hello")).unwrap();
+    assert!(matches!(
+        finished(&next).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    SettingsApi::edit::<CharactersSettings>(|settings| {
+        settings.crazy.prompt_set = Some("Default".into());
+    })
+    .unwrap();
+    let changed = app
+        .presenter()
+        .conversation
+        .reply(CharacterId::Crazy, "changed".into())
+        .unwrap();
+    let changed_call = server.next().await;
+    assert!(changed_call.body.to_string().contains("Changed New"));
+    changed_call.respond.send(Reply::Text("hello")).unwrap();
+    assert!(matches!(
+        finished(&changed).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+
+    std::fs::write(
+        set.join("PostScripts/main_rules.postscript"),
+        "unexpected invalid rule",
+    )
+    .unwrap();
+    assert!(matches!(
+        app.presenter()
+            .conversation
+            .reply(CharacterId::Crazy, "invalid".into()),
+        Err(neuromita::presentation::PresenterError::Submit(
+            SubmitError::PromptUnavailable(_)
+        ))
+    ));
+    assert!(server.calls.try_recv().is_err());
+
+    let history = app
+        .character(CharacterId::Crazy)
+        .unwrap()
+        .get_context(app.at())
+        .await
+        .unwrap();
+    let contents: Vec<_> = history
+        .view
+        .messages()
+        .iter()
+        .map(|message| message.content.clone())
+        .collect();
+    assert!(contents.iter().filter(|m| m.as_str() == "cached").count() >= 2);
+    assert!(contents.iter().any(|m| m.as_str() == "fresh"));
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn preset_is_frozen_at_admission_and_missing_preset_is_rejected_before_queue() {
     use std::collections::BTreeMap;
 
     use neuromita::{
@@ -2590,7 +3218,7 @@ async fn preset_is_resolved_only_when_queued_generation_begins() {
         RequestState::Finished(RequestOutcome::Success(_))
     ));
     let second_call = server.next().await;
-    assert!(second_call.path.contains("models/beta:generateContent"));
+    assert!(second_call.path.contains("models/alpha:generateContent"));
     second_call
         .respond
         .send(Reply::Text("second reply"))
@@ -2624,14 +3252,13 @@ async fn preset_is_resolved_only_when_queued_generation_begins() {
         settings.crazy.presets.reply = PresetSelection::Specific(PresetId(999));
     })
     .unwrap();
-    let missing = app
-        .presenter()
-        .chat
-        .reply(CharacterId::Crazy, "missing".into())
-        .unwrap();
     assert!(matches!(
-        finished(&missing).await.state,
-        RequestState::Finished(RequestOutcome::InternalError(_))
+        app.presenter()
+            .chat
+            .reply(CharacterId::Crazy, "missing".into()),
+        Err(neuromita::presentation::PresenterError::Submit(
+            SubmitError::PresetUnavailable
+        ))
     ));
     assert!(server.calls.try_recv().is_err());
 
@@ -2987,5 +3614,267 @@ async fn conversation_clear_preview_is_guarded_and_does_not_clear_other_characte
         .await
         .unwrap();
     api.conversation.apply_change(reset).unwrap();
+    app.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn conversation_single_message_hide_checks_event_identity_observer_and_timeline_anchor() {
+    use neuromita::{
+        presentation::{ConversationChange, ConversationError},
+        request::UserInput,
+    };
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+        preset("http://127.0.0.1:1/v1beta/"),
+        ResponseGenerator::new([
+            Arc::new(GeminiProvider::new().unwrap()) as Arc<dyn GenerationProvider>
+        ])
+        .unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+    let api = app.presenter();
+    api.characters
+        .observe(CharacterId::Crazy, UserInput::new("first".into()).unwrap())
+        .await
+        .unwrap();
+    api.characters
+        .observe(CharacterId::Kind, UserInput::new("private".into()).unwrap())
+        .await
+        .unwrap();
+    let first = api.conversation.snapshot(CharacterId::Crazy).await.unwrap();
+    let target = first.messages[0].event_id;
+    let private = api.conversation.snapshot(CharacterId::Kind).await.unwrap();
+    let foreign = private.messages[0].event_id;
+    assert!(matches!(
+        api.conversation
+            .preview_change(CharacterId::Crazy, ConversationChange::HideMessage(foreign))
+            .await,
+        Err(ConversationError::MessageNotVisible)
+    ));
+    assert_eq!(
+        api.conversation
+            .snapshot(CharacterId::Crazy)
+            .await
+            .unwrap()
+            .at,
+        first.at,
+        "unauthorized preview must not write a Timeline fact"
+    );
+    let stale = api
+        .conversation
+        .preview_change(CharacterId::Crazy, ConversationChange::HideMessage(target))
+        .await
+        .unwrap();
+    assert_eq!(stale.message_count(), 1);
+    api.characters
+        .observe(CharacterId::Crazy, UserInput::new("second".into()).unwrap())
+        .await
+        .unwrap();
+    assert!(matches!(
+        api.conversation.apply_change(stale),
+        Err(ConversationError::StalePreview)
+    ));
+    let fresh = api
+        .conversation
+        .preview_change(CharacterId::Crazy, ConversationChange::HideMessage(target))
+        .await
+        .unwrap();
+    assert_eq!(fresh.message_count(), 1);
+    api.conversation.apply_change(fresh).unwrap();
+    let visible = api.conversation.snapshot(CharacterId::Crazy).await.unwrap();
+    assert_eq!(visible.messages.len(), 1);
+    assert_ne!(visible.messages[0].event_id, target);
+    assert_eq!(visible.messages[0].content, "second");
+    let after_other = api.conversation.snapshot(CharacterId::Kind).await.unwrap();
+    assert_eq!(after_other.messages.len(), private.messages.len());
+    assert_eq!(after_other.messages[0].event_id, foreign);
+    assert!(matches!(
+        api.conversation
+            .preview_change(CharacterId::Crazy, ConversationChange::HideMessage(target))
+            .await,
+        Err(ConversationError::MessageNotVisible)
+    ));
+    app.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn conversation_history_page_is_bounded_observer_scoped_and_rejects_stale_prefix() {
+    use neuromita::{presentation::ConversationError, request::UserInput};
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+        preset("http://127.0.0.1:1/v1beta/"),
+        ResponseGenerator::new([
+            Arc::new(GeminiProvider::new().unwrap()) as Arc<dyn GenerationProvider>
+        ])
+        .unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+    let api = app.presenter();
+    for i in 0..205 {
+        api.characters
+            .observe(
+                CharacterId::Crazy,
+                UserInput::new(format!("history-{i}")).unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+    api.characters
+        .observe(
+            CharacterId::Kind,
+            UserInput::new("private-not-for-crazy".into()).unwrap(),
+        )
+        .await
+        .unwrap();
+    let snapshot = api.conversation.snapshot(CharacterId::Crazy).await.unwrap();
+    assert_eq!(snapshot.messages.len(), 205);
+    let older = api
+        .conversation
+        .history_page(CharacterId::Crazy, snapshot.at, snapshot.selection, 200)
+        .await
+        .unwrap();
+    assert_eq!(older.total, 205);
+    assert_eq!(older.messages.len(), 5);
+    assert_eq!(older.messages[0].content, "history-0");
+    assert_eq!(older.messages[4].content, "history-4");
+    assert!(
+        older
+            .messages
+            .iter()
+            .all(|message| message.content != "private-not-for-crazy")
+    );
+    let repeated = api
+        .conversation
+        .history_page(CharacterId::Crazy, snapshot.at, snapshot.selection, 200)
+        .await
+        .unwrap();
+    assert_eq!(older.messages, repeated.messages);
+    let tail = api
+        .conversation
+        .history_page(CharacterId::Crazy, snapshot.at, snapshot.selection, 0)
+        .await
+        .unwrap();
+    assert_eq!(tail.messages.len(), 200);
+    assert_eq!(tail.messages[0].content, "history-5");
+    let target = older.messages[0].event_id;
+    let preview = api
+        .conversation
+        .preview_change(
+            CharacterId::Crazy,
+            neuromita::presentation::ConversationChange::HideMessage(target),
+        )
+        .await
+        .unwrap();
+    api.conversation.apply_change(preview).unwrap();
+    assert!(matches!(
+        api.conversation
+            .history_page(CharacterId::Crazy, snapshot.at, snapshot.selection, 200)
+            .await,
+        Err(ConversationError::StalePreview)
+    ));
+    let current = api.conversation.snapshot(CharacterId::Crazy).await.unwrap();
+    let after_hide = api
+        .conversation
+        .history_page(CharacterId::Crazy, current.at, current.selection, 200)
+        .await
+        .unwrap();
+    assert_eq!(after_hide.total, 204);
+    assert_eq!(after_hide.messages.len(), 4);
+    assert!(!after_hide.messages.iter().any(|m| m.event_id == target));
+    app.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn conversation_single_message_revision_is_text_only_observer_scoped_and_anchor_atomic() {
+    use neuromita::{
+        presentation::{ConversationChange, ConversationError},
+        request::UserInput,
+    };
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+        preset("http://127.0.0.1:1/v1beta/"),
+        ResponseGenerator::new([
+            Arc::new(GeminiProvider::new().unwrap()) as Arc<dyn GenerationProvider>
+        ])
+        .unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+    let api = app.presenter();
+    api.characters
+        .observe(
+            CharacterId::Crazy,
+            UserInput::new("original".into()).unwrap(),
+        )
+        .await
+        .unwrap();
+    api.characters
+        .observe(CharacterId::Kind, UserInput::new("private".into()).unwrap())
+        .await
+        .unwrap();
+    let original = api.conversation.snapshot(CharacterId::Crazy).await.unwrap();
+    let target = original.messages[0].event_id;
+    let other = api.conversation.snapshot(CharacterId::Kind).await.unwrap();
+    let foreign = other.messages[0].event_id;
+    assert!(matches!(
+        api.conversation
+            .preview_change(
+                CharacterId::Crazy,
+                ConversationChange::ReviseMessage(foreign, "unauthorized".into())
+            )
+            .await,
+        Err(ConversationError::MessageNotVisible)
+    ));
+    assert!(matches!(
+        api.conversation
+            .preview_change(
+                CharacterId::Crazy,
+                ConversationChange::ReviseMessage(target, "  ".into())
+            )
+            .await,
+        Err(ConversationError::InvalidMessageEdit)
+    ));
+    let stale = api
+        .conversation
+        .preview_change(
+            CharacterId::Crazy,
+            ConversationChange::ReviseMessage(target, "stale".into()),
+        )
+        .await
+        .unwrap();
+    api.characters
+        .observe(CharacterId::Crazy, UserInput::new("newer".into()).unwrap())
+        .await
+        .unwrap();
+    assert!(matches!(
+        api.conversation.apply_change(stale),
+        Err(ConversationError::StalePreview)
+    ));
+    let fresh = api
+        .conversation
+        .preview_change(
+            CharacterId::Crazy,
+            ConversationChange::ReviseMessage(target, "revised".into()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fresh.message_count(), 1);
+    api.conversation.apply_change(fresh).unwrap();
+    let updated = api.conversation.snapshot(CharacterId::Crazy).await.unwrap();
+    assert_eq!(updated.messages.len(), 2);
+    assert_eq!(updated.messages[0].event_id, target);
+    assert_eq!(updated.messages[0].content, "revised");
+    assert_eq!(updated.messages[1].content, "newer");
+    let unaffected = api.conversation.snapshot(CharacterId::Kind).await.unwrap();
+    assert_eq!(unaffected.messages[0].event_id, foreign);
+    assert_eq!(unaffected.messages[0].content, "private");
     app.shutdown().await.unwrap();
 }

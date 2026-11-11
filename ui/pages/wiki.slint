@@ -1,0 +1,133 @@
+import { Theme, Icons } from "../theme.slint";
+import { Label, Icon, ActionSurface } from "../components/controls.slint";
+import { ScrollView } from "std-widgets.slint";
+
+export struct WikiArticleEntry {
+    id: string,
+    title: string,
+}
+
+export component WikiReader inherits Rectangle {
+    in property <[WikiArticleEntry]> articles;
+    in property <string> current-article;
+    in property <string> current-title;
+    in property <styled-text> article-text;
+    in property <string> language: "ru";
+    in property <bool> can-back;
+    in property <bool> can-forward;
+    callback open-article(string);
+    callback open-link(string);
+    callback back();
+    callback forward();
+    callback change-language(string);
+
+    background: Theme.background;
+    HorizontalLayout {
+        padding: 24px;
+        spacing: 18px;
+        Rectangle {
+            width: 240px;
+            border-radius: 14px;
+            background: Theme.sidebar;
+            border-width: 1px;
+            border-color: Theme.border;
+            VerticalLayout {
+                padding: 12px;
+                spacing: 7px;
+                HorizontalLayout {
+                    height: 42px;
+                    spacing: 9px;
+                    Icon { source: Icons.wiki; width: 20px; height: 20px; }
+                    Label { text: root.language == "ru" ? "Вики NeuroMita" : "NeuroMita Wiki"; font-weight: 700; font-size: 16px; }
+                }
+                Rectangle { height: 1px; background: Theme.divider; }
+                for item in root.articles: ActionSurface {
+                    height: 43px;
+                    label: item.title;
+                    selected: root.current-article == item.id;
+                    background: self.selected ? Theme.selected : Theme.hover;
+                    HorizontalLayout {
+                        padding-left: 12px; padding-right: 10px;
+                        Label { text: item.title; overflow: elide; min-width: 0px; }
+                    }
+                    activated => { root.open-article(item.id); }
+                }
+                Rectangle { vertical-stretch: 1; background: transparent; }
+                Label {
+                    text: root.language == "ru" ? "Документация доступна без сети" : "Documentation is available offline";
+                    color: Theme.muted;
+                    wrap: word-wrap;
+                    font-size: 11px;
+                    height: 45px;
+                }
+            }
+        }
+        Rectangle {
+            horizontal-stretch: 1; min-width: 0px;
+            background: Theme.panel;
+            border-width: 1px; border-color: Theme.border; border-radius: 14px;
+            VerticalLayout {
+                padding: 18px;
+                spacing: 12px;
+                HorizontalLayout {
+                    height: 35px; spacing: 7px;
+                    ActionSurface {
+                        width: 35px; height: 35px; label: "Back";
+                        enabled: root.can-back; background: Theme.hover;
+                        Label { text: "‹"; horizontal-alignment: center; font-size: 25px; }
+                        activated => { root.back(); }
+                    }
+                    ActionSurface {
+                        width: 35px; height: 35px; label: "Forward";
+                        enabled: root.can-forward; background: Theme.hover;
+                        Label { text: "›"; horizontal-alignment: center; font-size: 25px; }
+                        activated => { root.forward(); }
+                    }
+                    ActionSurface {
+                        width: 65px; height: 35px; label: "Wiki home"; background: Theme.hover;
+                        Label { text: root.language == "ru" ? "Домой" : "Home"; horizontal-alignment: center; }
+                        activated => { root.open-article("index.md"); }
+                    }
+                    Label {
+                        text: root.current-title;
+                        horizontal-stretch: 1;
+                        min-width: 0px;
+                        font-size: 19px;
+                        font-weight: 700;
+                        overflow: elide;
+                    }
+                    ActionSurface {
+                        width: 43px; height: 35px; label: "Русский";
+                        selected: root.language == "ru";
+                        background: self.selected ? Theme.selected : Theme.hover;
+                        Label { text: "RU"; horizontal-alignment: center; }
+                        activated => { root.change-language("ru"); }
+                    }
+                    ActionSurface {
+                        width: 43px; height: 35px; label: "English";
+                        selected: root.language == "en";
+                        background: self.selected ? Theme.selected : Theme.hover;
+                        Label { text: "EN"; horizontal-alignment: center; }
+                        activated => { root.change-language("en"); }
+                    }
+                }
+                Rectangle { height: 1px; background: Theme.divider; }
+                ScrollView {
+                    vertical-stretch: 1;
+                    content-width: self.visible-width;
+                    StyledText {
+                        x: 10px;
+                        y: 10px;
+                        width: parent.width - 20px;
+                        height: self.preferred-height;
+                        text: root.article-text;
+                        default-color: Theme.text;
+                        default-font-size: 14px;
+                        link-color: Theme.accent-hover;
+                        link-clicked(url) => { root.open-link(url); }
+                    }
+                }
+            }
+        }
+    }
+}

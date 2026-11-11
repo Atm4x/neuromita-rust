@@ -30,6 +30,10 @@ export global AiEngineUi {
     in-out property <bool> hub-available: false;
     in-out property <bool> maintenance-open: true;
     in-out property <string> backend-notice;
+    in-out property <string> embedding-status: "Не настроен";
+    in-out property <string> reranker-status: "Не настроен";
+    in-out property <bool> embedding-failed: false;
+    in-out property <bool> reranker-failed: false;
     callback refresh-hardware();
     callback open-hub();
     callback apply-mode(string);
@@ -213,6 +217,31 @@ export component AiEngineWorkspace inherits VerticalLayout {
                                 : I18n.i18n("settings.ai-engine.shared-detail", "TTS, ASR, RAG и Beats работают в одном процессе и используют общий CUDA context. Это режим с минимальным расходом VRAM.");
                             color: AiEngineUi.process-mode == "split" ? #f0a64a : SettingsTheme.muted;
                         }
+                    }
+                }
+            }
+
+            Card {
+                height: max(210px, knowledge-details.preferred-height + 40px);
+                vertical-stretch: 0;
+                background: #111321;
+                HorizontalLayout {
+                    padding: 20px; spacing: 16px;
+                    EngineIcon { glyph: "\u{f0c3}"; }
+                    knowledge-details := VerticalLayout {
+                        padding: 0px; spacing: 7px; horizontal-stretch: 1; alignment: start;
+                        EngineCardTitle { text: I18n.i18n("settings.ai-engine.knowledge-workers", "Поиск памяти и RAG"); }
+                        EngineCardSubtitle { text: I18n.i18n("settings.ai-engine.knowledge-workers-detail", "Состояние Python-процессов Embedding и Reranker. Перезапуск выполняется управлением AI runtime, не автоматически."); }
+                        HorizontalLayout { height: 22px; vertical-stretch: 0; spacing: 8px;
+                            Centered { EngineCardTitle { text: "Embedding"; font-size: 13px; } }
+                            if AiEngineUi.embedding-failed: EngineChip { label: I18n.i18n("settings.ai-engine.failed", "Ошибка"); kind: "warning"; }
+                        }
+                        EngineCardSubtitle { text: AiEngineUi.embedding-status; color: AiEngineUi.embedding-failed ? #f0a64a : SettingsTheme.muted; }
+                        HorizontalLayout { height: 22px; vertical-stretch: 0; spacing: 8px;
+                            Centered { EngineCardTitle { text: "Reranker"; font-size: 13px; } }
+                            if AiEngineUi.reranker-failed: EngineChip { label: I18n.i18n("settings.ai-engine.failed", "Ошибка"); kind: "warning"; }
+                        }
+                        EngineCardSubtitle { text: AiEngineUi.reranker-status; color: AiEngineUi.reranker-failed ? #f0a64a : SettingsTheme.muted; }
                     }
                 }
             }

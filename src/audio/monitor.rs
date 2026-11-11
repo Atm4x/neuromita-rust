@@ -1,10 +1,6 @@
 //! Core-owned, cancellable microphone loopback. Audio is bounded and never persisted.
 
-use super::{
-    device::{AudioCapture, DeviceError},
-    native::NativeCapture,
-    vad::SAMPLE_RATE_HZ,
-};
+use super::{device::DeviceError, native::NativeMonitorCapture};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::{
     collections::VecDeque,
@@ -42,8 +38,8 @@ impl MicrophoneMonitor {
 
     pub async fn start(&mut self, backend: &str, identity: &str) -> Result<(), DeviceError> {
         self.stop().await;
-        let setup = NativeCapture::start(backend, identity).and_then(|capture| {
-            NativeOutput::start(SAMPLE_RATE_HZ).map(|output| (capture, output))
+        let setup = NativeMonitorCapture::start(backend, identity).and_then(|capture| {
+            NativeOutput::start(capture.sample_rate()).map(|output| (capture, output))
         });
         let (mut capture, output) = match setup {
             Ok(value) => value,
@@ -70,11 +66,11 @@ impl MicrophoneMonitor {
                 loop {
                     tokio::select! {
                         _ = cancelled.cancelled() => return Ok(()),
-                        frame = capture.next_frame() => {
-                            let frame = frame?.ok_or_else(|| DeviceError::Stopped("microphone stream ended".into()))?;
+                        samples = capture.next_samples() => {
+                            let samples = samples?.ok_or_else(|| DeviceError::Stopped("microphone stream ended".into()))?;
                             output.check()?;
-                            output.write(&frame);
-                            let rms = (frame.iter().map(|sample| f64::from(*sample).powi(2)).sum::<f64>() / frame.len() as f64).sqrt() / f64::from(i16::MAX);
+                            output.write(&samples);
+                            let rms = (samples.iter().map(|sample| f64::from(*sample).powi(2)).sum::<f64>() / samples.len() as f64).sqrt() / f64::from(i16::MAX);
                             frames += 1;
                             if frames % 6 == 0 {
                                 updates.send_replace(MonitorSnapshot { running: true, device: device.clone(), level: (rms * 100.0).round().clamp(0.0, 100.0) as u8, error: None });

@@ -710,7 +710,7 @@ async fn complete_minimal_contracts() {
     })
     .await;
 
-    SettingsApi::edit::<VoiceSettings>(|voice| voice.in_game = true).unwrap();
+    SettingsApi::edit::<VoiceSettings>(|voice| voice.in_launcher = true).unwrap();
     let before = presenter
         .characters
         .state(CharacterId::Crazy)

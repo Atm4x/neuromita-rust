@@ -10,6 +10,8 @@ export { ChatRow, ChatStatus }
 
 export component SandboxPage inherits Rectangle {
     in property <[ChatRow]> messages;
+    in property <bool> has-older;
+    in property <bool> older-loading;
     in property <int> clients;
     in property <bool> server-running;
     in property <bool> connected;
@@ -17,6 +19,8 @@ export component SandboxPage inherits Rectangle {
     in property <string> generation-error;
     in property <bool> connecting;
     in property <bool> sending;
+    in property <string> active-request-id;
+    in property <int> microphone-phase;
     in property <int> character;
     in property <string> model;
     in property <string> preset;
@@ -31,13 +35,20 @@ export component SandboxPage inherits Rectangle {
     in property <string> stress;
     in property <string> accepted;
     in-out property <string> draft;
+    in-out property <string> attachment-path;
     in-out property <string> model-input;
     in-out property <bool> follow-tail;
     callback connect(string);
     callback send(string);
+    callback attach(string, string);
     callback cancel(string);
+    callback retry(string);
+    callback microphone-toggle(bool);
+    callback hide-message(string);
+    callback copy-message(string);
     callback select-character(int);
     callback refresh();
+    callback load-older();
     callback set-volume(int);
     callback dismiss-error();
     callback home();
@@ -73,12 +84,21 @@ export component SandboxPage inherits Rectangle {
             Rectangle {
                 horizontal-stretch: 1; min-width: 0px;
                 SandboxChat {
-                    width: 100%; height: 100%; messages: root.messages; character: root.character;
-                    connected: root.generation-ready; sending: root.sending;
-                    draft <=> root.draft; follow-tail <=> root.follow-tail;
+                    width: 100%; height: 100%; messages: root.messages; has-older: root.has-older; older-loading: root.older-loading; character: root.character;
+                    connected: root.generation-ready; storage-connected: root.connected; sending: root.sending;
+                    active-request-id: root.active-request-id; microphone-phase: root.microphone-phase;
+                    generation-active: root.active > 0 || root.sending;
+                    draft <=> root.draft; attachment-path <=> root.attachment-path;
+                    follow-tail <=> root.follow-tail;
                     send(text) => { root.send(text); }
+                    attach(text, path) => { root.attach(text, path); }
                     cancel(id) => { root.cancel(id); }
+                    retry(id) => { root.retry(id); }
+                    microphone-toggle(enabled) => { root.microphone-toggle(enabled); }
+                    hide-message(id) => { root.hide-message(id); }
+                    copy-message(text) => { root.copy-message(text); }
                     refresh => { root.refresh(); }
+                    load-older => { root.load-older(); }
                 }
             }
             SandboxInspector {
@@ -98,7 +118,7 @@ export component SandboxPage inherits Rectangle {
             }
         }
     }
-    if ConversationUi.confirmation > 0 || ConversationUi.history || ConversationUi.diagnostics != "": ConversationDialog { width: 100%; height: 100%; messages: root.messages; }
+    if ConversationUi.confirmation > 0 || ConversationUi.edit-target != "" || ConversationUi.copy-open || ConversationUi.history || ConversationUi.diagnostics != "": ConversationDialog { width: 100%; height: 100%; messages: root.messages; }
     if root.error != "": VerticalLayout { width: 100%; height: 100%; padding-bottom: 24px; padding-left: 28px; padding-right: 28px; alignment: end;
         HorizontalLayout { padding: 0px; alignment: center;
             Rectangle {

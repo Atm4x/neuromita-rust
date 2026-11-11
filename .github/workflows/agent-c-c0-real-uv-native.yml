@@ -1,0 +1,46 @@
+name: AI C0 - real uv and managed CPython 3.12.10
+on:
+  push:
+    branches:
+      - codex/ai-platform-hub-c0-real-uv-cpython-acceptance-20261107
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.10.0"
+      - name: Native Linux pinned-uv managed-CPython acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev pkg-config
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+          uv --version | grep -Eq '^uv 0\.10\.0($|[[:space:]])'
+          export NEUROMITA_REAL_UV="$(command -v uv)"
+          rustup run 1.98.1 cargo fmt --all -- --check
+          rustup run 1.98.1 cargo test --locked --offline --test ai_managed_bootstrap_live -- --ignored --nocapture
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.10.0"
+      - name: Native Windows pinned-uv managed-CPython acceptance
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not ((uv --version).Trim() -match '^uv 0\.10\.0($|\s)')) { throw 'unexpected uv version' }
+          $env:NEUROMITA_REAL_UV = (Get-Command uv).Source
+          if ([string]::IsNullOrWhiteSpace($env:NEUROMITA_REAL_UV)) { throw 'uv executable not found' }
+          rustup run 1.98.1 cargo test --locked --offline --test ai_managed_bootstrap_live -- --ignored --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

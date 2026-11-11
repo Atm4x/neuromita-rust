@@ -4,12 +4,18 @@ import { SandboxTheme } from "theme.slint";
 import { Caption, GhostButton } from "controls.slint";
 import { ChatRow, ChatStatus } from "models.slint";
 import { I18n } from "../i18n.slint";
+import { SettingsUi } from "../settings/presets-state.slint";
 
 export component StatusText inherits Caption {
     in property <ChatStatus> status;
+    in property <bool> streaming-preview;
+    in property <string> tool-name;
+    in property <bool> tool-executing;
     color: status == ChatStatus.cancelled || status == ChatStatus.text-error || status == ChatStatus.internal-error ? #ff9baf : SandboxTheme.muted;
     font-size: 11px;
-    text: status == ChatStatus.pending ? I18n.i18n("sandbox.status.pending", "В очереди")
+    text: status == ChatStatus.text && tool-executing ? I18n.i18n("sandbox.status.tool", "Выполняет инструмент: ") + tool-name
+        : status == ChatStatus.pending ? I18n.i18n("sandbox.status.pending", "В очереди")
+        : status == ChatStatus.text && streaming-preview ? I18n.i18n("sandbox.status.stream-preview", "Печатает · черновик, ответ ещё не принят")
         : status == ChatStatus.text ? I18n.i18n("sandbox.status.text", "Генерация ответа…")
         : status == ChatStatus.text-ready ? I18n.i18n("sandbox.status.text-ready", "Предварительный ответ")
         : status == ChatStatus.voice ? I18n.i18n("sandbox.status.voice", "Подготовка озвучки · ответ ещё не принят")
@@ -43,6 +49,10 @@ export component MessageRow inherits VerticalLayout {
     in property <string> character-name;
     in property <length> bubble-width;
     callback cancel(string);
+    callback retry(string);
+    callback hide-message(string);
+    callback edit-message(string, string);
+    callback copy-message(string);
     padding: 0px; padding-top: 4px; padding-bottom: 4px; spacing: 4px;
     vertical-stretch: 0;
     HorizontalLayout {
@@ -74,6 +84,43 @@ export component MessageRow inherits VerticalLayout {
                 Text { text: root.item.text; font-family: SandboxTheme.font-family; font-size: SandboxTheme.chat-size;
                     color: root.item.user ? #fff6fb : #f3eaf3; wrap: word-wrap; min-width: 0px;
                 }
+                if root.item.attachment-summary != "": Rectangle {
+                    min-height: 30px; border-radius: 7px; border-width: 1px;
+                    border-color: #ffffff24; background: #ffffff0a;
+                    HorizontalLayout {
+                        padding-left: 10px; padding-right: 10px; padding-top: 6px; padding-bottom: 6px;
+                        Caption {
+                            text: I18n.i18n("sandbox.attachment.saved", "Вложение: ") + root.item.attachment-summary;
+                            color: SandboxTheme.text; font-size: 11px; horizontal-stretch: 1;
+                        }
+                    }
+                }
+                if !root.item.user && root.item.tool-name != "" && SettingsUi.structured-mode != 0: Rectangle {
+                    background: #a78bfa0d;
+                    border-color: #a78bfa33;
+                    border-width: 1px;
+                    border-radius: 8px;
+                    height: tool-card-layout.preferred-height + 16px;
+                    min-width: 0px;
+                    tool-card-layout := VerticalLayout {
+                        padding-left: 10px; padding-right: 10px;
+                        padding-top: 8px; padding-bottom: 8px;
+                        spacing: 2px;
+                        Caption {
+                            text: SettingsUi.structured-mode == 2 ? "JSON · tool_call" : "⚙️ tool_call: " + root.item.tool-name;
+                            color: #a78bfa;
+                            font-size: 12px;
+                            font-weight: 700;
+                        }
+                        if SettingsUi.structured-mode == 2 || (root.item.tool-args != "" && root.item.tool-args != "{}"): Text {
+                            text: SettingsUi.structured-mode == 2 ? root.item.tool-json : root.item.tool-args;
+                            color: #ddd6fe;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                            min-width: 0px;
+                        }
+                    }
+                }
                 if root.item.sequence != "": Caption { text: root.item.sequence; color: root.item.user ? #ffffff8c : #ffffff6b; font-size: SandboxTheme.chat-time-size; horizontal-alignment: right; }
             }
         }
@@ -88,10 +135,22 @@ export component MessageRow inherits VerticalLayout {
             }
         }
     }
+    if root.item.text != "": HorizontalLayout {
+        padding-left: root.item.user ? 0px : 52px; padding-right: 44px; spacing: 6px; height: 25px;
+        Rectangle { horizontal-stretch: 1; }
+        GhostButton { text: I18n.i18n("sandbox.message.copy", "Выделить и копировать"); height: 25px; activated => { root.copy-message(root.item.text); } }
+    }
+    if root.item.can-hide: HorizontalLayout {
+        padding-left: root.item.user ? 0px : 52px; padding-right: 44px; spacing: 6px; height: 25px;
+        Rectangle { horizontal-stretch: 1; }
+        if root.item.user: GhostButton { text: I18n.i18n("sandbox.message.edit", "Редактировать"); height: 25px; activated => { root.edit-message(root.item.event-id, root.item.text); } }
+        GhostButton { text: I18n.i18n("sandbox.message.hide", "Скрыть сообщение"); height: 25px; activated => { root.hide-message(root.item.event-id); } }
+    }
     if root.item.status != ChatStatus.history && root.item.status != ChatStatus.success: HorizontalLayout {
         padding-left: root.item.user ? 0px : 52px; padding-right: 44px; spacing: 6px; height: 25px;
-        StatusText { status: root.item.status; horizontal-stretch: 1; min-width: 0px; }
+        StatusText { status: root.item.status; streaming-preview: root.item.status == ChatStatus.text && root.item.text != ""; tool-name: root.item.tool-name; tool-executing: root.item.tool-executing; horizontal-stretch: 1; min-width: 0px; }
         if root.item.can-cancel: GhostButton { text: I18n.i18n("sandbox.cancel", "Отменить"); height: 25px; activated => { root.cancel(root.item.request-id); } }
+        if root.item.can-retry: GhostButton { text: I18n.i18n("sandbox.retry", "Повторить запрос"); height: 25px; activated => { root.retry(root.item.request-id); } }
     }
     if root.item.detail != "": Text { text: root.item.detail; color: #ff9baf; font-family: SandboxTheme.font-family; font-size: 12px; wrap: word-wrap; }
 }

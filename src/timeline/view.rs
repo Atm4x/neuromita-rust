@@ -3,8 +3,8 @@ use serde_json::{Map, Value};
 use crate::identity::CharacterId;
 
 use super::domain::{
-    BranchId, CharacterMessageProjection, CharacterWorldProjection, KnownEvent, MessageRole,
-    ProjectedMessage, ProjectedWorldEvent, TimelineError, TimelineRepository, knowledge_change,
+    BranchId, CharacterMessageProjection, CharacterWorldProjection, MessageRole, ProjectedMessage,
+    ProjectedWorldEvent, TimelineError, TimelineRepository, character_view,
 };
 
 fn provider_document(message: ProjectedMessage) -> Map<String, Value> {
@@ -70,6 +70,7 @@ impl ContextEntry {
 pub struct MitaView {
     pub branch: BranchId,
     pub through: u64,
+    character: CharacterId,
     projection: CharacterMessageProjection,
     world: CharacterWorldProjection,
 }
@@ -83,26 +84,30 @@ impl MitaView {
     ) -> Self {
         let mut projection = CharacterMessageProjection::new(character);
         let mut world = CharacterWorldProjection::new();
-        for fact in facts
+        let prefix = facts
             .iter()
-            .filter(|fact| fact.sequence <= through && fact.draft.observers.contains(&character))
-        {
-            let known = KnownEvent {
-                fact: fact.clone(),
-                learned_at: fact.sequence,
-            };
-            if knowledge_change(fact, character).is_some_and(|change| change.reset) {
-                world.reset();
-            }
+            .filter(|fact| fact.sequence <= through)
+            .cloned()
+            .collect::<Vec<_>>();
+        for known in character_view(&prefix, character) {
             projection.observe(&known);
             world.observe(&known);
         }
         Self {
             branch,
             through,
+            character,
             projection,
             world,
         }
+    }
+
+    pub fn character(&self) -> CharacterId {
+        self.character
+    }
+
+    pub fn observer(&self) -> CharacterId {
+        self.projection.observer()
     }
 
     pub fn count(&self) -> usize {
@@ -115,6 +120,11 @@ impl MitaView {
 
     pub fn messages(&self) -> Vec<ProjectedMessage> {
         self.projection.messages()
+    }
+
+    /// A typed, bounded page of observer-visible canonical messages.
+    pub fn message_page(&self, limit: usize, offset: usize) -> Vec<ProjectedMessage> {
+        self.projection.page(limit, offset)
     }
 
     pub fn world_events(&self) -> Vec<ProjectedWorldEvent> {
@@ -164,32 +174,16 @@ impl TimelineMessageQueries {
                 "context position exceeds branch head",
             ));
         }
-        let mut projection = CharacterMessageProjection::new(character);
-        let mut world = CharacterWorldProjection::new();
+        let mut facts = Vec::new();
         let mut cursor = 0_u64;
         loop {
-            let page = repository.read(branch, cursor, Some(head), 128, Some(character))?;
+            let page = repository.read(branch, cursor, Some(head), 128, None)?;
             if page.is_empty() {
                 break;
             }
-            for fact in &page {
-                let known = KnownEvent {
-                    fact: fact.clone(),
-                    learned_at: fact.sequence,
-                };
-                if knowledge_change(fact, character).is_some_and(|change| change.reset) {
-                    world.reset();
-                }
-                projection.observe(&known);
-                world.observe(&known);
-            }
             cursor = page.last().expect("nonempty page").sequence;
+            facts.extend(page);
         }
-        Ok(MitaView {
-            branch,
-            through: head,
-            projection,
-            world,
-        })
+        Ok(MitaView::from_facts(branch, head, character, &facts))
     }
 }

@@ -15,11 +15,37 @@ use crate::{
         GenerationError, GenerationObserver, GenerationRequest, LlmConversation, PreparedRequest,
         PresetCatalog, ProviderReply, ResponseGenerator,
     },
-    knowledge::KnowledgeRetrieval,
+    interaction::TurnIntent,
+    knowledge::{
+        KnowledgeRetrieval,
+        document_generation::select_for_generation as select_document_generation,
+        generation_fusion::select_lexical_generation,
+        history_generation::render_archived_history_evidence,
+        history_retrieval::{
+            HistorySearchConfig, search_archived_history, search_archived_history_fts,
+        },
+        history_window::HistoryWindow,
+        retrieval_fusion::{FusionMode, RetrievalMethod},
+    },
+    settings::HistoryGenerationMode,
     settings::SettingsOwner,
     timeline::selection::TimelineSelection,
     voice::{VoiceError, VoiceOptions, VoiceProvider},
 };
+
+pub(crate) trait ProviderDispatchFence: Send + Sync {
+    fn validate_knowledge(
+        &self,
+        turn: crate::timeline::selection::TimelineTurn,
+        latest: bool,
+    ) -> Result<(), String>;
+    fn before_provider(
+        &self,
+        request: RequestId,
+        admission: crate::timeline::selection::TimelineAdmission,
+        protocol: Option<RegenerateProtocol>,
+    ) -> Result<(), String>;
+}
 
 #[derive(Clone)]
 pub(crate) struct MessageHandler {
@@ -30,11 +56,13 @@ pub(crate) struct MessageHandler {
     pub(crate) voice: Arc<dyn VoiceProvider>,
     pub(crate) settings: Arc<SettingsOwner>,
     pub(crate) presets: Arc<PresetCatalog>,
-    pub(crate) prompts: Option<Arc<crate::prompts::PromptCatalog>>,
+    pub(crate) prompt_preparation: super::prompt_preparation::PromptPreparation,
     pub(crate) finetune: Option<FineTuneCollector>,
     pub(crate) selection_updates: watch::Receiver<TimelineSelection>,
     pub(crate) context_updates: watch::Receiver<u64>,
     pub(crate) games: Arc<GamePolicy>,
+    pub(crate) assets: Option<Arc<crate::timeline::storage::assets::TimelineAssetStore>>,
+    pub(crate) dispatch_fence: Arc<dyn ProviderDispatchFence>,
 }
 
 impl MessageHandler {
@@ -105,32 +133,11 @@ impl MessageHandler {
         stop: CancellationToken,
     ) {
         let id = record.snapshot().metadata.id;
-        let prepared = tokio::select! {
-            biased;
-            _ = record.cancellation.cancelled() => { record.finish_cancelled(); return; }
-            context = self.character.prepare(
-                id,
-                Arc::from(message.guidance()),
-                message.intent(),
-                message.at(),
-                record.admission(),
-            ) => context,
-        };
-        let mut context = match prepared {
-            Ok(context) => context,
-            Err(CharacterError::StaleState) => {
-                record.cancel_with_reason(CancelReason::ContextChanged);
-                record.finish_cancelled();
-                return;
-            }
-            Err(error) => {
-                record.finish(RequestOutcome::InternalError(
-                    record.failure(error.to_string()),
-                ));
-                return;
-            }
-        };
-        let settings = match self.settings.snapshot_all() {
+        let settings = match record
+            .admitted_settings()
+            .map(Ok)
+            .unwrap_or_else(|| self.settings.snapshot_all())
+        {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 record.finish(RequestOutcome::InternalError(
@@ -145,79 +152,40 @@ impl MessageHandler {
             RequestSource::Client(_) => voice_settings.in_launcher,
             RequestSource::Game(_) => voice_settings.in_game,
         };
-        if self.prompts.is_none()
-            && settings
-                .values
-                .characters
-                .for_character(message.character_id())
-                .prompt_set
-                .is_some()
-        {
-            record.finish(RequestOutcome::InternalError(record.failure(
-                "prompt catalog is not configured for the explicitly selected prompt set".into(),
-            )));
-            return;
-        }
-        if let Some(catalog) = &self.prompts {
-            let selection = settings
-                .values
-                .characters
-                .for_character(message.character_id())
-                .prompt_set
-                .as_deref();
-            let variables = std::collections::BTreeMap::from([
-                (
-                    "attitude".to_owned(),
-                    serde_json::json!(context.state.attitude),
-                ),
-                (
-                    "boredom".to_owned(),
-                    serde_json::json!(context.state.boredom),
-                ),
-                ("stress".to_owned(), serde_json::json!(context.state.stress)),
-                (
-                    "CURRENT_INPUT".to_owned(),
-                    serde_json::json!(context.current_input.as_ref()),
-                ),
-                (
-                    "CHARACTER_ID".to_owned(),
-                    serde_json::json!(context.character_id.to_string()),
-                ),
-                ("SEED_INITIAL_MEMORIES".to_owned(), serde_json::json!(false)),
-                (
-                    "SEED_CHARACTER_MEMORIES".to_owned(),
-                    serde_json::json!(false),
-                ),
-                ("SEED_WORLD_LORE".to_owned(), serde_json::json!(false)),
-                ("SEED_ROOMS_LORE".to_owned(), serde_json::json!(false)),
-                ("SEED_MITAS_LORE".to_owned(), serde_json::json!(false)),
-                ("SEED_ENTITY_LINKS".to_owned(), serde_json::json!(false)),
-            ]);
-            let template = if matches!(message.intent(), crate::interaction::TurnIntent::React(_)) {
-                "react_template.txt"
-            } else {
-                "main_template.txt"
-            };
-            let result = catalog.list(message.character_id()).and_then(|sets| {
-                if sets.is_empty() && selection.is_none() {
-                    Ok(None)
-                } else {
-                    catalog
-                        .render(message.character_id(), selection, variables, template)
-                        .map(Some)
-                }
-            });
-            match result {
-                Ok(Some(rendered)) => context.prompt = Arc::from(rendered.system_text()),
-                Ok(None) => {}
-                Err(error) => {
-                    record.finish(RequestOutcome::InternalError(
-                        record.failure(error.to_string()),
-                    ));
-                    return;
-                }
+        let prepared = tokio::select! {
+            biased;
+            _ = record.cancellation.cancelled() => { record.finish_cancelled(); return; }
+            _ = stop.cancelled() => {
+                record.cancel_with_reason(CancelReason::Shutdown);
+                record.finish_cancelled();
+                return;
             }
-        }
+            result = self.prompt_preparation.prepare(
+                &self.character,
+                id,
+                Arc::from(message.guidance()),
+                message.intent(),
+                message.at(),
+                record.admission(),
+                record.admitted_prompt(),
+            ) => result,
+        };
+        let (mut context, prompt, post_dsl) = match prepared {
+            Ok(prepared) => (prepared.context, prepared.prompt, prepared.post_dsl),
+            Err(super::prompt_preparation::PromptPreparationError::Character(
+                CharacterError::StaleState,
+            )) => {
+                record.cancel_with_reason(CancelReason::ContextChanged);
+                record.finish_cancelled();
+                return;
+            }
+            Err(error) => {
+                record.finish(RequestOutcome::InternalError(
+                    record.failure(error.to_string()),
+                ));
+                return;
+            }
+        };
         context.runtime_context = message.game_context().cloned().map(Arc::new);
         let voice_options = voice_enabled.then_some(VoiceOptions {
             voice: voice_settings.voice,
@@ -230,12 +198,19 @@ impl MessageHandler {
             turn: context.turn,
             game: context.game_key,
             game_guard: context.game_guard,
+            require_exact_timeline_prefix: settings.values.history_generation.mode
+                != HistoryGenerationMode::Off,
         };
         record.prepared(context.clone());
         let preset_id = settings
             .values
             .selected_preset(message.character_id(), message.intent());
-        let preset = match self.presets.get(preset_id) {
+        let preset = match record
+            .admitted_preset()
+            .map(Some)
+            .map(Ok)
+            .unwrap_or_else(|| self.presets.get(preset_id))
+        {
             Ok(Some(preset)) => preset,
             Ok(None) => {
                 record.finish(RequestOutcome::InternalError(
@@ -264,6 +239,13 @@ impl MessageHandler {
                     source: message.source(),
                 })
             });
+        let admitted_documents = settings
+            .values
+            .document_generation
+            .sources
+            .get(&message.character_id())
+            .cloned()
+            .map(|source| (message.character_id(), source));
         let generated = tokio::select! {
             biased;
             _ = record.cancellation.cancelled() => GenerationRun::Cancelled,
@@ -281,18 +263,183 @@ impl MessageHandler {
             }
             response = async {
                 let query = LlmConversation::memory_query(&context);
-                let selected = self.knowledge
-                    .select_with_islands(context.character_id, &context.memories, &context.memory_islands, &query)
-                    .await
-                    .map_err(|error| GenerationError::Response(
-                        format!("knowledge retrieval failed: {error}")
-                    ))?;
-                let request = GenerationRequest::new(context, preset, selected);
+                let history_policy = settings.values.history_generation;
+                let checks_knowledge = !self.knowledge.is_lexical() || history_policy.mode != HistoryGenerationMode::Off;
+                let latest = matches!(message.at(), crate::timeline::ContextPosition::Latest);
+                if checks_knowledge {
+                    self.dispatch_fence.validate_knowledge(context.turn, latest).map_err(GenerationError::Response)?;
+                }
+                let joint_semantic = !self.knowledge.is_lexical()
+                    && matches!(history_policy.mode, HistoryGenerationMode::Vector | HistoryGenerationMode::Fusion);
+                let joint_lexical = self.knowledge.is_lexical()
+                    && matches!(history_policy.mode, HistoryGenerationMode::Keyword | HistoryGenerationMode::Fts);
+                let mut selected = if joint_lexical || joint_semantic {
+                    None
+                } else {
+                    self.knowledge
+                        .select_with_relations_at(context.character_id, &context.memories, &context.memory_islands, &context.memory_relations, &query, context.turn)
+                        .await
+                        .map_err(|error| GenerationError::Response(
+                            format!("knowledge retrieval failed: {error}")
+                        ))?
+                };
+                let mut history_window = None;
+                if history_policy.mode != HistoryGenerationMode::Off {
+                    let focus = match context.focus.intent {
+                        TurnIntent::Reply(id) | TurnIntent::React(id) => Some(id),
+                        TurnIntent::Initiate => None,
+                    };
+                    let window = HistoryWindow::capture(
+                        &context.view, focus, usize::from(history_policy.active_messages),
+                    );
+                    let history_query = query.chars().take(512).collect::<String>();
+                    let config = HistorySearchConfig {
+                        limit: if joint_lexical { 32 } else { usize::from(history_policy.max_results) },
+                        max_content_chars: usize::from(history_policy.max_content_chars),
+                    };
+                    if joint_semantic {
+                        selected = self.knowledge.select_joint_semantic_generation(
+                            context.character_id,
+                            &context.memories,
+                            &context.memory_islands,
+                            &context.memory_relations,
+                            &context.view,
+                            &window,
+                            &history_query,
+                            HistorySearchConfig {
+                                limit: usize::from(history_policy.max_results),
+                                max_content_chars: usize::from(history_policy.max_content_chars),
+                            },
+                            history_policy.mode == HistoryGenerationMode::Fusion,
+                            context.turn,
+                        ).await.map_err(|error| GenerationError::Response(
+                            format!("combined semantic generation evidence rejected: {error}")
+                        ))?;
+                    } else {
+                        let history_result = match history_policy.mode {
+                            HistoryGenerationMode::Off => unreachable!(),
+                            HistoryGenerationMode::Keyword => {
+                                search_archived_history(context.character_id, &context.view, &window, &history_query, config)
+                            }
+                            HistoryGenerationMode::Fts => {
+                                search_archived_history_fts(context.character_id, &context.view, &window, &history_query, config)
+                            }
+                            HistoryGenerationMode::Vector => {
+                                self.knowledge.search_archived_history_semantic_at(
+                                    context.character_id, &context.view, &window, &history_query,
+                                    config, FusionMode::VectorOnly, None, context.turn,
+                                ).await
+                            }
+                            HistoryGenerationMode::Fusion => {
+                                self.knowledge.search_archived_history_semantic_at(
+                                    context.character_id, &context.view, &window, &history_query,
+                                    config, FusionMode::Union, None, context.turn,
+                                ).await
+                            }
+                        }.map_err(|error| GenerationError::Response(format!(
+                            "selected history retrieval failed: {error}"
+                        )))?;
+                        if joint_lexical {
+                            let method = if history_policy.mode == HistoryGenerationMode::Fts {
+                                RetrievalMethod::Fts
+                            } else {
+                                RetrievalMethod::Keyword
+                            };
+                            selected = select_lexical_generation(
+                                context.character_id,
+                                &context.memories,
+                                &context.memory_islands,
+                                &context.memory_relations,
+                                &context.view,
+                                &window,
+                                &history_result,
+                                method,
+                                &history_query,
+                                HistorySearchConfig {
+                                    limit: usize::from(history_policy.max_results),
+                                    max_content_chars: usize::from(history_policy.max_content_chars),
+                                },
+                            ).map_err(|error| GenerationError::Response(format!(
+                                "combined generation evidence rejected: {error}"
+                            )))?;
+                        } else if let Some(evidence) = render_archived_history_evidence(
+                            context.character_id, &context.view, &window, &history_result,
+                            usize::from(history_policy.max_results),
+                            usize::from(history_policy.max_content_chars),
+                        ).map_err(|error| GenerationError::Response(format!(
+                            "history evidence rejected: {error}"
+                        )))? {
+                            match &mut selected {
+                                Some(text) => { text.push_str("\n"); text.push_str(&evidence); }
+                                None => selected = Some(evidence),
+                            }
+                        }
+                    }
+                    history_window = Some(window);
+                }
+                if history_policy.mode != HistoryGenerationMode::Off {
+                    let latest = self.character.memories().await.map_err(|error| {
+                        GenerationError::Response(format!("history selection check failed: {error}"))
+                    })?;
+                    if latest.anchor() != context.anchor {
+                        return Err(GenerationError::Response("history Timeline prefix changed during retrieval".into()));
+                    }
+                }
+                if let Some(source) = settings.values.document_generation.sources.get(&context.character_id) {
+                    let source = source.clone();
+                    let character = context.character_id;
+                    let document_query = query.chars().take(512).collect::<String>();
+                    let max_results = usize::from(settings.values.document_generation.max_results);
+                    let max_content_chars = usize::from(settings.values.document_generation.max_content_chars);
+                    let documents = tokio::task::spawn_blocking(move || {
+                        select_document_generation(character, &source.root, &source.index, &document_query, max_results, max_content_chars)
+                    }).await.map_err(|error| GenerationError::Response(format!(
+                        "document retrieval task failed: {error}"
+                    )))?.map_err(|error| GenerationError::Response(format!(
+                        "selected document retrieval failed: {error}"
+                    )))?;
+                    if let Some(documents) = documents {
+                        match &mut selected {
+                            Some(text) => { text.push_str("\n"); text.push_str(&documents); }
+                            None => selected = Some(documents),
+                        }
+                    }
+                }
+                if checks_knowledge {
+                    self.dispatch_fence.validate_knowledge(context.turn, latest).map_err(GenerationError::Response)?;
+                }
+                let request = GenerationRequest::new(context, preset, selected)
+                    .with_history_window(history_window)
+                    .with_model_memory_policy(settings.values.memory.model_add_policy())
+                    .with_prompt(prompt)
+                    .with_post_dsl(post_dsl)
+                    .with_tools(settings.values.tools.clone())
+                    .with_assets(self.assets.clone());
+                self.dispatch_fence
+                    .before_provider(id, record.admission(), record.regenerate_protocol())
+                    .map_err(GenerationError::Response)?;
                 let mut combined = RecordObserver {
                     record: &record,
                     capture: observer.as_mut(),
                 };
-                self.generator.generate_observed(request, &mut combined).await
+                let response = self.generator.generate_observed(request, &mut combined).await?;
+                if let Some((character, source)) = admitted_documents {
+                    tokio::task::spawn_blocking(move || {
+                        crate::knowledge::document_index::load_verified(
+                            &source.root,
+                            character,
+                            &source.index,
+                        )
+                    })
+                    .await
+                    .map_err(|error| GenerationError::Response(format!(
+                        "post-generation document verification task failed: {error}"
+                    )))?
+                    .map_err(|error| GenerationError::Response(format!(
+                        "selected document evidence changed before acceptance: {error}"
+                    )))?;
+                }
+                Ok(response)
             } => GenerationRun::Response(response),
         };
         let capture = self.persist_observation(observer.as_ref());
@@ -465,7 +612,9 @@ impl MessageHandler {
                 return;
             }
         };
-        record.mark_applied();
+        if !record.mark_applied() {
+            return;
+        }
         if let Some(invite) = accepted.game_invite.clone()
             && (!invite.auto_gated || self.games.auto_reactions)
         {
@@ -572,6 +721,27 @@ impl GenerationObserver for RecordObserver<'_> {
             capture.request_prepared(request.clone());
         }
         self.record.provider_requested(request);
+    }
+
+    fn stream_delta(&mut self, delta: &str) {
+        self.record.stream_delta(delta);
+    }
+
+    fn stream_reset(&mut self) {
+        self.record.stream_reset();
+    }
+
+    fn tool_started(
+        &mut self,
+        name: &str,
+        args: &serde_json::Map<String, serde_json::Value>,
+        spoken: &str,
+    ) {
+        self.record.tool_started(name, args, spoken);
+    }
+
+    fn tool_finished(&mut self) {
+        self.record.tool_finished();
     }
 
     fn response_received(&mut self, response: ProviderReply) {

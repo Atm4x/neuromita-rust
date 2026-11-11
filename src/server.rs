@@ -325,7 +325,10 @@ struct CommandCorrelation {
 fn settings_code(error: &SettingsError) -> ErrorCode {
     match error {
         SettingsError::Validation(_) => ErrorCode::InvalidValue,
-        SettingsError::Conflict { .. } => ErrorCode::SettingsConflict,
+        SettingsError::Conflict { .. } | SettingsError::MaintenanceActive => {
+            ErrorCode::SettingsConflict
+        }
+        SettingsError::MaintenanceUnpersisted => ErrorCode::CoreUnavailable,
         SettingsError::Storage(_) => ErrorCode::SettingsStorage,
         SettingsError::Uninitialized | SettingsError::Stopped => ErrorCode::CoreUnavailable,
     }
@@ -346,8 +349,12 @@ fn diagnostic_code(error: &DiagnosticLookupError) -> ErrorCode {
 
 fn submit_code(error: &SubmitError) -> ErrorCode {
     match error {
-        SubmitError::InvalidTargetEvent => ErrorCode::InvalidValue,
-        SubmitError::TimelineUnavailable => ErrorCode::CoreUnavailable,
+        SubmitError::InvalidTargetEvent
+        | SubmitError::PromptUnavailable(_)
+        | SubmitError::StaleTimeline => ErrorCode::InvalidValue,
+        SubmitError::TimelineUnavailable | SubmitError::PresetUnavailable => {
+            ErrorCode::CoreUnavailable
+        }
         SubmitError::QueueFull => ErrorCode::QueueFull,
         SubmitError::Uninitialized
         | SubmitError::Stopped
@@ -691,6 +698,13 @@ pub(crate) fn status_with_audio(snapshot: &RequestSnapshot, include_audio: bool)
             if let Some(text) = snapshot.provisional_text() {
                 message["text"] = json!(text);
                 message["provisional"] = json!(true);
+            }
+            if let Some(partial) = &snapshot.streamed_json {
+                message["streamed_bytes"] = json!(partial.len());
+                if let Some(text) = &snapshot.streamed_text {
+                    message["preview_text"] = json!(text);
+                    message["provisional"] = json!(true);
+                }
             }
         }
         RequestState::Cancelled => message["state"] = json!("cancelled"),

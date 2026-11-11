@@ -51,11 +51,19 @@ pub enum EmbeddingError {
     Http(u16),
     #[error("invalid embedding result: {0}")]
     Response(String),
+    #[error("embedding model space mismatch: expected {expected:?}, received {actual:?}")]
+    ModelSpaceMismatch {
+        expected: EmbeddingSpace,
+        actual: EmbeddingSpace,
+    },
+    #[error("semantic retrieval context has been superseded")]
+    StaleKnowledge,
 }
 
 #[derive(Debug, Clone)]
 pub struct Embedding {
     pub(crate) values: Arc<[f32]>,
+    space: EmbeddingSpace,
 }
 
 impl Embedding {
@@ -76,6 +84,7 @@ impl Embedding {
             ));
         }
         Ok(Self {
+            space: space.clone(),
             values: values
                 .into_iter()
                 .map(|value| (f64::from(value) / norm) as f32)
@@ -83,7 +92,18 @@ impl Embedding {
         })
     }
 
+    pub fn ensure_space(&self, expected: &EmbeddingSpace) -> Result<(), EmbeddingError> {
+        if self.space != *expected {
+            return Err(EmbeddingError::ModelSpaceMismatch {
+                expected: expected.clone(),
+                actual: self.space.clone(),
+            });
+        }
+        Ok(())
+    }
+
     pub(crate) fn similarity(&self, other: &Self) -> f64 {
+        debug_assert_eq!(self.space, other.space);
         self.values
             .iter()
             .zip(other.values.iter())

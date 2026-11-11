@@ -96,10 +96,15 @@ fn export_is_a_complete_canonical_envelope() {
         [
             "capture",
             "characters",
+            "document_generation",
+            "history_generation",
             "interface",
+            "memory",
+            "onboarding",
             "presets",
             "reminders",
             "speech",
+            "tools",
             "voice"
         ]
     );
@@ -117,6 +122,56 @@ fn export_is_a_complete_canonical_envelope() {
         settings,
         "an exported backup is itself a valid store"
     );
+}
+
+#[test]
+fn model_memory_settings_roundtrip_and_reject_invalid_threshold() {
+    use neuromita::{generation::ModelMemoryAddPolicy, settings::MemorySettings};
+
+    let initial = AppSettings::initial_profile();
+    assert_eq!(initial.memory, MemorySettings::default());
+    assert_eq!(
+        initial.memory.model_add_policy(),
+        ModelMemoryAddPolicy::Ordinary
+    );
+    let mut enabled = initial.memory;
+    enabled.model_add_dedup_enabled = true;
+    assert_eq!(
+        enabled.model_add_policy(),
+        ModelMemoryAddPolicy::Lexical {
+            threshold_per_mille: 800,
+        }
+    );
+
+    let mut legacy = serde_json::to_value(&initial).unwrap();
+    legacy.as_object_mut().unwrap().remove("memory");
+    let decoded: AppSettings = serde_json::from_value(legacy).unwrap();
+    assert_eq!(decoded.memory, MemorySettings::default());
+
+    let mut disabled = decoded;
+    disabled.memory.model_add_dedup_enabled = false;
+    assert_eq!(
+        disabled.memory.model_add_policy(),
+        ModelMemoryAddPolicy::Ordinary
+    );
+    let store = StoredSettings {
+        revision: 8,
+        settings: disabled,
+    };
+    let bytes = SettingsTransfer::new(store.clone())
+        .unwrap()
+        .encode()
+        .unwrap();
+    assert_eq!(SettingsTransfer::decode(&bytes).unwrap().stored(), &store);
+
+    for threshold in [0, 499, 1001, u16::MAX] {
+        let mut invalid = store.clone();
+        invalid.settings.memory.threshold_per_mille = threshold;
+        assert!(matches!(
+            SettingsTransfer::new(invalid),
+            Err(SettingsTransferError::InvalidValue(_))
+        ));
+    }
 }
 
 #[test]
@@ -365,8 +420,13 @@ fn concurrent_writers_publish_whole_documents_only() {
     };
     let left_results = left_thread.join().unwrap();
     let right_results = right_thread.join().unwrap();
-    assert!(left_results.iter().any(|saved| *saved));
-    assert!(right_results.iter().any(|saved| *saved));
+    // Writers may fail fast while the other owner holds the portable-root lease.
+    assert!(
+        left_results
+            .iter()
+            .chain(&right_results)
+            .any(|saved| *saved)
+    );
 
     let final_store = JsonSettingsRepository::new(store_path);
     let loaded = final_store.load().unwrap();

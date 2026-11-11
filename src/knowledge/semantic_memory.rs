@@ -1,11 +1,13 @@
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
-    sync::{Arc, Mutex},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use super::{
     embedding::{Embedding, EmbeddingError, EmbeddingProvider, EmbeddingPurpose, EmbeddingSpace},
-    memory_context::{lexical_ranked, priority_rank, render_ranked_memory_context, tokens},
+    memory_context::{
+        lexical_ranked_scoped, priority_rank, render_ranked_memory_context_scoped, tokens,
+    },
     reranking::{RerankPolicy, RerankProvider, rerank_prefix},
     retrieval_fusion::{
         FusionConfig, FusionMode, RetrievalBucket, RetrievalHit, RetrievalKey, RetrievalMethod,
@@ -14,21 +16,48 @@ use super::{
 };
 use crate::{
     identity::CharacterId,
-    memory::{MemoryKind, MemoryState},
-    timeline::domain::{MemoryId, MemoryRecord},
+    identity::EventId,
+    memory::{CharacterMemories, MemoryKind, MemoryState},
+    timeline::domain::{MemoryId, MemoryRecord, ProjectedMessage},
+    timeline::selection::TimelineTurn,
+    timeline::{KnowledgeDispatchLease, KnowledgeDispatchSource},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct CacheKey {
     character: CharacterId,
     space: EmbeddingSpace,
-    id: MemoryId,
+    id: CachedSourceId,
     content: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum CachedSourceId {
+    Memory(MemoryId),
+    History(EventId),
 }
 
 struct EmbeddingCache {
     entries: HashMap<CacheKey, Embedding>,
     order: VecDeque<CacheKey>,
+    revision: u64,
+    snapshots: HashMap<CharacterId, AuthoritativeSnapshot>,
+    revisions: HashMap<CharacterId, u64>,
+    clear_revision: u64,
+    cache_write_epoch: u64,
+}
+
+struct AuthoritativeSnapshot {
+    turn: TimelineTurn,
+    active_ids: HashSet<CachedSourceId>,
+    memory_projection_known: bool,
+}
+
+#[derive(Clone, Copy)]
+struct RetrievalBarrier {
+    revision: u64,
+    clear_revision: u64,
+    cache_write_epoch: u64,
 }
 
 impl EmbeddingCache {
@@ -36,20 +65,164 @@ impl EmbeddingCache {
         Self {
             entries: HashMap::new(),
             order: VecDeque::new(),
+            revision: 0,
+            snapshots: HashMap::new(),
+            revisions: HashMap::new(),
+            clear_revision: 0,
+            cache_write_epoch: 0,
         }
     }
+    fn purge_character(&mut self, character: CharacterId, keep: Option<&HashSet<CacheKey>>) {
+        self.entries.retain(|key, _| {
+            key.character != character
+                || keep.is_some_and(|allowed| {
+                    matches!(key.id, CachedSourceId::History(_)) || allowed.contains(key)
+                })
+        });
+        self.order.retain(|key| self.entries.contains_key(key));
+    }
+
+    fn track(
+        &mut self,
+        character: CharacterId,
+        turn: Option<TimelineTurn>,
+        keys: &[CacheKey],
+    ) -> Result<RetrievalBarrier, EmbeddingError> {
+        if let Some(turn) = turn {
+            if turn.character != character {
+                return Err(EmbeddingError::StaleKnowledge);
+            }
+            let active = keys.iter().cloned().collect::<HashSet<_>>();
+            let active_ids = keys
+                .iter()
+                .filter(|key| matches!(key.id, CachedSourceId::Memory(_)))
+                .map(|key| key.id.clone())
+                .collect::<HashSet<_>>();
+            let previous = self.snapshots.get(&character);
+            if let Some(previous) = previous {
+                let newer_selection =
+                    turn.selection.generation > previous.turn.selection.generation;
+                let same_selection = turn.selection == previous.turn.selection;
+                if !newer_selection
+                    && (!same_selection
+                        || turn.context_head < previous.turn.context_head
+                        || (turn.context_head == previous.turn.context_head
+                            && turn.context_epoch != previous.turn.context_epoch)
+                        || (turn.context_head == previous.turn.context_head
+                            && previous.memory_projection_known
+                            && !active_ids.is_subset(&previous.active_ids)))
+                {
+                    return Err(EmbeddingError::StaleKnowledge);
+                }
+            }
+            let identical = previous.is_some_and(|previous| {
+                previous.memory_projection_known
+                    && same_context(previous.turn, turn)
+                    && previous.active_ids == active_ids
+            }) && self
+                .entries
+                .keys()
+                .filter(|key| {
+                    key.character == character && matches!(key.id, CachedSourceId::Memory(_))
+                })
+                .all(|key| active.contains(key));
+            if !identical {
+                let projection_only = previous.is_some_and(|previous| {
+                    !previous.memory_projection_known && same_context(previous.turn, turn)
+                });
+                let purge_all = previous.is_some_and(|previous| {
+                    previous.turn.selection != turn.selection
+                        || previous.turn.context_epoch != turn.context_epoch
+                });
+                self.purge_character(character, (!purge_all).then_some(&active));
+                self.revision = self.revision.wrapping_add(1);
+                if !projection_only {
+                    *self.revisions.entry(character).or_default() += 1;
+                }
+                self.snapshots.insert(
+                    character,
+                    AuthoritativeSnapshot {
+                        turn,
+                        active_ids,
+                        memory_projection_known: true,
+                    },
+                );
+            }
+        }
+        Ok(RetrievalBarrier {
+            revision: *self.revisions.get(&character).unwrap_or(&0),
+            clear_revision: self.clear_revision,
+            cache_write_epoch: self.cache_write_epoch,
+        })
+    }
+
+    fn unchanged(&self, character: CharacterId, barrier: RetrievalBarrier) -> bool {
+        self.clear_revision == barrier.clear_revision
+            && *self.revisions.get(&character).unwrap_or(&0) == barrier.revision
+    }
+
+    fn track_history(
+        &mut self,
+        character: CharacterId,
+        turn: Option<TimelineTurn>,
+    ) -> Result<RetrievalBarrier, EmbeddingError> {
+        if let Some(turn) = turn {
+            if turn.character != character {
+                return Err(EmbeddingError::StaleKnowledge);
+            }
+            if !self
+                .snapshots
+                .get(&character)
+                .is_some_and(|snapshot| same_context(snapshot.turn, turn))
+            {
+                let barrier = self.track(character, Some(turn), &[])?;
+                self.snapshots
+                    .get_mut(&character)
+                    .expect("tracked context")
+                    .memory_projection_known = false;
+                return Ok(barrier);
+            }
+        }
+        self.track(character, None, &[])
+    }
+
     fn insert(&mut self, key: CacheKey, embedding: Embedding, max: usize) {
         if self.entries.contains_key(&key) {
             return;
         }
         self.order.push_back(key.clone());
         self.entries.insert(key, embedding);
+        self.revision = self.revision.wrapping_add(1);
         while self.order.len() > max {
             if let Some(oldest) = self.order.pop_front() {
                 self.entries.remove(&oldest);
             }
         }
     }
+}
+
+fn same_context(left: TimelineTurn, right: TimelineTurn) -> bool {
+    left.selection == right.selection
+        && left.character == right.character
+        && left.context_head == right.context_head
+        && left.context_epoch == right.context_epoch
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmbeddingCachePreview {
+    pub space: EmbeddingSpace,
+    pub total_entries: usize,
+    pub entries_by_character: BTreeMap<CharacterId, usize>,
+    instance: uuid::Uuid,
+    revision: u64,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum EmbeddingCacheMaintenanceError {
+    #[error("embedding cache clearing requires explicit confirmation")]
+    ConfirmationRequired,
+    #[error("embedding cache preview is stale or belongs to another retriever")]
+    StalePreview,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +258,27 @@ impl SemanticRetrievalFilter {
     }
 }
 
+/// Explicit visibility policy for a read from one captured Timeline memory projection.
+/// Default retrieval remains active-only; forgotten facts are never admitted implicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryRetrievalScope {
+    ActiveOnly,
+    ActiveAndForgotten,
+    ForgottenOnly,
+}
+
+impl MemoryRetrievalScope {
+    fn admits(self, record: &MemoryRecord, as_of_unix_ms: u64) -> bool {
+        match (self, record.state) {
+            (Self::ActiveOnly | Self::ActiveAndForgotten, MemoryState::Active) => {
+                record.available_at(as_of_unix_ms)
+            }
+            (Self::ActiveAndForgotten | Self::ForgottenOnly, MemoryState::Forgotten) => true,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetrievalStatus {
     EmptyCorpus,
@@ -117,8 +311,20 @@ pub struct RetrievedMemory {
 pub struct SemanticMemoryRetriever {
     provider: Arc<dyn EmbeddingProvider>,
     cache: Mutex<EmbeddingCache>,
+    instance: uuid::Uuid,
     max_entries: usize,
     reranker: Option<(Arc<dyn RerankProvider>, RerankPolicy)>,
+    dispatch_authority: OnceLock<
+        Arc<
+            dyn Fn(
+                    TimelineTurn,
+                    Vec<KnowledgeDispatchSource>,
+                )
+                    -> super::embedding::EmbeddingFuture<'static, KnowledgeDispatchLease>
+                + Send
+                + Sync,
+        >,
+    >,
 }
 
 impl SemanticMemoryRetriever {
@@ -134,9 +340,50 @@ impl SemanticMemoryRetriever {
         Ok(Self {
             provider,
             cache: Mutex::new(EmbeddingCache::new()),
+            instance: uuid::Uuid::new_v4(),
             max_entries,
             reranker: None,
+            dispatch_authority: OnceLock::new(),
         })
+    }
+
+    /// Bind the retriever once to the Core Timeline owner. Standalone retrieval
+    /// remains explicitly caller-scoped; generation never trusts cache membership.
+    pub(crate) fn bind_dispatch_authority(
+        &self,
+        authority: Arc<
+            dyn Fn(
+                    TimelineTurn,
+                    Vec<KnowledgeDispatchSource>,
+                )
+                    -> super::embedding::EmbeddingFuture<'static, KnowledgeDispatchLease>
+                + Send
+                + Sync,
+        >,
+    ) -> Result<(), EmbeddingError> {
+        self.dispatch_authority.set(authority).map_err(|_| {
+            EmbeddingError::Configuration("semantic retriever already belongs to a Core".into())
+        })
+    }
+
+    pub(crate) async fn admit_dispatch(
+        &self,
+        turn: Option<TimelineTurn>,
+        sources: &[KnowledgeDispatchSource],
+    ) -> Result<Option<KnowledgeDispatchLease>, EmbeddingError> {
+        if let (Some(turn), Some(authority)) = (turn, self.dispatch_authority.get()) {
+            return authority(turn, sources.to_vec()).await.map(Some);
+        }
+        Ok(None)
+    }
+
+    pub(crate) async fn authorize_dispatch(
+        &self,
+        turn: Option<TimelineTurn>,
+        sources: &[KnowledgeDispatchSource],
+    ) -> Result<(), EmbeddingError> {
+        drop(self.admit_dispatch(turn, sources).await?);
+        Ok(())
     }
 
     pub fn with_reranker(
@@ -148,13 +395,154 @@ impl SemanticMemoryRetriever {
         Ok(self)
     }
 
+    /// The number of fused History candidates that a configured reranker can
+    /// reconsider before the user's final result limit is applied.
+    pub(crate) fn rerank_candidate_limit(&self) -> usize {
+        self.reranker.as_ref().map_or(0, |(_, policy)| policy.limit)
+    }
+
+    /// Apply the single configured reranker to any already-validated, character-scoped
+    /// fusion output. Memory and History share the same provider and strict error policy.
+    pub(crate) async fn rerank_fused(
+        &self,
+        query: &str,
+        hits: &mut [super::retrieval_fusion::FusedHit],
+        turn: Option<TimelineTurn>,
+    ) -> Result<(), EmbeddingError> {
+        if let Some((provider, policy)) = &self.reranker {
+            let evidence = hits
+                .iter()
+                .take(policy.limit)
+                .map(|hit| {
+                    let id = uuid::Uuid::parse_str(&hit.key.id)
+                        .map_err(|_| EmbeddingError::StaleKnowledge)?;
+                    match hit.key.source {
+                        RetrievalSource::Memory => Ok(KnowledgeDispatchSource::Memory(
+                            MemoryId(id),
+                            hit.content.clone(),
+                        )),
+                        RetrievalSource::History => Ok(KnowledgeDispatchSource::History(
+                            EventId(id),
+                            hit.content.clone(),
+                        )),
+                        _ => Err(EmbeddingError::StaleKnowledge),
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            {
+                let _dispatch = self.admit_dispatch(turn, &evidence).await?;
+                rerank_prefix(provider.as_ref(), query, hits, *policy).await?;
+            }
+            self.authorize_dispatch(turn, &evidence).await?;
+        }
+        Ok(())
+    }
+
+    /// Read-only, model-space scoped inspection of the derived in-memory index.
+    /// Never materializes memory text, vectors, or provider secrets.
+    pub fn preview_cache_clear(&self) -> EmbeddingCachePreview {
+        let cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let mut entries_by_character = BTreeMap::new();
+        for key in cache.entries.keys() {
+            *entries_by_character.entry(key.character).or_insert(0) += 1;
+        }
+        EmbeddingCachePreview {
+            space: self.provider.space().clone(),
+            total_entries: cache.entries.len(),
+            entries_by_character,
+            instance: self.instance,
+            revision: cache.revision,
+        }
+    }
+
+    /// The user-facing maintenance boundary. Rejects stale or foreign previews.
+    /// In-flight provider results may finish for their original caller, but cannot
+    /// repopulate this cache if they began before the confirmed clear.
+    pub fn clear_cache_confirmed(
+        &self,
+        preview: &EmbeddingCachePreview,
+        confirmed: bool,
+    ) -> Result<usize, EmbeddingCacheMaintenanceError> {
+        if !confirmed {
+            return Err(EmbeddingCacheMaintenanceError::ConfirmationRequired);
+        }
+        let mut cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if preview.instance != self.instance || preview.revision != cache.revision {
+            return Err(EmbeddingCacheMaintenanceError::StalePreview);
+        }
+        Ok(Self::clear_locked_cache(&mut cache))
+    }
+
+    pub(crate) fn needs_authoritative_refresh(
+        &self,
+        character: CharacterId,
+        turn: TimelineTurn,
+    ) -> bool {
+        let cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+
+        match cache.snapshots.get(&character) {
+            Some(snapshot) => {
+                !snapshot.memory_projection_known || !same_context(snapshot.turn, turn)
+            }
+            None => cache.entries.keys().any(|key| key.character == character),
+        }
+    }
+
+    /// Adopt a separately captured Timeline projection without starting any
+    /// embedding request. The same revision barrier governs retrieval and
+    /// idle reconciliation, so old in-flight work cannot restore evicted data.
+    pub(crate) fn refresh_authoritative(
+        &self,
+        character: CharacterId,
+        turn: TimelineTurn,
+        memories: &[MemoryRecord],
+    ) -> Result<(), EmbeddingError> {
+        let space = self.provider.space().clone();
+        let keys = memories
+            .iter()
+            .filter(|record| {
+                matches!(record.kind, MemoryKind::Fact | MemoryKind::RagOnly)
+                    && record.state == MemoryState::Active
+            })
+            .map(|record| CacheKey {
+                character,
+                space: space.clone(),
+                id: CachedSourceId::Memory(record.id),
+                content: record.content.clone(),
+            })
+            .collect::<Vec<_>>();
+        self.cache
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .track(character, Some(turn), &keys)?;
+        Ok(())
+    }
+
     pub fn clear_cache(&self) {
         let mut cache = self
             .cache
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
+        Self::clear_locked_cache(&mut cache);
+        cache.clear_revision = cache.clear_revision.wrapping_add(1);
+    }
+
+    fn clear_locked_cache(cache: &mut EmbeddingCache) -> usize {
+        let cleared = cache.entries.len();
         cache.entries.clear();
         cache.order.clear();
+        cache.revision = cache.revision.wrapping_add(1);
+        cache.cache_write_epoch = cache.cache_write_epoch.wrapping_add(1);
+        cleared
     }
 
     pub async fn retrieve(
@@ -190,18 +578,159 @@ impl SemanticMemoryRetriever {
         filter: SemanticRetrievalFilter,
         mode: FusionMode,
     ) -> Result<RetrievedMemory, EmbeddingError> {
-        let filter = filter.validate()?;
-        let config = FusionConfig {
-            mode,
-            limit: 1024,
-            minimum_graph: 0,
-        };
-        fuse(character, &[], config).map_err(|e| EmbeddingError::Configuration(e.to_string()))?;
-        let memories = memories
+        self.retrieve_with_fusion_at(character, memories, query, filter, mode, None)
+            .await
+    }
+
+    pub(crate) async fn retrieve_with_fusion_at(
+        &self,
+        character: CharacterId,
+        memories: &[MemoryRecord],
+        query: &str,
+        filter: SemanticRetrievalFilter,
+        mode: FusionMode,
+        turn: Option<TimelineTurn>,
+    ) -> Result<RetrievedMemory, EmbeddingError> {
+        if turn.is_none()
+            && self
+                .cache
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .snapshots
+                .contains_key(&character)
+        {
+            return Err(EmbeddingError::StaleKnowledge);
+        }
+        let admitted = memories
             .iter()
-            .filter(|record| record.kind == MemoryKind::Fact && record.state == MemoryState::Active)
+            .filter(|record| {
+                matches!(record.kind, MemoryKind::Fact | MemoryKind::RagOnly)
+                    && record.state == MemoryState::Active
+            })
             .cloned()
+            .collect();
+        self.retrieve_admitted_with_fusion(character, admitted, query, filter, mode, false, turn)
+            .await
+    }
+
+    /// Opt-in read of a single character's captured authoritative memory projection.
+    /// Active memories must be available at `as_of_unix_ms`; forgotten entries are
+    /// retained historical facts and require an explicitly selected scope. Deleted
+    /// entries are never searchable, and this method never restores any memory.
+    /// Callers are responsible for authorizing historical recall before rendering
+    /// its returned context into a model prompt.
+    pub async fn retrieve_scoped(
+        &self,
+        character: CharacterId,
+        snapshot: &CharacterMemories,
+        query: &str,
+        as_of_unix_ms: u64,
+        scope: MemoryRetrievalScope,
+        filter: SemanticRetrievalFilter,
+        mode: FusionMode,
+    ) -> Result<RetrievedMemory, EmbeddingError> {
+        let admitted = snapshot
+            .all()
+            .into_iter()
+            .filter(|record| {
+                matches!(record.kind, MemoryKind::Fact | MemoryKind::RagOnly)
+                    && scope.admits(record, as_of_unix_ms)
+            })
+            .collect();
+        self.retrieve_admitted_with_fusion(
+            character,
+            admitted,
+            query,
+            filter,
+            mode,
+            scope != MemoryRetrievalScope::ActiveOnly,
+            None,
+        )
+        .await
+    }
+
+    /// Rank only facts that were already admitted by an explicit, validated
+    /// forgotten-memory recall. Never broaden the selected IDs to the corpus.
+    pub(crate) async fn retrieve_recalled_forgotten(
+        &self,
+        character: CharacterId,
+        records: Vec<MemoryRecord>,
+        query: &str,
+        mode: FusionMode,
+    ) -> Result<RetrievedMemory, EmbeddingError> {
+        self.retrieve_admitted_with_fusion(
+            character,
+            records,
+            query,
+            SemanticRetrievalFilter::all(),
+            mode,
+            true,
+            None,
+        )
+        .await
+    }
+
+    /// The same derived cache and provider serves both canonical memory and
+    /// currently visible Timeline history. History membership is never cached.
+    pub(crate) async fn score_history_messages(
+        &self,
+        character: CharacterId,
+        messages: &[ProjectedMessage],
+        query: &str,
+        turn: Option<TimelineTurn>,
+    ) -> Result<(EmbeddingSpace, Vec<f64>, RetrievalCost), EmbeddingError> {
+        let sources = messages
+            .iter()
+            .map(|message| {
+                (
+                    CachedSourceId::History(message.event_id),
+                    message.content.as_str(),
+                )
+            })
             .collect::<Vec<_>>();
+        self.score_canonical_documents(character, &sources, query, turn)
+            .await
+            .map(|(space, scores, cost, _)| (space, scores, cost))
+    }
+
+    /// Score one caller-admitted Memory+History corpus using one query embedding.
+    /// Source identity remains typed in the existing derived embedding cache.
+    pub(crate) async fn score_joint_generation(
+        &self,
+        character: CharacterId,
+        memories: &[MemoryRecord],
+        messages: &[ProjectedMessage],
+        query: &str,
+        turn: TimelineTurn,
+    ) -> Result<(EmbeddingSpace, Vec<f64>, Vec<f64>, RetrievalCost), EmbeddingError> {
+        let sources = memories
+            .iter()
+            .map(|record| (CachedSourceId::Memory(record.id), record.content.as_str()))
+            .chain(messages.iter().map(|message| {
+                (
+                    CachedSourceId::History(message.event_id),
+                    message.content.as_str(),
+                )
+            }))
+            .collect::<Vec<_>>();
+        let (space, similarities, cost, barrier) = self
+            .score_canonical_documents(character, &sources, query, Some(turn))
+            .await?;
+        self.check_barrier(character, barrier)?;
+        let (memory, history) = similarities.split_at(memories.len());
+        Ok((space, memory.to_vec(), history.to_vec(), cost))
+    }
+
+    /// Only source identity + content + immutable model-space enter this cache.
+    /// No Timeline membership, branch visibility, or historical access survives
+    /// between calls; each caller must supply its freshly captured projection.
+    async fn score_canonical_documents(
+        &self,
+        character: CharacterId,
+        sources: &[(CachedSourceId, &str)],
+        query: &str,
+        turn: Option<TimelineTurn>,
+    ) -> Result<(EmbeddingSpace, Vec<f64>, RetrievalCost, RetrievalBarrier), EmbeddingError> {
         let space = self.provider.space().clone();
         let mut cost = RetrievalCost {
             embedding_requests: 0,
@@ -209,32 +738,67 @@ impl SemanticMemoryRetriever {
             embedded_characters: 0,
             cache_hits: 0,
         };
-        if memories.is_empty() {
-            return Ok(RetrievedMemory {
-                rendered: None,
-                selected_ids: Vec::new(),
-                matches: Vec::new(),
-                space,
-                status: RetrievalStatus::EmptyCorpus,
-                cost,
-            });
+
+        if sources.len() > 1024 {
+            return Err(EmbeddingError::Configuration(
+                "semantic source exceeds bounded per-query capacity".into(),
+            ));
         }
-        let keys: Vec<_> = memories
+        let query = query.chars().take(2048).collect::<String>();
+        if query.trim().is_empty() {
+            return Err(EmbeddingError::Configuration(
+                "semantic query is empty".into(),
+            ));
+        }
+        let keys = sources
             .iter()
-            .map(|memory| CacheKey {
+            .map(|(id, content)| CacheKey {
                 character,
                 space: space.clone(),
-                id: memory.id,
-                content: memory.content.clone(),
+                id: id.clone(),
+                content: (*content).to_string(),
             })
-            .collect();
-        let mut vectors: Vec<Option<Embedding>> = vec![None; memories.len()];
+            .collect::<Vec<_>>();
+        let evidence = sources
+            .iter()
+            .map(|(id, content)| match id {
+                CachedSourceId::Memory(id) => {
+                    KnowledgeDispatchSource::Memory(*id, (*content).to_owned())
+                }
+                CachedSourceId::History(id) => {
+                    KnowledgeDispatchSource::History(*id, (*content).to_owned())
+                }
+            })
+            .collect::<Vec<_>>();
+        let barrier = {
+            let mut cache = self
+                .cache
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if !sources.is_empty()
+                && sources
+                    .iter()
+                    .all(|(id, _)| matches!(id, CachedSourceId::History(_)))
+            {
+                cache.track_history(character, turn)?
+            } else {
+                cache.track(character, turn, &keys)?
+            }
+        };
+        if sources.is_empty() {
+            return Ok((space, Vec::new(), cost, barrier));
+        }
+        let mut vectors: Vec<Option<Embedding>> = vec![None; sources.len()];
         let mut missing = Vec::new();
+
         {
             let cache = self
                 .cache
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
+            if !cache.unchanged(character, barrier) {
+                return Err(EmbeddingError::StaleKnowledge);
+            }
             for (index, key) in keys.iter().enumerate() {
                 if let Some(vector) = cache.entries.get(key) {
                     cost.cache_hits += 1;
@@ -244,27 +808,42 @@ impl SemanticMemoryRetriever {
                 }
             }
         }
-        let query = query.chars().take(2048).collect::<String>();
-        if query.trim().is_empty() {
-            return Err(EmbeddingError::Configuration(
-                "semantic query is empty".into(),
-            ));
-        }
-        let query_vector = self
-            .provider
-            .embed(EmbeddingPurpose::Query, query.clone())
-            .await?;
+        let query_vector = {
+            let _dispatch = self.admit_dispatch(turn, &evidence).await?;
+            self.provider
+                .embed(EmbeddingPurpose::Query, query.clone())
+                .await?
+        };
+        self.authorize_dispatch(turn, &evidence).await?;
         cost.embedded_characters += query.chars().count();
         cost.embedding_requests += 1;
         cost.embedded_texts += 1;
+        query_vector.ensure_space(&space)?;
+        if query_vector.values.len() != space.dimensions
+            || query_vector.values.iter().any(|value| !value.is_finite())
+        {
+            return Err(EmbeddingError::Response("invalid query embedding".into()));
+        }
         if !missing.is_empty() {
+            if !self
+                .cache
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .unchanged(character, barrier)
+            {
+                return Err(EmbeddingError::StaleKnowledge);
+            }
             let texts = missing
                 .iter()
-                .map(|&i| memories[i].content.clone())
+                .map(|&index| sources[index].1.to_string())
                 .collect::<Vec<_>>();
             cost.embedded_characters +=
                 texts.iter().map(|text| text.chars().count()).sum::<usize>();
-            let fresh = self.provider.embed_documents(texts).await?;
+            let fresh = {
+                let _dispatch = self.admit_dispatch(turn, &evidence).await?;
+                self.provider.embed_documents(texts).await?
+            };
+            self.authorize_dispatch(turn, &evidence).await?;
             cost.embedding_requests += self.provider.document_request_count(missing.len());
             cost.embedded_texts += missing.len();
             if fresh.len() != missing.len() {
@@ -272,39 +851,122 @@ impl SemanticMemoryRetriever {
                     "document embedding count mismatch".into(),
                 ));
             }
+            for vector in &fresh {
+                vector.ensure_space(&space)?;
+            }
+            if fresh.iter().any(|vector| {
+                vector.values.len() != space.dimensions
+                    || vector.values.iter().any(|value| !value.is_finite())
+            }) {
+                return Err(EmbeddingError::Response(
+                    "invalid document embedding".into(),
+                ));
+            }
+            if self.provider.space() != &space {
+                return Err(EmbeddingError::Configuration(
+                    "embedding space changed during retrieval".into(),
+                ));
+            }
+            let mut cache = self
+                .cache
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
             for (&index, vector) in missing.iter().zip(fresh) {
-                if vector.values.len() != space.dimensions
-                    || vector.values.iter().any(|v| !v.is_finite())
-                {
-                    return Err(EmbeddingError::Response(
-                        "invalid document embedding".into(),
-                    ));
-                }
                 vectors[index] = Some(vector.clone());
-                let mut cache = self
-                    .cache
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner());
-                cache.insert(keys[index].clone(), vector, self.max_entries);
+                if !cache.unchanged(character, barrier) {
+                    return Err(EmbeddingError::StaleKnowledge);
+                }
+                if barrier.cache_write_epoch == cache.cache_write_epoch
+                    && (turn.is_some() || !cache.snapshots.contains_key(&character))
+                {
+                    cache.insert(keys[index].clone(), vector, self.max_entries);
+                }
             }
         }
-        if query_vector.values.len() != space.dimensions
-            || query_vector.values.iter().any(|v| !v.is_finite())
-        {
-            return Err(EmbeddingError::Response("invalid query embedding".into()));
+        if self.provider.space() != &space {
+            return Err(EmbeddingError::Configuration(
+                "embedding space changed during retrieval".into(),
+            ));
         }
-        let mut ranked = memories
-            .iter()
-            .zip(vectors.iter())
-            .map(|(m, v)| {
-                (
-                    m,
-                    v.as_ref()
+        Ok((
+            space,
+            vectors
+                .iter()
+                .map(|vector| {
+                    vector
+                        .as_ref()
                         .expect("filled embedding")
-                        .similarity(&query_vector),
-                )
-            })
+                        .similarity(&query_vector)
+                })
+                .collect(),
+            cost,
+            barrier,
+        ))
+    }
+
+    fn check_barrier(
+        &self,
+        character: CharacterId,
+        barrier: RetrievalBarrier,
+    ) -> Result<(), EmbeddingError> {
+        if self
+            .cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .unchanged(character, barrier)
+        {
+            Ok(())
+        } else {
+            Err(EmbeddingError::StaleKnowledge)
+        }
+    }
+
+    async fn retrieve_admitted_with_fusion(
+        &self,
+        character: CharacterId,
+        memories: Vec<MemoryRecord>,
+        query: &str,
+        filter: SemanticRetrievalFilter,
+        mode: FusionMode,
+        include_forgotten: bool,
+        turn: Option<TimelineTurn>,
+    ) -> Result<RetrievedMemory, EmbeddingError> {
+        let filter = filter.validate()?;
+        let config = FusionConfig {
+            mode,
+            limit: 1024,
+            minimum_graph: 0,
+        };
+        fuse(character, &[], config).map_err(|e| EmbeddingError::Configuration(e.to_string()))?;
+        if memories.is_empty() {
+            self.cache
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .track(character, turn, &[])?;
+            let space = self.provider.space().clone();
+            let cost = RetrievalCost {
+                embedding_requests: 0,
+                embedded_texts: 0,
+                embedded_characters: 0,
+                cache_hits: 0,
+            };
+            return Ok(RetrievedMemory {
+                rendered: None,
+                selected_ids: Vec::new(),
+                matches: Vec::new(),
+                space,
+                status: RetrievalStatus::EmptyCorpus,
+                cost,
+            });
+        }
+        let sources = memories
+            .iter()
+            .map(|record| (CachedSourceId::Memory(record.id), record.content.as_str()))
             .collect::<Vec<_>>();
+        let (space, similarities, cost, barrier) = self
+            .score_canonical_documents(character, &sources, &query, turn)
+            .await?;
+        let mut ranked = memories.iter().zip(similarities).collect::<Vec<_>>();
         ranked.sort_by(|(a, ascore), (b, bscore)| {
             bscore
                 .total_cmp(ascore)
@@ -335,7 +997,7 @@ impl SemanticMemoryRetriever {
         }];
         if !matches!(mode, FusionMode::VectorOnly) {
             let query_tokens = tokens(&query);
-            let lexical_hits = lexical_ranked(&memories, &query)
+            let lexical_hits = lexical_ranked_scoped(&memories, &query, include_forgotten)
                 .into_iter()
                 .filter(|memory| {
                     tokens(&memory.content)
@@ -361,17 +1023,16 @@ impl SemanticMemoryRetriever {
         }
         let mut fused = fuse(character, &buckets, config)
             .map_err(|error| EmbeddingError::Response(error.to_string()))?;
-        if let Some((provider, policy)) = &self.reranker {
-            rerank_prefix(provider.as_ref(), &query, &mut fused, *policy).await?;
-        }
+        self.rerank_fused(query, &mut fused, turn).await?;
         let by_id = memories
             .iter()
             .map(|memory| (memory.id.0.to_string(), memory))
             .collect::<HashMap<_, _>>();
-        let (rendered, selected_ids) = render_ranked_memory_context(
+        let (rendered, selected_ids) = render_ranked_memory_context_scoped(
             fused
                 .iter()
                 .filter_map(|hit| by_id.get(&hit.key.id).copied()),
+            include_forgotten,
         );
         let selected_set = selected_ids
             .iter()
@@ -391,6 +1052,14 @@ impl SemanticMemoryRetriever {
                     })
             })
             .collect();
+        if !self
+            .cache
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .unchanged(character, barrier)
+        {
+            return Err(EmbeddingError::StaleKnowledge);
+        }
         let status = if selected_ids.is_empty() {
             RetrievalStatus::NoMatches
         } else {
@@ -406,3 +1075,281 @@ impl SemanticMemoryRetriever {
         })
     }
 }
+
+#[cfg(test)]
+mod b84_tests {
+    use super::*;
+    #[tokio::test]
+    async fn history_only_scoring_never_replaces_canonical_memory_membership() {
+        use crate::timeline::{domain::BranchId, selection::TimelineSelection};
+        let character = CharacterId::Crazy;
+        let turn = TimelineTurn {
+            selection: TimelineSelection {
+                branch_id: BranchId(uuid::Uuid::new_v4()),
+                generation: 1,
+            },
+            character,
+            context_head: 4,
+            context_epoch: 0,
+            trigger: None,
+        };
+        let provider = Arc::new(CountedEmbeddingProvider {
+            space: EmbeddingSpace::new("test", "projection", "v1", 2).unwrap(),
+            calls: AtomicUsize::new(0),
+        });
+        let retriever = SemanticMemoryRetriever::new(provider, 8).unwrap();
+        let memory = MemoryRecord::fact(
+            MemoryId(uuid::Uuid::new_v4()),
+            crate::memory::MemoryPriority::Normal,
+            "canonical memory",
+        );
+        retriever
+            .refresh_authoritative(character, turn, std::slice::from_ref(&memory))
+            .unwrap();
+        retriever
+            .score_canonical_documents(
+                character,
+                &[(
+                    CachedSourceId::History(EventId(uuid::Uuid::new_v4())),
+                    "canonical history",
+                )],
+                "query",
+                Some(turn),
+            )
+            .await
+            .unwrap();
+        assert!(
+            retriever.cache.lock().unwrap().snapshots[&character]
+                .active_ids
+                .contains(&CachedSourceId::Memory(memory.id))
+        );
+        retriever
+            .score_canonical_documents(
+                character,
+                &[(CachedSourceId::Memory(memory.id), memory.content.as_str())],
+                "query",
+                Some(turn),
+            )
+            .await
+            .unwrap();
+    }
+    #[test]
+    fn memory_reconciliation_preserves_inflight_joint_context_and_history_cache() {
+        use crate::timeline::{domain::BranchId, selection::TimelineSelection};
+        let character = CharacterId::Crazy;
+        let turn = TimelineTurn {
+            selection: TimelineSelection {
+                branch_id: BranchId(uuid::Uuid::new_v4()),
+                generation: 1,
+            },
+            character,
+            context_head: 4,
+            context_epoch: 0,
+            trigger: None,
+        };
+        let mut pinned = turn;
+        pinned.trigger = Some(EventId(uuid::Uuid::new_v4()));
+        let space = EmbeddingSpace::new("test", "context", "v1", 2).unwrap();
+        let memory = CacheKey {
+            character,
+            space: space.clone(),
+            id: CachedSourceId::Memory(MemoryId(uuid::Uuid::new_v4())),
+            content: "canonical memory".into(),
+        };
+        let history = CacheKey {
+            character,
+            space: space.clone(),
+            id: CachedSourceId::History(EventId(uuid::Uuid::new_v4())),
+            content: "canonical history".into(),
+        };
+        let mut cache = EmbeddingCache::new();
+        let initial = cache
+            .track(character, Some(turn), std::slice::from_ref(&memory))
+            .unwrap();
+        let joint = cache
+            .track(character, Some(pinned), &[memory.clone(), history.clone()])
+            .unwrap();
+        assert_eq!(initial.revision, joint.revision);
+        cache.insert(
+            history.clone(),
+            Embedding::new(vec![1.0, 0.0], &space).unwrap(),
+            8,
+        );
+        let reconciled = cache.track(character, Some(turn), &[memory]).unwrap();
+        assert_eq!(joint.revision, reconciled.revision);
+        assert!(cache.unchanged(character, joint));
+        assert!(cache.entries.contains_key(&history));
+        let mut reset = turn;
+        reset.context_head += 1;
+        reset.context_epoch += 1;
+        cache.track(character, Some(reset), &[]).unwrap();
+        assert!(!cache.unchanged(character, joint));
+        assert!(!cache.entries.contains_key(&history));
+        let mut fresh = EmbeddingCache::new();
+        let reading = fresh.track_history(character, Some(turn)).unwrap();
+        fresh.insert(
+            history.clone(),
+            Embedding::new(vec![1.0, 0.0], &space).unwrap(),
+            8,
+        );
+        let projection = CacheKey {
+            id: CachedSourceId::Memory(MemoryId(uuid::Uuid::new_v4())),
+            content: "canonical memory".into(),
+            ..history.clone()
+        };
+        let known = fresh.track(character, Some(turn), &[projection]).unwrap();
+        assert_eq!(reading.revision, known.revision);
+        assert!(fresh.unchanged(character, reading));
+        assert!(fresh.entries.contains_key(&history));
+        assert!(fresh.snapshots[&character].memory_projection_known);
+    }
+    use crate::timeline::domain::{MemoryId, MemoryPriority};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountedEmbeddingProvider {
+        space: EmbeddingSpace,
+        calls: AtomicUsize,
+    }
+
+    impl EmbeddingProvider for CountedEmbeddingProvider {
+        fn space(&self) -> &EmbeddingSpace {
+            &self.space
+        }
+
+        fn embed(
+            &self,
+            _: EmbeddingPurpose,
+            _: String,
+        ) -> super::super::embedding::EmbeddingFuture<'_, Embedding> {
+            Box::pin(async {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                Embedding::new(vec![1.0, 0.5], &self.space)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn external_document_embedding_never_starts_after_authority_invalidates() {
+        use crate::timeline::domain::BranchId;
+        use crate::timeline::selection::TimelineSelection;
+        let provider = Arc::new(CountedEmbeddingProvider {
+            space: EmbeddingSpace::new("test", "authority", "v1", 2).unwrap(),
+            calls: AtomicUsize::new(0),
+        });
+        let retriever = SemanticMemoryRetriever::new(provider.clone(), 8).unwrap();
+        let checks = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&checks);
+        retriever
+            .bind_dispatch_authority(Arc::new(move |_, _| {
+                let observed = Arc::clone(&observed);
+                Box::pin(async move {
+                    if observed.fetch_add(1, Ordering::SeqCst) >= 2 {
+                        Err(EmbeddingError::StaleKnowledge)
+                    } else {
+                        Ok(KnowledgeDispatchLease::transient_for_test())
+                    }
+                })
+            }))
+            .unwrap();
+        let turn = TimelineTurn {
+            selection: TimelineSelection {
+                branch_id: BranchId(uuid::Uuid::new_v4()),
+                generation: 0,
+            },
+            character: CharacterId::Crazy,
+            context_head: 0,
+            context_epoch: 0,
+            trigger: None,
+        };
+        let sources = [(
+            CachedSourceId::Memory(MemoryId(uuid::Uuid::new_v4())),
+            "private document",
+        )];
+        let result = retriever
+            .score_canonical_documents(CharacterId::Crazy, &sources, "question", Some(turn))
+            .await;
+        assert!(matches!(result, Err(EmbeddingError::StaleKnowledge)));
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(checks.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn b84_snapshot_membership_is_not_extended_by_resident_embeddings() {
+        let provider = Arc::new(CountedEmbeddingProvider {
+            space: EmbeddingSpace::new("test", "b84", "v1", 2).unwrap(),
+            calls: AtomicUsize::new(0),
+        });
+        let retriever = SemanticMemoryRetriever::new(provider.clone(), 8).unwrap();
+        let mut memory = MemoryRecord {
+            entities: vec![],
+            id: MemoryId(uuid::Uuid::new_v4()),
+            priority: MemoryPriority::Normal,
+            content: "private previous memory".into(),
+            kind: MemoryKind::Fact,
+            state: MemoryState::Active,
+            protected: false,
+            expires_at_unix_ms: None,
+        };
+        let previous = retriever
+            .retrieve(CharacterId::Crazy, &[memory.clone()], "private")
+            .await
+            .unwrap();
+        assert_eq!(previous.selected_ids, vec![memory.id]);
+        assert!(
+            previous
+                .rendered
+                .unwrap()
+                .contains("private previous memory")
+        );
+        assert_eq!(provider.calls.load(Ordering::Relaxed), 2);
+        assert_eq!(retriever.cache.lock().unwrap().entries.len(), 1);
+
+        let invisible = retriever
+            .retrieve(CharacterId::Crazy, &[], "private")
+            .await
+            .unwrap();
+        assert!(invisible.selected_ids.is_empty());
+        assert!(invisible.rendered.is_none());
+        assert_eq!(provider.calls.load(Ordering::Relaxed), 2);
+
+        memory.state = MemoryState::Forgotten;
+        let forgotten = retriever
+            .retrieve(CharacterId::Crazy, &[memory.clone()], "private")
+            .await
+            .unwrap();
+        assert!(forgotten.selected_ids.is_empty());
+        assert_eq!(provider.calls.load(Ordering::Relaxed), 2);
+        assert_eq!(retriever.cache.lock().unwrap().entries.len(), 1);
+
+        memory.state = MemoryState::Active;
+        memory.content = "newly revealed replacement".into();
+        let replacement = retriever
+            .retrieve(CharacterId::Crazy, &[memory.clone()], "revealed")
+            .await
+            .unwrap();
+        assert_eq!(replacement.selected_ids, vec![memory.id]);
+        assert!(
+            replacement
+                .rendered
+                .unwrap()
+                .contains("newly revealed replacement")
+        );
+        assert_eq!(replacement.cost.cache_hits, 0);
+        assert_eq!(provider.calls.load(Ordering::Relaxed), 4);
+        assert_eq!(retriever.cache.lock().unwrap().entries.len(), 2);
+
+        retriever.clear_cache();
+        assert!(retriever.cache.lock().unwrap().entries.is_empty());
+        let again = retriever
+            .retrieve(CharacterId::Crazy, &[memory], "revealed")
+            .await
+            .unwrap();
+        assert_eq!(again.cost.cache_hits, 0);
+    }
+}
+
+#[cfg(test)]
+mod b85_tests;
+
+#[cfg(test)]
+mod b86_tests;

@@ -793,6 +793,45 @@ impl<'a> HardwareRuntime<'a> {
         })
     }
 
+    /// Explicitly recover an observed failed hardware worker, reusing the exact
+    /// persisted selection and proving execution on the same device again.
+    pub async fn recover_failed(
+        &self,
+        failed_generation: uuid::Uuid,
+        config: &HardwareConfig,
+        prepared: &super::application::AiApplicationConfig,
+    ) -> Result<ReadyReport, HardwareError> {
+        config.validate()?;
+        let selection = &config.selection;
+        let device = selection.validate()?;
+        let generation = self
+            .application
+            .recover_failed_hardware_worker(
+                selection.service,
+                failed_generation,
+                prepared,
+                config,
+                &self.store,
+                &|| Ok(()),
+            )
+            .await
+            .map_err(|error| match error {
+                super::application::AiApplicationError::Runtime(runtime) => {
+                    self.runtime_error(runtime)
+                }
+                other => HardwareError::InvalidSelection(other.to_string()),
+            })?;
+        Ok(ReadyReport {
+            generation,
+            backend: selection.backend,
+            revision: selection.backend_revision.clone(),
+            device: device.to_string(),
+            device_name: None,
+            precision: selection.precision,
+            plugin_id: selection.plugin_id.clone(),
+        })
+    }
+
     pub async fn stop(&self, service: AiService) -> Result<(), AiRuntimeError> {
         self.supervisor.stop(service).await
     }

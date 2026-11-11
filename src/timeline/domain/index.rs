@@ -34,6 +34,7 @@ pub(super) struct WorldIndex {
 struct KnowledgeChange {
     reset: bool,
     added: HashSet<EventId>,
+    removed: HashSet<EventId>,
 }
 
 pub(super) struct AppendIndex<'a> {
@@ -75,6 +76,10 @@ impl WorldIndex {
             if change.reset {
                 known.clear();
             }
+            for id in change.forgotten {
+                known.remove(&id);
+            }
+            known.extend(change.revealed);
             known.insert(change.acquired);
         }
         Ok(())
@@ -136,6 +141,7 @@ impl<'a> AppendIndex<'a> {
                 | EventKind::CharacterMemoryChanged
                 | EventKind::CharacterStateChanged
                 | EventKind::CharacterWorkingStateReplaced
+                | EventKind::CharacterVariablesChanged
                 | EventKind::ReminderScheduled
                 | EventKind::ReminderUpdated
                 | EventKind::ReminderDeleted
@@ -162,6 +168,12 @@ impl<'a> AppendIndex<'a> {
                 if !payload::<CharacterWorkingState>(draft, "working_state")?.is_valid() {
                     return Err(TimelineError::Invalid("invalid working state"));
                 }
+            }
+            EventKind::CharacterVariablesChanged => {
+                let vars: std::collections::BTreeMap<String, serde_json::Value> =
+                    payload(draft, "variables")?;
+                crate::character::projection::validate_character_variables(&vars)
+                    .map_err(TimelineError::Invalid)?;
             }
             EventKind::CharacterMemoryChanged => {
                 let change = payload::<MemoryChange>(draft, "change")?;
@@ -243,7 +255,7 @@ impl<'a> AppendIndex<'a> {
             if change.added.contains(&event) {
                 return Ok(true);
             }
-            if change.reset {
+            if change.removed.contains(&event) || change.reset {
                 return Ok(false);
             }
         }
@@ -263,6 +275,15 @@ impl<'a> AppendIndex<'a> {
             if effect.reset {
                 change.reset = true;
                 change.added.clear();
+                change.removed.clear();
+            }
+            for id in effect.forgotten {
+                change.added.remove(&id);
+                change.removed.insert(id);
+            }
+            for id in effect.revealed {
+                change.removed.remove(&id);
+                change.added.insert(id);
             }
             change.added.insert(effect.acquired);
         }

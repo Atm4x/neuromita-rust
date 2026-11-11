@@ -7,19 +7,46 @@ pub mod application;
 pub mod assets;
 pub mod backend;
 pub mod bootstrap;
+pub mod build_stage;
 pub mod composition;
 pub mod constraints;
 mod distribution;
 pub mod hardware;
 pub mod install;
+pub mod install_admission;
+pub mod install_coordinator;
+pub mod install_operation;
+pub mod install_review;
+mod install_source;
 pub mod installed_speech;
 mod layer;
+#[cfg(target_os = "linux")]
+mod linux_worker_lifetime;
 pub mod live_speech;
 pub mod managed;
+pub mod model_identity;
+pub mod native_approval;
+pub mod native_controller;
+pub mod native_download_operation;
+pub mod native_https;
+pub mod native_model;
+pub mod native_package_install;
+pub mod native_registry;
+pub mod native_release_index;
+pub mod native_revisions;
+pub mod native_service;
+pub mod native_speech;
+pub mod native_trust;
+pub mod native_workflow;
 pub mod overlay;
 pub mod production;
+pub mod removal;
 pub mod resolver;
+mod revision_lease;
 pub mod runtime_status;
+pub mod sdk;
+pub mod semantic_workers;
+pub mod service_workers;
 pub mod speech;
 pub mod speech_catalog;
 pub mod speech_inspection;
@@ -28,6 +55,8 @@ pub mod speech_selection;
 pub mod system_hardware;
 pub mod uv;
 pub mod voice_profile;
+#[cfg(windows)]
+mod windows_uv_job;
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
@@ -47,7 +76,7 @@ use crate::voice::{
     AudioArtifact, AudioFormat, VoiceError, VoiceFuture, VoiceOptions, VoiceProvider,
 };
 use hardware::{HardwareProbe, RuntimeProfile, verify_execution, verify_probe};
-use runtime_status::{LoadedModel, RuntimePhase, RuntimeSnapshot};
+use runtime_status::{LoadedModel, RuntimePhase, RuntimeSnapshot, ServiceRuntimeStatus};
 
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_REQUEST_BYTES: usize = 32 * 1024 * 1024;
@@ -85,7 +114,7 @@ impl ProcessTopology {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PythonHostConfig {
     pub python_executable: PathBuf,
     pub sdk_root: PathBuf,
@@ -102,6 +131,8 @@ pub enum AiRuntimeError {
     AlreadyRunning,
     #[error("worker generation changed before request completed")]
     StaleGeneration,
+    #[error("worker recovery requires a failed worker generation")]
+    WorkerNotFailed,
     #[error("python worker failed to start: {0}")]
     Spawn(#[source] std::io::Error),
     #[error("python worker IPC failed: {0}")]
@@ -157,11 +188,15 @@ struct RemoteError {
 
 struct WorkerProcess {
     child: Child,
+    #[cfg(windows)]
+    _job: windows_uv_job::WindowsKillOnCloseJob,
     input: ChildStdin,
     output: BufReader<ChildStdout>,
     timeout: Duration,
     generation: Uuid,
     failed: bool,
+    layers: Vec<PathBuf>,
+    _layer_leases: Vec<revision_lease::RevisionLease>,
     selections: HashMap<AiService, (String, Option<String>)>,
     runtime_profiles: HashMap<AiService, RuntimeProfile>,
 }
@@ -186,6 +221,16 @@ impl WorkerProcess {
         layers: &[PathBuf],
         models: &[ModelActivation],
     ) -> Result<Self, AiRuntimeError> {
+        Self::launch_with_stderr(config, layers, models, std::process::Stdio::inherit()).await
+    }
+
+    async fn launch_with_stderr(
+        config: &PythonHostConfig,
+        layers: &[PathBuf],
+        models: &[ModelActivation],
+        stderr: std::process::Stdio,
+    ) -> Result<Self, AiRuntimeError> {
+        let layer_leases = revision_lease::shared_layers(layers).map_err(AiRuntimeError::Spawn)?;
         let mut imports = vec![config.sdk_root.clone()];
         imports.extend(layers.iter().cloned());
         let python_path = std::env::join_paths(&imports)
@@ -231,9 +276,11 @@ impl WorkerProcess {
             );
         }
 
+        #[cfg(windows)]
+        windows_uv_job::gated_module(&mut command, "neuromita_ai_sdk.host");
+        #[cfg(not(windows))]
+        command.arg("-m").arg("neuromita_ai_sdk.host");
         command
-            .arg("-m")
-            .arg("neuromita_ai_sdk.host")
             .arg("--plugins-dir")
             .arg(&config.plugins_directory)
             .env("PYTHONPATH", python_path)
@@ -242,9 +289,16 @@ impl WorkerProcess {
             .env_remove("PYTHONHOME")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::inherit())
+            .stderr(stderr)
             .kill_on_drop(true);
+        #[cfg(target_os = "linux")]
+        linux_worker_lifetime::require_parent_death_kill(&mut command);
+        let generation = Uuid::new_v4();
         let mut child = command.spawn().map_err(AiRuntimeError::Spawn)?;
+        #[cfg(windows)]
+        let job = windows_uv_job::attach_and_activate(&mut child)
+            .await
+            .map_err(AiRuntimeError::Spawn)?;
         let input = child
             .stdin
             .take()
@@ -255,11 +309,15 @@ impl WorkerProcess {
             .ok_or_else(|| AiRuntimeError::Protocol("stdout unavailable".into()))?;
         let mut worker = Self {
             child,
+            #[cfg(windows)]
+            _job: job,
             input,
             output: BufReader::new(output),
             timeout: config.request_timeout,
-            generation: Uuid::new_v4(),
+            generation,
             failed: false,
+            layers: layers.to_vec(),
+            _layer_leases: layer_leases,
             selections: HashMap::new(),
             runtime_profiles: HashMap::new(),
         };
@@ -468,6 +526,8 @@ struct Activation<'a> {
     models: &'a [ModelActivation],
     profile: Option<&'a RuntimeProfile>,
     verify: Option<&'a (dyn Fn() -> Result<std::fs::File, AiRuntimeError> + Send + Sync)>,
+    expected_failed_generation: Option<Uuid>,
+    check_current: Option<&'a (dyn Fn() -> Result<(), AiRuntimeError> + Send + Sync)>,
 }
 
 impl AiService {
@@ -480,6 +540,15 @@ impl AiService {
             Self::Beats => "beats",
         }
     }
+}
+
+fn retire_worker_status(status: &mut ServiceRuntimeStatus, reason: &str) {
+    if status.phase != RuntimePhase::Failed || status.last_error.is_none() {
+        status.last_error = Some(reason.to_owned());
+    }
+    status.phase = RuntimePhase::Failed;
+    status.active_model = None;
+    status.pending_model = None;
 }
 
 pub struct AiSupervisor {
@@ -501,6 +570,10 @@ impl AiSupervisor {
         }
     }
 
+    pub(crate) fn accepts_plan(&self, topology: ProcessTopology, host: &PythonHostConfig) -> bool {
+        self.topology == topology && self.config == *host
+    }
+
     pub fn observe_status(&self) -> watch::Receiver<RuntimeSnapshot> {
         self.status.subscribe()
     }
@@ -509,11 +582,47 @@ impl AiSupervisor {
         self.status.borrow().clone()
     }
 
+    /// Advisory inventory for removal preflight. A busy activation or IPC request
+    /// makes the inventory incomplete; callers must not interpret it as unused.
+    /// This snapshot is NOT a deletion permit: a future activation can race it.
+    pub fn observed_worker_layers(
+        &self,
+    ) -> Result<Vec<removal::ActiveWorkerLayers>, removal::LayerUsageError> {
+        let activation_slots = self
+            .activation_locks
+            .try_lock()
+            .map_err(|_| removal::LayerUsageError::Busy)?;
+        let mut activation_guards = Vec::with_capacity(activation_slots.len());
+        for slot in activation_slots.values() {
+            activation_guards.push(
+                slot.try_lock()
+                    .map_err(|_| removal::LayerUsageError::Busy)?,
+            );
+        }
+        let workers = self
+            .workers
+            .try_lock()
+            .map_err(|_| removal::LayerUsageError::Busy)?;
+        let mut layers = Vec::with_capacity(workers.len());
+        for worker in workers.values() {
+            let process = worker
+                .try_lock()
+                .map_err(|_| removal::LayerUsageError::Busy)?;
+            layers.push(removal::ActiveWorkerLayers {
+                generation: process.generation,
+                paths: process.layers.clone(),
+            });
+        }
+        Ok(layers)
+    }
+
     /// Refresh the observable state from child-process liveness without invoking plugin code.
     pub async fn refresh_status(&self) -> RuntimeSnapshot {
         let workers: Vec<_> = self.workers.lock().await.values().cloned().collect();
         for worker in workers {
-            let mut process = worker.lock().await;
+            let Ok(mut process) = worker.try_lock() else {
+                continue;
+            };
             let generation = process.generation;
             let failure = if process.failed {
                 Some("worker retired after an IPC failure".to_owned())
@@ -532,15 +641,21 @@ impl AiSupervisor {
             };
             drop(process);
             if let Some(reason) = failure {
-                self.status.send_modify(|snapshot| {
+                self.status.send_if_modified(|snapshot| {
+                    let mut changed = false;
                     for state in snapshot.services.values_mut() {
-                        if state.generation == Some(generation) {
-                            state.phase = RuntimePhase::Failed;
-                            state.active_model = None;
-                            state.pending_model = None;
-                            state.last_error = Some(reason.clone());
+                        if state.generation != Some(generation)
+                            || (state.phase == RuntimePhase::Failed
+                                && state.active_model.is_none()
+                                && state.pending_model.is_none()
+                                && state.last_error.is_some())
+                        {
+                            continue;
                         }
+                        retire_worker_status(state, &reason);
+                        changed = true;
                     }
+                    changed
                 });
             }
         }
@@ -594,17 +709,26 @@ impl AiSupervisor {
         });
     }
 
-    fn activation_failed(&self, services: &[AiService], error: &AiRuntimeError) {
+    fn activation_failed(
+        &self,
+        services: &[AiService],
+        error: &AiRuntimeError,
+        failed_generation: Option<Uuid>,
+    ) {
         self.status.send_modify(|snapshot| {
             for service in services {
                 let state = snapshot.services.entry(*service).or_default();
                 state.pending_model = None;
                 state.last_error = Some(error.to_string());
                 if state.active_model.is_none() {
-                    state.phase = if state.generation.is_some() {
-                        RuntimePhase::WorkerRunning
-                    } else {
+                    state.phase = if (failed_generation.is_some()
+                        && state.generation == failed_generation)
+                        || state.phase == RuntimePhase::Failed
+                        || state.generation.is_none()
+                    {
                         RuntimePhase::Failed
+                    } else {
+                        RuntimePhase::WorkerRunning
                     };
                 }
             }
@@ -618,26 +742,35 @@ impl AiSupervisor {
         error: &AiRuntimeError,
         fatal: bool,
     ) {
-        self.status.send_modify(|snapshot| {
-            let state = snapshot.services.entry(service).or_default();
-            if state.generation != Some(generation) {
-                return;
+        self.status.send_if_modified(|snapshot| {
+            if snapshot.service(service).generation != Some(generation) {
+                return false;
             }
-            state.last_error = Some(error.to_string());
+            let reason = error.to_string();
             if fatal {
-                let affected = snapshot.services.values_mut().filter(|status| {
-                    self.topology == ProcessTopology::Shared
-                        && status.generation == Some(generation)
-                });
-                for status in affected {
-                    status.phase = RuntimePhase::Failed;
-                    status.active_model = None;
-                    status.pending_model = None;
+                let mut changed = false;
+                for (tracked, state) in &mut snapshot.services {
+                    if state.generation != Some(generation)
+                        || (self.topology == ProcessTopology::Split && *tracked != service)
+                        || (state.phase == RuntimePhase::Failed
+                            && state.active_model.is_none()
+                            && state.pending_model.is_none()
+                            && state.last_error.is_some())
+                    {
+                        continue;
+                    }
+                    retire_worker_status(state, &reason);
+                    changed = true;
                 }
+                changed
+            } else {
                 let state = snapshot.services.entry(service).or_default();
-                state.phase = RuntimePhase::Failed;
-                state.active_model = None;
-                state.pending_model = None;
+                if state.last_error.as_deref() == Some(reason.as_str()) {
+                    false
+                } else {
+                    state.last_error = Some(reason);
+                    true
+                }
             }
         });
     }
@@ -662,7 +795,7 @@ impl AiSupervisor {
         let worker = match WorkerProcess::launch(&self.config, &[], &[]).await {
             Ok(worker) => worker,
             Err(error) => {
-                self.activation_failed(&[service], &error);
+                self.activation_failed(&[service], &error, None);
                 return Err(error);
             }
         };
@@ -700,7 +833,7 @@ impl AiSupervisor {
         let worker = match WorkerProcess::launch(&self.config, composition.paths(), &[]).await {
             Ok(worker) => worker,
             Err(error) => {
-                self.activation_failed(composition.services(), &error);
+                self.activation_failed(composition.services(), &error, None);
                 return Err(error);
             }
         };
@@ -732,6 +865,122 @@ impl AiSupervisor {
             .await
     }
 
+    /// Replace only an observed failed worker generation with a freshly verified
+    /// model composition provided by the application. A successful handshake alone
+    /// is insufficient: every model must initialize before publication.
+    ///
+    /// No automatic retry is scheduled here. The application owns the retry
+    /// budget and must prepare the current selection before each attempt.
+    pub async fn recover_failed_composed(
+        &self,
+        service: AiService,
+        expected_generation: Uuid,
+        composition: &composition::RuntimeComposition,
+        models: &[ModelActivation],
+    ) -> Result<Uuid, AiRuntimeError> {
+        self.recover_failed_composed_guarded(
+            service,
+            expected_generation,
+            composition,
+            models,
+            &|| Ok(()),
+        )
+        .await
+    }
+
+    /// The caller validates its current selection immediately before publication.
+    pub async fn recover_failed_composed_guarded(
+        &self,
+        service: AiService,
+        expected_generation: Uuid,
+        composition: &composition::RuntimeComposition,
+        models: &[ModelActivation],
+        check_current: &(dyn Fn() -> Result<(), AiRuntimeError> + Send + Sync),
+    ) -> Result<Uuid, AiRuntimeError> {
+        self.recover_failed_composed_inner(
+            service,
+            expected_generation,
+            composition,
+            models,
+            check_current,
+        )
+        .await
+        .map_err(|error| match error {
+            AiRuntimeError::NotRunning
+            | AiRuntimeError::StaleGeneration
+            | AiRuntimeError::WorkerNotFailed => AiRuntimeError::ActivationSuperseded,
+            other => other,
+        })
+    }
+
+    async fn recover_failed_composed_inner(
+        &self,
+        service: AiService,
+        expected_generation: Uuid,
+        composition: &composition::RuntimeComposition,
+        models: &[ModelActivation],
+        check_current: &(dyn Fn() -> Result<(), AiRuntimeError> + Send + Sync),
+    ) -> Result<Uuid, AiRuntimeError> {
+        if !composition.services().contains(&service)
+            || (self.topology == ProcessTopology::Split && composition.services() != [service])
+        {
+            return Err(AiRuntimeError::Protocol(
+                "invalid service composition".into(),
+            ));
+        }
+        self.refresh_status().await;
+        self.activate(Activation {
+            service,
+            services: composition.services(),
+            layers: composition.paths(),
+            models,
+            profile: None,
+            verify: None,
+            expected_failed_generation: Some(expected_generation),
+            check_current: Some(check_current),
+        })
+        .await
+    }
+
+    /// Recover only a failed hardware-profiled generation. The selected profile
+    /// must match the failed worker and be revalidated on the new OS child.
+    pub async fn recover_failed_hardware_guarded(
+        &self,
+        service: AiService,
+        expected_generation: Uuid,
+        composition: &composition::RuntimeComposition,
+        models: &[ModelActivation],
+        profile: &RuntimeProfile,
+        verify: &(dyn Fn() -> Result<std::fs::File, AiRuntimeError> + Send + Sync),
+        check_current: &(dyn Fn() -> Result<(), AiRuntimeError> + Send + Sync),
+    ) -> Result<Uuid, AiRuntimeError> {
+        if !composition.services().contains(&service)
+            || (self.topology == ProcessTopology::Split && composition.services() != [service])
+        {
+            return Err(AiRuntimeError::Protocol(
+                "invalid service composition".into(),
+            ));
+        }
+        self.refresh_status().await;
+        self.activate(Activation {
+            service,
+            services: composition.services(),
+            layers: composition.paths(),
+            models,
+            profile: Some(profile),
+            verify: Some(verify),
+            expected_failed_generation: Some(expected_generation),
+            check_current: Some(check_current),
+        })
+        .await
+        .map_err(|error| match error {
+            AiRuntimeError::NotRunning
+            | AiRuntimeError::StaleGeneration
+            | AiRuntimeError::WorkerNotFailed => AiRuntimeError::ActivationSuperseded,
+            other => other,
+        })
+    }
+
     /// Prepare a candidate worker for an explicit device profile. The candidate
     /// must prove device execution and loaded-model readiness, and `verify` runs
     /// immediately before publication so a superseded selection cannot replace
@@ -758,6 +1007,8 @@ impl AiSupervisor {
             models,
             profile: Some(profile),
             verify: Some(verify),
+            expected_failed_generation: None,
+            check_current: None,
         })
         .await
     }
@@ -825,11 +1076,39 @@ impl AiSupervisor {
             models,
             profile: None,
             verify: None,
+            expected_failed_generation: None,
+            check_current: None,
         })
         .await
     }
 
-    async fn activate(&self, request: Activation<'_>) -> Result<Uuid, AiRuntimeError> {
+    pub async fn restart_failed_composed(
+        &self,
+        service: AiService,
+        expected_generation: Uuid,
+        composition: &composition::RuntimeComposition,
+        models: &[ModelActivation],
+    ) -> Result<Uuid, AiRuntimeError> {
+        self.recover_failed_composed_inner(
+            service,
+            expected_generation,
+            composition,
+            models,
+            &|| Ok(()),
+        )
+        .await
+    }
+
+    fn activate<'a>(
+        &'a self,
+        request: Activation<'a>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Uuid, AiRuntimeError>> + Send + 'a>,
+    > {
+        Box::pin(self.activate_inner(request))
+    }
+
+    async fn activate_inner(&self, request: Activation<'_>) -> Result<Uuid, AiRuntimeError> {
         let Activation {
             service,
             services,
@@ -837,6 +1116,8 @@ impl AiSupervisor {
             models,
             profile,
             verify,
+            expected_failed_generation,
+            check_current,
         } = request;
         use std::collections::HashSet;
         let selected: HashSet<_> = services.iter().copied().collect();
@@ -854,6 +1135,50 @@ impl AiSupervisor {
         let key = self.topology.key(service);
         let slot = self.activation_lock(key).await;
         let _guard = slot.lock().await;
+        if let Some(expected) = expected_failed_generation {
+            let status = self.status_snapshot();
+            let previous = self
+                .workers
+                .lock()
+                .await
+                .get(&key)
+                .cloned()
+                .ok_or(AiRuntimeError::NotRunning)?;
+            if services
+                .iter()
+                .any(|service| status.service(*service).generation != Some(expected))
+            {
+                return Err(AiRuntimeError::StaleGeneration);
+            }
+            if services
+                .iter()
+                .any(|service| status.service(*service).phase != RuntimePhase::Failed)
+            {
+                return Err(AiRuntimeError::WorkerNotFailed);
+            }
+            let process = previous.lock().await;
+            if process.generation != expected {
+                return Err(AiRuntimeError::ActivationSuperseded);
+            }
+            if !process.runtime_profiles.is_empty() && (profile.is_none() || verify.is_none()) {
+                return Err(AiRuntimeError::ActivationGuard(
+                    "device-profiled recovery requires hardware revalidation".into(),
+                ));
+            }
+            if let Some(requested) = profile {
+                if process.runtime_profiles.get(&service) != Some(requested) {
+                    return Err(AiRuntimeError::ActivationSuperseded);
+                }
+            }
+            if process.selections.len() != models.len()
+                || models.iter().any(|model| {
+                    process.selections.get(&model.service)
+                        != Some(&(model.plugin_id.clone(), model.asset_revision.clone()))
+                })
+            {
+                return Err(AiRuntimeError::ActivationSuperseded);
+            }
+        }
         let mut runtime_profiles = HashMap::new();
         if let Some(profile) = profile {
             let previous = self.workers.lock().await.get(&key).cloned();
@@ -863,11 +1188,13 @@ impl AiSupervisor {
             runtime_profiles.retain(|service, _| selected.contains(service));
             runtime_profiles.insert(service, profile.clone());
         }
-        self.starting(services, models);
+        if expected_failed_generation.is_none() {
+            self.starting(services, models);
+        }
         let mut candidate = match WorkerProcess::launch(&self.config, layers, models).await {
             Ok(worker) => worker,
             Err(error) => {
-                self.activation_failed(services, &error);
+                self.activation_failed(services, &error, expected_failed_generation);
                 return Err(error);
             }
         };
@@ -974,7 +1301,7 @@ impl AiSupervisor {
         if let Err(error) = prepare {
             let _ = candidate.child.start_kill();
             let _ = candidate.child.wait().await;
-            self.activation_failed(services, &error);
+            self.activation_failed(services, &error, expected_failed_generation);
             return Err(error);
         }
         let _selection_guard = match verify {
@@ -983,12 +1310,20 @@ impl AiSupervisor {
                 Err(error) => {
                     let _ = candidate.child.start_kill();
                     let _ = candidate.child.wait().await;
-                    self.activation_failed(services, &error);
+                    self.activation_failed(services, &error, expected_failed_generation);
                     return Err(error);
                 }
             },
             None => None,
         };
+        if let Some(check_current) = check_current
+            && let Err(error) = check_current()
+        {
+            let _ = candidate.child.start_kill();
+            let _ = candidate.child.wait().await;
+            self.activation_failed(services, &error, expected_failed_generation);
+            return Err(error);
+        }
         let generation = candidate.generation;
         let old = self
             .workers
@@ -1035,36 +1370,38 @@ impl AiSupervisor {
         operation: &str,
         args: Value,
     ) -> Result<Value, AiRuntimeError> {
+        self.call_tracked(service, operation, args)
+            .await
+            .map(|(_, response)| response)
+    }
+
+    async fn call_tracked(
+        &self,
+        service: AiService,
+        operation: &str,
+        args: Value,
+    ) -> Result<(Uuid, Value), AiRuntimeError> {
+        let key = self.topology.key(service);
         let worker = self
             .workers
             .lock()
             .await
-            .get(&self.topology.key(service))
+            .get(&key)
             .cloned()
             .ok_or(AiRuntimeError::NotRunning)?;
-        let guard = worker.lock().await;
+        let mut guard = worker.lock().await;
         let generation = guard.generation;
+        let result = guard.request(operation, &args).await;
+        let fatal = guard.failed;
         drop(guard);
-        let result = worker.lock().await.request(operation, &args).await;
-        let current = self
-            .workers
-            .lock()
-            .await
-            .get(&self.topology.key(service))
-            .cloned();
-        let current_generation = if let Some(current) = current {
-            Some(current.lock().await.generation)
-        } else {
-            None
-        };
-        if current_generation != Some(generation) {
+        let current = self.workers.lock().await.get(&key).cloned();
+        if !current.is_some_and(|current| Arc::ptr_eq(&worker, &current)) {
             return Err(AiRuntimeError::StaleGeneration);
         }
         if let Err(error) = &result {
-            let fatal = worker.lock().await.failed;
             self.request_failed(service, generation, error, fatal);
         }
-        result
+        result.map(|value| (generation, value))
     }
 
     pub async fn synthesize_streamed_wav(&self, input: Value) -> Result<Vec<u8>, AiRuntimeError> {
@@ -1079,6 +1416,7 @@ impl AiSupervisor {
         let mut locked = worker.lock().await;
         let generation = locked.generation;
         let result = locked.stream_wav(input).await;
+        let fatal = locked.failed;
         drop(locked);
         let current = self
             .workers
@@ -1086,16 +1424,10 @@ impl AiSupervisor {
             .await
             .get(&self.topology.key(service))
             .cloned();
-        let current_generation = if let Some(current) = current {
-            Some(current.lock().await.generation)
-        } else {
-            None
-        };
-        if current_generation != Some(generation) {
+        if !current.is_some_and(|current| Arc::ptr_eq(&worker, &current)) {
             return Err(AiRuntimeError::StaleGeneration);
         }
         if let Err(error) = &result {
-            let fatal = worker.lock().await.failed;
             self.request_failed(service, generation, error, fatal);
         }
         result
@@ -1111,46 +1443,64 @@ impl AiSupervisor {
         plugin_id: &str,
         settings: Value,
     ) -> Result<Value, AiRuntimeError> {
-        let result = self
-            .call(
+        let (generation, result) = self
+            .call_tracked(
                 service,
                 "initialize",
                 json!({"plugin_id": plugin_id, "settings": settings}),
             )
             .await?;
         if result["model_ready"] == true {
-            let worker = self
-                .workers
-                .lock()
-                .await
-                .get(&self.topology.key(service))
-                .cloned();
-            if let Some(worker) = worker {
-                let mut guard = worker.lock().await;
-                let revision = guard
-                    .selections
-                    .get(&service)
-                    .filter(|(selected, _)| selected == plugin_id)
-                    .and_then(|(_, revision)| revision.clone());
-                guard
-                    .selections
-                    .insert(service, (plugin_id.into(), revision.clone()));
-                let generation = guard.generation;
-                drop(guard);
-                self.status.send_modify(|snapshot| {
-                    let state = snapshot.services.entry(service).or_default();
-                    if state.generation == Some(generation) {
-                        state.active_model = Some(LoadedModel {
-                            plugin_id: plugin_id.into(),
-                            asset_revision: revision,
-                        });
-                        state.phase = RuntimePhase::ModelReady;
-                        state.last_error = None;
-                    }
-                });
-            }
+            self.publish_initialized_model(service, plugin_id, generation)
+                .await?;
         }
         Ok(result)
+    }
+
+    async fn publish_initialized_model(
+        &self,
+        service: AiService,
+        plugin_id: &str,
+        generation: Uuid,
+    ) -> Result<(), AiRuntimeError> {
+        let key = self.topology.key(service);
+        let slot = self.activation_lock(key).await;
+        let _transition = slot.lock().await;
+        let worker = self
+            .workers
+            .lock()
+            .await
+            .get(&key)
+            .cloned()
+            .ok_or(AiRuntimeError::StaleGeneration)?;
+        let mut guard = worker.lock().await;
+        if guard.generation != generation {
+            return Err(AiRuntimeError::StaleGeneration);
+        }
+        let revision = guard
+            .selections
+            .get(&service)
+            .filter(|(selected, _)| selected == plugin_id)
+            .and_then(|(_, revision)| revision.clone());
+        guard
+            .selections
+            .insert(service, (plugin_id.into(), revision.clone()));
+        drop(guard);
+        self.status.send_modify(|snapshot| {
+            let state = snapshot.services.entry(service).or_default();
+            if state.generation == Some(generation)
+                || (self.topology == ProcessTopology::Shared && state.generation.is_none())
+            {
+                state.generation = Some(generation);
+                state.active_model = Some(LoadedModel {
+                    plugin_id: plugin_id.into(),
+                    asset_revision: revision,
+                });
+                state.phase = RuntimePhase::ModelReady;
+                state.last_error = None;
+            }
+        });
+        Ok(())
     }
 
     pub async fn selected_model(&self, service: AiService) -> Option<(String, Option<String>)> {
@@ -1187,7 +1537,8 @@ pub async fn fetch_install_plan_for(
     if !layer::valid_segment(plugin_id) {
         return Err(AiRuntimeError::Protocol("invalid plugin identifier".into()));
     }
-    let mut worker = WorkerProcess::launch(config, &[], &[]).await?;
+    let mut worker =
+        WorkerProcess::launch_with_stderr(config, &[], &[], std::process::Stdio::null()).await?;
     let result = worker
         .request(
             "install_plan",
@@ -1404,6 +1755,83 @@ mod tests {
             .unwrap_or_else(|_| if cfg!(windows) { "python" } else { "python3" }.to_owned())
     }
 
+    #[cfg(windows)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn windows_owner_crash_fixture() {
+        let Ok(marker) = std::env::var("NM_WINDOWS_WORKER_OWNER_MARKER") else {
+            return;
+        };
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
+        let config = PythonHostConfig {
+            python_executable: test_python().into(),
+            sdk_root: source.clone(),
+            plugins_directory: source.join("plugins"),
+            models_directory: None,
+            request_timeout: Duration::from_secs(12),
+        };
+        let mut worker = WorkerProcess::launch(&config, &[], &[]).await.unwrap();
+        std::fs::write(marker, worker.child.id().unwrap().to_string()).unwrap();
+        tokio::time::sleep(Duration::from_secs(40)).await;
+        let _ = worker.child.start_kill();
+        let _ = worker.child.wait().await;
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_terminates_real_python_worker_after_rust_owner_is_killed() {
+        use std::{
+            fs,
+            os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+            process::{Command as ProcessCommand, Stdio},
+            time::{Duration, Instant},
+        };
+        use windows_sys::Win32::{
+            Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT},
+            System::Threading::{OpenProcess, WaitForSingleObject},
+        };
+
+        const SYNCHRONIZE_PROCESS: u32 = 0x0010_0000;
+        let root = std::env::temp_dir().join(format!("nm-win-worker-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let marker = root.join("python.pid");
+        let mut owner = ProcessCommand::new(std::env::current_exe().unwrap())
+            .args(["--exact", "ai_runtime::tests::windows_owner_crash_fixture"])
+            .env("NM_WINDOWS_WORKER_OWNER_MARKER", &marker)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !marker.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "Rust owner did not launch its Python worker"
+            );
+            assert!(
+                owner.try_wait().unwrap().is_none(),
+                "Rust owner failed to launch Python"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let pid: u32 = fs::read_to_string(&marker).unwrap().parse().unwrap();
+        let process_handle = unsafe { OpenProcess(SYNCHRONIZE_PROCESS, 0, pid) };
+        assert!(!process_handle.is_null(), "Python worker must be running");
+        let process = unsafe { OwnedHandle::from_raw_handle(process_handle.cast()) };
+        assert_eq!(
+            unsafe { WaitForSingleObject(process.as_raw_handle().cast(), 0) },
+            WAIT_TIMEOUT,
+            "Python worker exited before Rust owner crash"
+        );
+        owner.kill().unwrap();
+        owner.wait().unwrap();
+        assert_eq!(
+            unsafe { WaitForSingleObject(process.as_raw_handle().cast(), 10_000) },
+            WAIT_OBJECT_0,
+            "Python worker survived terminated Rust owner despite Job Object"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn cancelled_request_retires_worker_before_a_late_reply_can_be_reused() {
         let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
@@ -1494,6 +1922,153 @@ mod tests {
         tokio::fs::remove_dir_all(temp).await.unwrap();
     }
 
+    #[tokio::test]
+    async fn python_ipc_timeout_retires_worker_and_restart_clears_failure() {
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
+        let temp = std::env::temp_dir().join(format!("nm-timeout-{}", Uuid::new_v4()));
+        let plugin = temp.join("mock_tts");
+        tokio::fs::create_dir_all(&plugin).await.unwrap();
+        tokio::fs::copy(
+            source.join("plugins/builtin/mock_tts/plugin.json"),
+            plugin.join("plugin.json"),
+        )
+        .await
+        .unwrap();
+        let code = tokio::fs::read_to_string(source.join("plugins/builtin/mock_tts/plugin.py"))
+            .await
+            .unwrap()
+            .replace("\r\n", "\n");
+        let needle = "    def initialize(self, settings):\n";
+        assert!(code.contains(needle));
+        let code = code.replace(
+            needle,
+            "    def initialize(self, settings):\n        if settings.get('block'):\n            import time\n            time.sleep(10)\n",
+        );
+        tokio::fs::write(plugin.join("plugin.py"), code)
+            .await
+            .unwrap();
+
+        let supervisor = AiSupervisor::new(
+            ProcessTopology::Split,
+            PythonHostConfig {
+                python_executable: test_python().into(),
+                sdk_root: source,
+                plugins_directory: temp.clone(),
+                models_directory: None,
+                request_timeout: Duration::from_secs(5),
+            },
+        );
+        let initial = supervisor.start(AiService::Tts).await.unwrap();
+        let failed = timeout(
+            Duration::from_secs(7),
+            supervisor.initialize(AiService::Tts, "mock_tts", json!({"block": true})),
+        )
+        .await
+        .expect("the configured worker deadline must terminate this IPC request");
+        assert!(matches!(failed, Err(AiRuntimeError::Timeout)));
+        let status = supervisor.status_snapshot().service(AiService::Tts);
+        assert_eq!(status.phase, RuntimePhase::Failed);
+        assert_eq!(status.generation, Some(initial));
+        assert!(status.active_model.is_none());
+        assert!(
+            status
+                .last_error
+                .as_deref()
+                .unwrap_or("")
+                .contains("timed out")
+        );
+        assert!(matches!(
+            supervisor.discover(AiService::Tts).await,
+            Err(AiRuntimeError::Protocol(message)) if message == "worker requires restart"
+        ));
+        let after_rejected = supervisor.status_snapshot().service(AiService::Tts);
+        assert_eq!(after_rejected.phase, RuntimePhase::Failed);
+        assert!(
+            after_rejected
+                .last_error
+                .as_deref()
+                .unwrap()
+                .contains("timed out")
+        );
+        let refreshed = supervisor.refresh_status().await.service(AiService::Tts);
+        assert_eq!(refreshed.phase, RuntimePhase::Failed);
+        assert!(
+            refreshed
+                .last_error
+                .as_deref()
+                .unwrap()
+                .contains("timed out")
+        );
+
+        supervisor.stop(AiService::Tts).await.unwrap();
+        let stopped = supervisor.status_snapshot().service(AiService::Tts);
+        assert_eq!(stopped.phase, RuntimePhase::Stopped);
+        assert!(stopped.generation.is_none());
+        let restarted = supervisor.start(AiService::Tts).await.unwrap();
+        assert_ne!(restarted, initial);
+        let ready = supervisor
+            .initialize(AiService::Tts, "mock_tts", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(ready["model_ready"], true);
+        let status = supervisor.status_snapshot().service(AiService::Tts);
+        assert_eq!(status.generation, Some(restarted));
+        assert_eq!(status.phase, RuntimePhase::ModelReady);
+        assert_eq!(status.active_model.as_ref().unwrap().plugin_id, "mock_tts");
+        assert!(status.last_error.is_none());
+        supervisor.stop(AiService::Tts).await.unwrap();
+        tokio::fs::remove_dir_all(temp).await.unwrap();
+    }
+
+    #[test]
+    fn fatal_shared_worker_failure_preserves_original_cause_for_all_services() {
+        let supervisor = AiSupervisor::new(
+            ProcessTopology::Shared,
+            PythonHostConfig {
+                python_executable: "python3".into(),
+                sdk_root: PathBuf::new(),
+                plugins_directory: PathBuf::new(),
+                models_directory: None,
+                request_timeout: Duration::from_secs(1),
+            },
+        );
+        let generation = Uuid::new_v4();
+        supervisor.started(&[AiService::Tts, AiService::Asr], &[], generation);
+        supervisor.request_failed(AiService::Tts, generation, &AiRuntimeError::Timeout, true);
+        for service in [AiService::Tts, AiService::Asr] {
+            let status = supervisor.status_snapshot().service(service);
+            assert_eq!(status.generation, Some(generation));
+            assert_eq!(status.phase, RuntimePhase::Failed);
+            assert_eq!(
+                status.last_error.as_deref(),
+                Some("python worker timed out")
+            );
+            assert!(status.active_model.is_none());
+        }
+        supervisor.request_failed(
+            AiService::Asr,
+            generation,
+            &AiRuntimeError::Protocol("worker requires restart".into()),
+            true,
+        );
+        supervisor.request_failed(
+            AiService::Tts,
+            Uuid::new_v4(),
+            &AiRuntimeError::Timeout,
+            true,
+        );
+        for service in [AiService::Tts, AiService::Asr] {
+            assert_eq!(
+                supervisor
+                    .status_snapshot()
+                    .service(service)
+                    .last_error
+                    .as_deref(),
+                Some("python worker timed out")
+            );
+        }
+    }
+
     #[test]
     fn slots_follow_topology() {
         assert_eq!(
@@ -1546,6 +2121,7 @@ class Plugin:
             timeout: Duration::from_secs(3),
         };
         let plan = PluginInstallPlan {
+            build_stages: vec![],
             asset_hooks: vec![],
             assets: vec![ModelAssetRequirement {
                 role: "model".into(),
@@ -1668,10 +2244,432 @@ class Plugin:
         let died = supervisor.refresh_status().await.service(AiService::Tts);
         assert_eq!(died.phase, RuntimePhase::Failed);
         assert!(died.active_model.is_none());
+        let failure = died.last_error.clone();
+        observed.borrow_and_update();
+        let repeated = supervisor.refresh_status().await.service(AiService::Tts);
+        assert_eq!(repeated.last_error, failure);
+        assert!(!observed.has_changed().unwrap());
         supervisor.stop(AiService::Tts).await.unwrap();
         let stopped = supervisor.status_snapshot().service(AiService::Tts);
         assert_eq!(stopped.phase, RuntimePhase::Stopped);
         assert!(stopped.active_model.is_none());
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn removal_inventory_records_actual_worker_layers_and_denies_busy_observation() {
+        let sdk = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
+        let root = std::env::temp_dir().join(format!("nm-removal-active-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let dependency = root.join("managed-overlay");
+        tokio::fs::create_dir_all(&dependency).await.unwrap();
+        let supervisor = AiSupervisor::new(
+            ProcessTopology::Split,
+            PythonHostConfig {
+                python_executable: test_python().into(),
+                sdk_root: sdk.clone(),
+                plugins_directory: sdk.join("plugins/builtin"),
+                models_directory: None,
+                request_timeout: Duration::from_secs(5),
+            },
+        );
+        let generation = supervisor
+            .reconfigure(
+                AiService::Tts,
+                &[AiService::Tts],
+                std::slice::from_ref(&dependency),
+                &[ModelActivation {
+                    service: AiService::Tts,
+                    plugin_id: "mock_tts".into(),
+                    settings: json!({}),
+                    asset_revision: None,
+                }],
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            revision_lease::RevisionLease::exclusive(&dependency),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+        let observed = supervisor.observed_worker_layers().unwrap();
+        assert_eq!(
+            observed,
+            vec![removal::ActiveWorkerLayers {
+                generation,
+                paths: vec![dependency.clone()],
+            }]
+        );
+        let active_worker = supervisor
+            .workers
+            .lock()
+            .await
+            .get(&WorkerKey::Service(AiService::Tts))
+            .cloned()
+            .unwrap();
+        let _busy = active_worker.lock().await;
+        assert!(matches!(
+            supervisor.observed_worker_layers(),
+            Err(removal::LayerUsageError::Busy)
+        ));
+        drop(_busy);
+        let activation = supervisor
+            .activation_lock(WorkerKey::Service(AiService::Tts))
+            .await;
+        let _updating = activation.lock().await;
+        assert!(matches!(
+            supervisor.observed_worker_layers(),
+            Err(removal::LayerUsageError::Busy)
+        ));
+        drop(_updating);
+        supervisor.stop(AiService::Tts).await.unwrap();
+        assert!(supervisor.observed_worker_layers().unwrap().is_empty());
+        drop(active_worker);
+        assert!(revision_lease::RevisionLease::exclusive(&dependency).is_ok());
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn health_refresh_skips_busy_worker_and_detects_unrelated_crash() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
+        let supervisor = AiSupervisor::new(
+            ProcessTopology::Split,
+            PythonHostConfig {
+                python_executable: test_python().into(),
+                sdk_root: root.clone(),
+                plugins_directory: root.join("plugins/builtin"),
+                models_directory: None,
+                request_timeout: Duration::from_secs(5),
+            },
+        );
+        supervisor.start(AiService::Tts).await.unwrap();
+        supervisor.start(AiService::Asr).await.unwrap();
+        let tts = supervisor
+            .workers
+            .lock()
+            .await
+            .get(&WorkerKey::Service(AiService::Tts))
+            .cloned()
+            .unwrap();
+        let asr = supervisor
+            .workers
+            .lock()
+            .await
+            .get(&WorkerKey::Service(AiService::Asr))
+            .cloned()
+            .unwrap();
+        {
+            let mut worker = asr.lock().await;
+            worker.child.start_kill().unwrap();
+            worker.child.wait().await.unwrap();
+        }
+        let _busy = tts.lock().await;
+        let snapshot = timeout(Duration::from_secs(1), supervisor.refresh_status())
+            .await
+            .expect("health refresh must not await an unrelated in-flight worker");
+        assert_eq!(snapshot.service(AiService::Asr).phase, RuntimePhase::Failed);
+        assert_eq!(
+            snapshot.service(AiService::Tts).phase,
+            RuntimePhase::WorkerRunning
+        );
+        drop(_busy);
+        supervisor.stop(AiService::Tts).await.unwrap();
+        supervisor.stop(AiService::Asr).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unverified_recovery_cannot_downgrade_a_hardware_profile() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
+        let supervisor = AiSupervisor::new(
+            ProcessTopology::Split,
+            PythonHostConfig {
+                python_executable: test_python().into(),
+                sdk_root: root.clone(),
+                plugins_directory: root.join("plugins/builtin"),
+                models_directory: None,
+                request_timeout: Duration::from_secs(5),
+            },
+        );
+        let generation = supervisor.start(AiService::Tts).await.unwrap();
+        let worker = supervisor
+            .workers
+            .lock()
+            .await
+            .get(&WorkerKey::Service(AiService::Tts))
+            .cloned()
+            .unwrap();
+        {
+            let mut process = worker.lock().await;
+            process.runtime_profiles.insert(
+                AiService::Tts,
+                RuntimeProfile {
+                    backend: backend::BackendKind::RemoteApi,
+                    device: "remote".into(),
+                    precision: hardware::Precision::Fp32,
+                },
+            );
+            process.child.start_kill().unwrap();
+            process.child.wait().await.unwrap();
+        }
+        supervisor.refresh_status().await;
+        let services = [AiService::Tts];
+        let models = [ModelActivation {
+            service: AiService::Tts,
+            plugin_id: "mock_tts".into(),
+            settings: json!({}),
+            asset_revision: None,
+        }];
+        assert!(matches!(
+            supervisor
+                .activate(Activation {
+                    service: AiService::Tts,
+                    services: &services,
+                    layers: &[],
+                    models: &models,
+                    profile: None,
+                    verify: None,
+                    expected_failed_generation: Some(generation),
+                    check_current: None,
+                })
+                .await,
+            Err(AiRuntimeError::ActivationGuard(_))
+        ));
+        let state = supervisor.status_snapshot().service(AiService::Tts);
+        assert_eq!(state.phase, RuntimePhase::Failed);
+        assert_eq!(state.generation, Some(generation));
+        supervisor.stop(AiService::Tts).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_initialized_model_cannot_mark_restarted_worker_ready() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
+        let supervisor = AiSupervisor::new(
+            ProcessTopology::Split,
+            PythonHostConfig {
+                python_executable: test_python().into(),
+                sdk_root: root.clone(),
+                plugins_directory: root.join("plugins/builtin"),
+                models_directory: None,
+                request_timeout: Duration::from_secs(5),
+            },
+        );
+        let previous = supervisor.start(AiService::Tts).await.unwrap();
+        supervisor.stop(AiService::Tts).await.unwrap();
+        let current = supervisor.start(AiService::Tts).await.unwrap();
+        assert_ne!(previous, current);
+        assert!(matches!(
+            supervisor
+                .publish_initialized_model(AiService::Tts, "mock_tts", previous)
+                .await,
+            Err(AiRuntimeError::StaleGeneration)
+        ));
+        let status = supervisor.status_snapshot().service(AiService::Tts);
+        assert_eq!(status.generation, Some(current));
+        assert_eq!(status.phase, RuntimePhase::WorkerRunning);
+        assert!(status.active_model.is_none());
+        assert!(supervisor.selected_model(AiService::Tts).await.is_none());
+        supervisor.stop(AiService::Tts).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shared_ipc_failure_reports_the_same_reason_to_all_affected_services() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
+        let supervisor = AiSupervisor::new(
+            ProcessTopology::Shared,
+            PythonHostConfig {
+                python_executable: test_python().into(),
+                sdk_root: root.clone(),
+                plugins_directory: root.join("plugins/builtin"),
+                models_directory: None,
+                request_timeout: Duration::from_secs(5),
+            },
+        );
+        let generation = supervisor.start(AiService::Tts).await.unwrap();
+        supervisor
+            .initialize(AiService::Tts, "mock_tts", json!({}))
+            .await
+            .unwrap();
+        supervisor
+            .initialize(AiService::Asr, "mock_asr", json!({}))
+            .await
+            .unwrap();
+        for service in [AiService::Tts, AiService::Asr] {
+            let state = supervisor.status_snapshot().service(service);
+            assert_eq!(state.phase, RuntimePhase::ModelReady);
+            assert_eq!(state.generation, Some(generation));
+            assert!(state.active_model.is_some());
+        }
+        let worker = supervisor
+            .workers
+            .lock()
+            .await
+            .get(&WorkerKey::Shared)
+            .cloned()
+            .unwrap();
+        {
+            let mut process = worker.lock().await;
+            process.child.start_kill().unwrap();
+            process.child.wait().await.unwrap();
+        }
+        let error = supervisor
+            .call(AiService::Tts, "status", json!({}))
+            .await
+            .unwrap_err();
+        let expected_reason = error.to_string();
+        let snapshot = supervisor.status_snapshot();
+        for service in [AiService::Tts, AiService::Asr] {
+            let state = snapshot.service(service);
+            assert_eq!(state.phase, RuntimePhase::Failed);
+            assert_eq!(state.generation, Some(generation));
+            assert!(state.active_model.is_none());
+            assert!(state.pending_model.is_none());
+            assert_eq!(state.last_error.as_deref(), Some(expected_reason.as_str()));
+        }
+        let mut observed = supervisor.observe_status();
+        observed.borrow_and_update();
+        assert!(matches!(
+            supervisor.call(AiService::Tts, "status", json!({})).await,
+            Err(AiRuntimeError::Protocol(message)) if message == "worker requires restart"
+        ));
+        assert!(!observed.has_changed().unwrap());
+        for service in [AiService::Tts, AiService::Asr] {
+            assert_eq!(
+                supervisor
+                    .status_snapshot()
+                    .service(service)
+                    .last_error
+                    .as_deref(),
+                Some(expected_reason.as_str())
+            );
+        }
+        supervisor.stop(AiService::Asr).await.unwrap();
+        for service in [AiService::Tts, AiService::Asr] {
+            assert_eq!(
+                supervisor.status_snapshot().service(service).phase,
+                RuntimePhase::Stopped
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn streamed_wav_rejects_replaced_worker_without_locking_new_generation() {
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
+        let root = std::env::temp_dir().join(format!("nm-stale-wav-{}", Uuid::new_v4()));
+        let plugin = root.join("plugins/mock_tts");
+        tokio::fs::create_dir_all(&plugin).await.unwrap();
+        tokio::fs::copy(
+            source.join("plugins/builtin/mock_tts/plugin.json"),
+            plugin.join("plugin.json"),
+        )
+        .await
+        .unwrap();
+        let code = tokio::fs::read_to_string(source.join("plugins/builtin/mock_tts/plugin.py"))
+            .await
+            .unwrap()
+            .replace("\r\n", "\n");
+        let needle = "    def infer(self, input_data):\n";
+        assert!(code.contains(needle));
+        let blocking = "    def infer(self, input_data):\n        if input_data.get('test_gate'):\n            from pathlib import Path\n            import time\n            Path(input_data['entered']).write_text('entered', encoding='utf-8')\n            deadline = time.monotonic() + 8\n            while not Path(input_data['release']).exists():\n                if time.monotonic() >= deadline: raise TimeoutError('test gate expired')\n                time.sleep(0.01)\n";
+        tokio::fs::write(plugin.join("plugin.py"), code.replace(needle, blocking))
+            .await
+            .unwrap();
+        let supervisor = Arc::new(AiSupervisor::new(
+            ProcessTopology::Split,
+            PythonHostConfig {
+                python_executable: test_python().into(),
+                sdk_root: source,
+                plugins_directory: root.join("plugins"),
+                models_directory: None,
+                request_timeout: Duration::from_secs(10),
+            },
+        ));
+        let previous = supervisor.start(AiService::Tts).await.unwrap();
+        supervisor
+            .initialize(AiService::Tts, "mock_tts", json!({}))
+            .await
+            .unwrap();
+        let entered = root.join("entered");
+        let release = root.join("release");
+        let pending = Arc::clone(&supervisor);
+        let old_stream = tokio::spawn(async move {
+            pending
+                .synthesize_streamed_wav(json!({
+                    "text": "old audio",
+                    "test_gate": true,
+                    "entered": entered,
+                    "release": release,
+                }))
+                .await
+        });
+        timeout(Duration::from_secs(5), async {
+            while !tokio::fs::try_exists(root.join("entered")).await.unwrap() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("old worker must begin streamed inference");
+        let next = Arc::clone(&supervisor);
+        let activation = tokio::spawn(async move {
+            next.reconfigure(
+                AiService::Tts,
+                &[AiService::Tts],
+                &[],
+                &[ModelActivation {
+                    service: AiService::Tts,
+                    plugin_id: "mock_tts".into(),
+                    settings: json!({}),
+                    asset_revision: None,
+                }],
+            )
+            .await
+        });
+        timeout(Duration::from_secs(5), async {
+            while supervisor
+                .status_snapshot()
+                .service(AiService::Tts)
+                .generation
+                == Some(previous)
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("replacement worker must be published before old stream completes");
+        let new_worker = supervisor
+            .workers
+            .lock()
+            .await
+            .get(&WorkerKey::Service(AiService::Tts))
+            .cloned()
+            .unwrap();
+        let _busy_new_worker = new_worker.lock().await;
+        tokio::fs::write(root.join("release"), b"continue")
+            .await
+            .unwrap();
+        assert!(matches!(
+            timeout(Duration::from_secs(2), old_stream)
+                .await
+                .expect("stale stream must not await new generation's worker lock")
+                .unwrap(),
+            Err(AiRuntimeError::StaleGeneration)
+        ));
+        drop(_busy_new_worker);
+        let current = activation.await.unwrap().unwrap();
+        assert_ne!(current, previous);
+        assert_eq!(
+            supervisor
+                .status_snapshot()
+                .service(AiService::Tts)
+                .generation,
+            Some(current)
+        );
+        assert!(
+            supervisor
+                .synthesize_streamed_wav(json!({"text": "new audio"}))
+                .await
+                .unwrap()
+                .starts_with(b"RIFF")
+        );
+        supervisor.stop(AiService::Tts).await.unwrap();
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
@@ -1726,6 +2724,7 @@ class Plugin:
             timeout: Duration::from_secs(3),
         };
         let plan = PluginInstallPlan {
+            build_stages: vec![],
             asset_hooks: vec![],
             packages: vec![],
             requirements: vec![],

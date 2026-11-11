@@ -18,7 +18,7 @@ use crate::{
     generation::{
         GenerationError, PreparedRequest, PromptRole, ProviderKind, ProviderReply, ProviderUsage,
     },
-    identity::CharacterId,
+    identity::{CharacterId, EventId},
 };
 
 pub const DIAGNOSTIC_SCHEMA_VERSION: u32 = 1;
@@ -378,6 +378,7 @@ pub enum DiagnosticState {
     Processing { stage: String },
     Finished { outcome: String },
     Cancelled,
+    AcceptedElsewhere { event_id: Uuid },
 }
 
 impl From<&RequestState> for DiagnosticState {
@@ -427,6 +428,7 @@ pub enum FailureStage {
     PromptPreparation,
     ProviderConfiguration,
     ProviderTransport,
+    ProviderTimeout,
     ProviderHttp,
     ProviderResponse,
     ProviderResponseMalformed,
@@ -442,6 +444,7 @@ impl FailureStage {
                 Self::ProviderConfiguration
             }
             GenerationError::Transport(_) => Self::ProviderTransport,
+            GenerationError::DeadlineExceeded => Self::ProviderTimeout,
             GenerationError::Http(_) => Self::ProviderHttp,
             GenerationError::Response(_) if malformed => Self::ProviderResponseMalformed,
             GenerationError::Response(_) => Self::ProviderResponse,
@@ -577,6 +580,9 @@ pub enum DiagnosticOutcome {
         event_id: Uuid,
     },
     Cancelled,
+    AcceptedElsewhere {
+        event_id: Uuid,
+    },
     Failed {
         stage: FailureStage,
         message: BoundedText,
@@ -890,6 +896,19 @@ impl RequestTrace {
         self.redaction = self.redactor.redactions.clone();
     }
 
+    pub(crate) fn accepted_elsewhere(&mut self, event: EventId, revision: u64) {
+        self.outcome = Some(DiagnosticOutcome::AcceptedElsewhere { event_id: event.0 });
+        self.transitions.push(RequestTransition {
+            revision,
+            phase: EffectPhase::Applied,
+            state: DiagnosticState::AcceptedElsewhere { event_id: event.0 },
+        });
+        if self.transitions.len() > self.limits.max_transitions {
+            self.transitions.remove(1.min(self.transitions.len() - 1));
+        }
+        self.redaction = self.redactor.redactions.clone();
+    }
+
     pub(crate) fn cancelled(&mut self) {
         self.outcome = Some(DiagnosticOutcome::Cancelled);
         self.redaction = self.redactor.redactions.clone();
@@ -931,7 +950,9 @@ impl RequestTrace {
                 message,
                 accepted_text,
             } => (*stage, message.clone(), false, Some(accepted_text.clone())),
-            DiagnosticOutcome::Success { .. } | DiagnosticOutcome::Cancelled => return None,
+            DiagnosticOutcome::Success { .. }
+            | DiagnosticOutcome::AcceptedElsewhere { .. }
+            | DiagnosticOutcome::Cancelled => return None,
         };
         Some(DiagnosticErrorSummary {
             request_id: self.metadata.id.0,
@@ -954,6 +975,7 @@ impl RequestTrace {
             complete: self.complete,
             outcome: self.outcome.as_ref().map(|outcome| match outcome {
                 DiagnosticOutcome::Success { .. } => "success",
+                DiagnosticOutcome::AcceptedElsewhere { .. } => "accepted_elsewhere",
                 DiagnosticOutcome::Cancelled => "cancelled",
                 DiagnosticOutcome::Failed { .. } => "failed",
                 DiagnosticOutcome::PartialError { .. } => "partial_error",

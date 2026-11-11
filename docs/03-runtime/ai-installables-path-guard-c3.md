@@ -1,0 +1,7 @@
+# C3: reject symlinked installed Python layer paths
+
+Backend and plugin overlay revisions are immutable, selected by exact IDs and revisions. `LayerInstaller::installed` previously followed symbolic links through the selected revision path, allowing a foreign directory to supply an installation marker and package metadata. `publish` could also traverse a symlinked managed parent before staging or renaming a revision.
+
+`LayerInstaller` now rejects symlinks at the selected revision, its immediate plugin/backend-kind parent and the enclosing backend/overlay installation directory before probing or installing. A dangling symlink is an explicit error, not an absent revision. Parent validation occurs before `create_dir_all` or uv execution; this prevents writes via those managed paths to an external directory. The caller still injects the trusted portable data root; this is not a second portable-root resolver or a migration schema.
+
+A Unix regression covers symlinked overlay revision, plugin parent, and overlay root, both for `installed` and `install`, asserting that no external output is created. The shared `LayerInstaller` applies the same guard to backend layers. Staging cancellation cleanup after task abortion is covered by [the next C3 slice](ai-installables-cancellation-c3.md). Recursive package-file containment and complete remove/garbage-collection semantics remain unproven. Issue #42 remains open.

@@ -1,7 +1,11 @@
 //! Read-only inventory of packaged Python speech plugins and verified asset revisions.
 //! Discovery never imports or executes a plugin, and it never installs anything.
 
-use std::{collections::BTreeMap, path::PathBuf, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use crate::ai_runtime::{assets::ModelAssetStore, layer::valid_segment};
 use serde::Deserialize;
@@ -59,17 +63,183 @@ struct PluginManifest {
     id: String,
     name: String,
     kind: String,
+    api_version: u32,
+    entrypoint: String,
+    version: Option<String>,
+    publisher: Option<String>,
+    permissions: Option<Vec<String>>,
+}
+
+pub(super) fn executable_plugin_root(data_directory: &Path) -> PathBuf {
+    for path in ["AIData/plugins", "AIData/Scripts"] {
+        let candidate = data_directory.join(path);
+        if std::fs::symlink_metadata(&candidate).is_ok() {
+            return candidate;
+        }
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python/plugins/builtin")
+}
+
+fn plugin_candidates(root: &Path) -> Vec<PathBuf> {
+    if !std::fs::symlink_metadata(root)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.is_symlink())
+    {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut candidates = Vec::new();
+    for entry in entries.flatten().take(256) {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if !kind.is_dir() && !kind.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        if kind.is_dir() && (entry.file_name() == "builtin" || entry.file_name() == "community") {
+            if let Ok(children) = std::fs::read_dir(&path) {
+                candidates.extend(children.flatten().take(256).filter_map(|child| {
+                    child
+                        .file_type()
+                        .ok()
+                        .filter(|kind| kind.is_dir() || kind.is_symlink())
+                        .map(|_| child.path())
+                }));
+            }
+        } else {
+            candidates.push(path);
+        }
+    }
+    candidates
+}
+
+fn valid_plugin_version(version: &str) -> bool {
+    let core = version
+        .split_once(['-', '+'])
+        .map_or(version, |(core, _)| core);
+    let parts: Vec<_> = core.split('.').collect();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+        && version
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'+' | b'-'))
+}
+
+fn inspect_manifest(path: &Path, community: bool) -> Result<PluginManifest, String> {
+    if !std::fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.is_symlink())
+    {
+        return Err("plugin directory must be a real directory".into());
+    }
+    let manifest_path = path.join("plugin.json");
+    let metadata = std::fs::symlink_metadata(&manifest_path)
+        .map_err(|error| format!("manifest not readable: {error}"))?;
+    if !metadata.is_file() || metadata.is_symlink() || metadata.len() > 64 * 1024 {
+        return Err("manifest is not a bounded regular file".into());
+    }
+    let manifest: PluginManifest =
+        serde_json::from_slice(&std::fs::read(&manifest_path).map_err(|error| error.to_string())?)
+            .map_err(|error| format!("invalid manifest JSON: {error}"))?;
+    if !valid_segment(&manifest.id)
+        || path
+            .file_name()
+            .is_none_or(|name| name != manifest.id.as_str())
+        || manifest.api_version != 1
+        || manifest.entrypoint != "plugin.py"
+        || !matches!(manifest.kind.as_str(), "tts" | "asr")
+        || manifest.name.trim().is_empty()
+        || manifest.name.len() > 128
+        || manifest
+            .version
+            .as_ref()
+            .is_some_and(|version| !valid_plugin_version(version))
+        || manifest.publisher.as_ref().is_some_and(|publisher| {
+            publisher.is_empty()
+                || publisher.len() > 80
+                || !publisher
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        })
+        || manifest.permissions.as_ref().is_some_and(|permissions| {
+            permissions.len()
+                != permissions
+                    .iter()
+                    .collect::<std::collections::HashSet<_>>()
+                    .len()
+                || permissions.iter().any(|permission| {
+                    !matches!(
+                        permission.as_str(),
+                        "network" | "filesystem_read" | "filesystem_write" | "subprocess"
+                    )
+                })
+        })
+        || (community
+            && (manifest.version.is_none()
+                || manifest.publisher.is_none()
+                || manifest.permissions.is_none()))
+    {
+        return Err("invalid or unsupported speech plugin manifest".into());
+    }
+    let entrypoint = path.join("plugin.py");
+    if !std::fs::symlink_metadata(entrypoint)
+        .is_ok_and(|metadata| metadata.is_file() && !metadata.is_symlink())
+    {
+        return Err("missing or unsafe plugin entrypoint".into());
+    }
+    if manifest
+        .permissions
+        .as_ref()
+        .is_some_and(|permissions| !permissions.is_empty())
+    {
+        return Err("plugin requires explicit permission approval".into());
+    }
+    Ok(manifest)
+}
+
+pub(super) fn verify_executable_plugin(
+    root: &Path,
+    plugin_id: &str,
+    service: &str,
+) -> Result<(), String> {
+    if !valid_segment(plugin_id) || !matches!(service, "tts" | "asr") {
+        return Err("unsupported selected speech plugin".into());
+    }
+    let metadata = std::fs::symlink_metadata(root)
+        .map_err(|error| format!("plugin root unavailable: {error}"))?;
+    if !metadata.is_dir() || metadata.is_symlink() {
+        return Err("plugin root must be a real directory".into());
+    }
+    let matches = plugin_candidates(root)
+        .into_iter()
+        .filter(|directory| directory.file_name().is_some_and(|name| name == plugin_id))
+        .collect::<Vec<_>>();
+    if matches.len() != 1 {
+        return Err(format!(
+            "selected plugin {plugin_id} is missing or ambiguous in executable plugin root"
+        ));
+    }
+    let directory = &matches[0];
+    let community = directory
+        .parent()
+        .is_some_and(|parent| parent.file_name().is_some_and(|name| name == "community"));
+    let manifest = inspect_manifest(directory, community)?;
+    if manifest.kind != service {
+        return Err(format!(
+            "selected plugin {plugin_id} does not provide {service}"
+        ));
+    }
+    Ok(())
 }
 
 impl SpeechModelCatalog {
     pub fn for_desktop(data_directory: PathBuf) -> Self {
-        let roots = vec![
-            data_directory.join("AIData/Scripts"),
-            data_directory.join("AIData/plugins"),
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python/plugins/builtin"),
-        ];
+        let plugin_roots = vec![executable_plugin_root(&data_directory)];
         Self {
-            plugin_roots: roots,
+            plugin_roots,
             data_directory,
         }
     }
@@ -78,38 +248,40 @@ impl SpeechModelCatalog {
         let mut inventory = SpeechInventory::default();
         let mut models = BTreeMap::<(String, String), SpeechModelOption>::new();
         for root in &self.plugin_roots {
-            let Ok(entries) = std::fs::read_dir(root) else {
-                continue;
-            };
-            for entry in entries.flatten().take(256) {
-                let dir = entry.path();
-                if !entry
-                    .file_type()
-                    .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink())
-                {
-                    continue;
+            let candidates = plugin_candidates(root);
+            let mut counts = HashMap::<String, usize>::new();
+            for directory in &candidates {
+                if let Some(id) = directory.file_name().and_then(|name| name.to_str()) {
+                    *counts.entry(id.to_owned()).or_default() += 1;
                 }
-                let manifest_path = dir.join("plugin.json");
-                let Ok(stat) = std::fs::symlink_metadata(&manifest_path) else {
+            }
+            for directory in candidates {
+                let Some(id) = directory.file_name().and_then(|name| name.to_str()) else {
                     continue;
                 };
-                if !stat.is_file() || stat.is_symlink() || stat.len() > 8192 {
+                if counts[id] != 1 {
+                    inventory
+                        .errors
+                        .push(format!("ambiguous speech plugin id: {id}"));
                     continue;
                 }
-                let Ok(bytes) = std::fs::read(&manifest_path) else {
-                    continue;
-                };
-                let Ok(manifest) = serde_json::from_slice::<PluginManifest>(&bytes) else {
-                    continue;
-                };
-                if !valid_segment(&manifest.id)
-                    || entry.file_name().to_string_lossy() != manifest.id
-                    || !matches!(manifest.kind.as_str(), "tts" | "asr")
-                    || manifest.name.is_empty()
-                    || manifest.name.len() > 128
-                {
+                let symlinked = std::fs::symlink_metadata(&directory)
+                    .is_ok_and(|metadata| metadata.is_symlink());
+                if !symlinked && !directory.join("plugin.json").exists() {
                     continue;
                 }
+                let community = directory.parent().is_some_and(|parent| {
+                    parent.file_name().is_some_and(|name| name == "community")
+                });
+                let manifest = match inspect_manifest(&directory, community) {
+                    Ok(manifest) => manifest,
+                    Err(reason) => {
+                        inventory
+                            .errors
+                            .push(format!("speech plugin {id}: {reason}"));
+                        continue;
+                    }
+                };
                 let key = (manifest.kind, manifest.id.clone());
                 models.entry(key).or_insert(SpeechModelOption {
                     id: manifest.id,
@@ -209,9 +381,10 @@ mod tests {
         std::fs::create_dir_all(scripts.join("gigaam_onnx")).unwrap();
         std::fs::write(
             scripts.join("gigaam_onnx/plugin.json"),
-            r#"{"id":"gigaam_onnx","name":"GigaAM","kind":"asr"}"#,
+            r#"{"id":"gigaam_onnx","name":"GigaAM","kind":"asr","api_version":1,"entrypoint":"plugin.py"}"#,
         )
         .unwrap();
+        std::fs::write(scripts.join("gigaam_onnx/plugin.py"), "class Plugin: pass").unwrap();
         let snapshot = SpeechModelCatalog {
             plugin_roots: vec![scripts],
             data_directory: root.clone(),
@@ -226,6 +399,193 @@ mod tests {
         assert!(!model.package_detected);
         assert!(!model.verified_assets);
         assert!(snapshot.tts.iter().any(|item| item.id == "fish_speech"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn fixture(root: &Path, source: &str, id: &str, kind: &str, permissions: &[&str]) {
+        let dir = root.join(source).join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.json"),
+            serde_json::json!({
+                "id": id,
+                "name": id,
+                "kind": kind,
+                "api_version": 1,
+                "entrypoint": "plugin.py",
+                "version": "1.0.0",
+                "publisher": "test",
+                "permissions": permissions,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(dir.join("plugin.py"), "class Plugin: pass").unwrap();
+    }
+
+    #[test]
+    fn executable_root_and_selected_plugin_use_the_same_resolver() {
+        let root = std::env::temp_dir().join(format!("nm-plugin-root-{}", uuid::Uuid::new_v4()));
+        let legacy = root.join("AIData/Scripts");
+        let plugins = root.join("AIData/plugins");
+        fixture(&legacy, "", "legacy_tts", "tts", &[]);
+        assert_eq!(executable_plugin_root(&root), legacy);
+        fixture(&plugins, "community", "active_asr", "asr", &[]);
+        assert_eq!(executable_plugin_root(&root), plugins);
+        assert!(verify_executable_plugin(&plugins, "active_asr", "asr").is_ok());
+        assert!(verify_executable_plugin(&plugins, "legacy_tts", "tts").is_err());
+        assert!(verify_executable_plugin(&plugins, "active_asr", "tts").is_err());
+        fixture(&plugins, "builtin", "active_asr", "asr", &[]);
+        assert!(
+            verify_executable_plugin(&plugins, "active_asr", "asr")
+                .unwrap_err()
+                .contains("ambiguous")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn activation_refuses_permissioned_plugins_and_symlinked_roots() {
+        let root = std::env::temp_dir().join(format!("nm-plugin-perms-{}", uuid::Uuid::new_v4()));
+        let plugins = root.join("AIData/plugins");
+        fixture(&plugins, "community", "denied_tts", "tts", &["network"]);
+        assert!(
+            verify_executable_plugin(&plugins, "denied_tts", "tts")
+                .unwrap_err()
+                .contains("permission approval")
+        );
+        #[cfg(unix)]
+        {
+            let link = root.join("linked_plugins");
+            std::os::unix::fs::symlink(&plugins, &link).unwrap();
+            assert!(
+                verify_executable_plugin(&link, "denied_tts", "tts")
+                    .unwrap_err()
+                    .contains("real directory")
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlinked_plugin_cannot_hide_an_ambiguous_id_or_appear_selectable() {
+        let root = std::env::temp_dir().join(format!("nm-plugin-link-{}", uuid::Uuid::new_v4()));
+        let plugins = root.join("AIData/plugins");
+        fixture(&plugins, "builtin", "valid_tts", "tts", &[]);
+        std::fs::create_dir_all(plugins.join("community")).unwrap();
+        let link = plugins.join("community/valid_tts");
+        std::os::unix::fs::symlink(plugins.join("builtin/valid_tts"), &link).unwrap();
+        let catalog = SpeechModelCatalog {
+            plugin_roots: vec![plugins.clone()],
+            data_directory: root.clone(),
+        };
+        let ambiguous = catalog.snapshot().await;
+        assert!(!ambiguous.tts.iter().any(|model| model.id == "valid_tts"));
+        assert!(
+            ambiguous
+                .errors
+                .iter()
+                .any(|error| error.contains("ambiguous"))
+        );
+        assert!(
+            verify_executable_plugin(&plugins, "valid_tts", "tts")
+                .unwrap_err()
+                .contains("ambiguous")
+        );
+
+        std::fs::remove_dir_all(plugins.join("builtin/valid_tts")).unwrap();
+        let linked_only = catalog.snapshot().await;
+        assert!(!linked_only.tts.iter().any(|model| model.id == "valid_tts"));
+        assert!(
+            linked_only
+                .errors
+                .iter()
+                .any(|error| error.contains("real directory"))
+        );
+        assert!(verify_executable_plugin(&plugins, "valid_tts", "tts").is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn discovers_nested_builtin_and_community_speech_without_installs() {
+        let root = std::env::temp_dir().join(format!("nm-nested-plugins-{}", uuid::Uuid::new_v4()));
+        let plugins = root.join("AIData/plugins");
+        fixture(&plugins, "builtin", "dynamic_builtin", "asr", &[]);
+        fixture(&plugins, "community", "dynamic_community", "tts", &[]);
+        fixture(&plugins, "", "dynamic_flat", "tts", &[]);
+        let inventory = SpeechModelCatalog {
+            plugin_roots: vec![plugins],
+            data_directory: root.clone(),
+        }
+        .snapshot()
+        .await;
+        for (options, id) in [
+            (&inventory.asr, "dynamic_builtin"),
+            (&inventory.tts, "dynamic_community"),
+            (&inventory.tts, "dynamic_flat"),
+        ] {
+            let option = options.iter().find(|item| item.id == id).unwrap();
+            assert!(!option.package_detected);
+            assert!(!option.verified_assets);
+        }
+        assert!(inventory.errors.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn duplicate_ids_and_permissioned_or_invalid_plugins_are_not_selectable() {
+        let root =
+            std::env::temp_dir().join(format!("nm-invalid-plugins-{}", uuid::Uuid::new_v4()));
+        let plugins = root.join("AIData/plugins");
+        fixture(&plugins, "builtin", "duplicate_fixture", "asr", &[]);
+        fixture(&plugins, "community", "duplicate_fixture", "asr", &[]);
+        fixture(
+            &plugins,
+            "community",
+            "permissioned_fixture",
+            "tts",
+            &["network"],
+        );
+        fixture(&plugins, "community", "safe_fixture", "tts", &[]);
+        std::fs::remove_file(plugins.join("community/safe_fixture/plugin.py")).unwrap();
+        let inventory = SpeechModelCatalog {
+            plugin_roots: vec![plugins],
+            data_directory: root.clone(),
+        }
+        .snapshot()
+        .await;
+        assert!(
+            !inventory
+                .asr
+                .iter()
+                .any(|item| item.id == "duplicate_fixture")
+        );
+        assert!(
+            !inventory
+                .tts
+                .iter()
+                .any(|item| item.id == "permissioned_fixture")
+        );
+        assert!(!inventory.tts.iter().any(|item| item.id == "safe_fixture"));
+        assert!(
+            inventory
+                .errors
+                .iter()
+                .any(|error| error.contains("ambiguous"))
+        );
+        assert!(
+            inventory
+                .errors
+                .iter()
+                .any(|error| error.contains("permission approval"))
+        );
+        assert!(
+            inventory
+                .errors
+                .iter()
+                .any(|error| error.contains("entrypoint"))
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

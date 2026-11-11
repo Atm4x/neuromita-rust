@@ -38,6 +38,35 @@ pub struct PluginInstallPlan {
     pub actions: Vec<InstallerAction>,
     #[serde(default)]
     pub asset_hooks: Vec<AssetHook>,
+    #[serde(default)]
+    pub build_stages: Vec<BuildStage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BuildStage {
+    pub id: String,
+    pub kind: BuildStageKind,
+    pub backend: String,
+    pub platform: BuildPlatform,
+    #[serde(default)]
+    pub requirement: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildStageKind {
+    PythonWheel,
+    SourceBuild,
+    RuntimeJit,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildPlatform {
+    Windows,
+    Linux,
+    Macos,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -225,6 +254,53 @@ impl PluginInstallPlan {
         {
             return Err(PluginInstallError::Invalid("invalid asset hooks".into()));
         }
+        if self.build_stages.len() > 16
+            || self
+                .build_stages
+                .iter()
+                .map(|stage| &stage.id)
+                .collect::<HashSet<_>>()
+                .len()
+                != self.build_stages.len()
+        {
+            return Err(PluginInstallError::Invalid(
+                "too many or duplicate build stages".into(),
+            ));
+        }
+        for stage in &self.build_stages {
+            if !valid_segment(&stage.id)
+                || !self.backend.as_deref().is_some_and(|b| b == stage.backend)
+                    && !self.supported_backends.contains(&stage.backend)
+                    && !self.required_backends.contains(&stage.backend)
+            {
+                return Err(PluginInstallError::Invalid(
+                    "build stage must identify a declared backend".into(),
+                ));
+            }
+            match stage.kind {
+                BuildStageKind::PythonWheel => {
+                    let Some(requirement) = stage.requirement.as_deref() else {
+                        return Err(PluginInstallError::Invalid(
+                            "wheel build stage must declare a package requirement".into(),
+                        ));
+                    };
+                    super::resolver::validate_requirement(requirement)
+                        .map_err(|error| PluginInstallError::Invalid(error.to_string()))?;
+                    if !self.requirements.iter().any(|entry| entry == requirement) {
+                        return Err(PluginInstallError::Invalid(
+                            "wheel stage must refer to an existing install requirement".into(),
+                        ));
+                    }
+                }
+                BuildStageKind::SourceBuild | BuildStageKind::RuntimeJit => {
+                    if stage.requirement.is_some() {
+                        return Err(PluginInstallError::Invalid(
+                            "non-wheel stage cannot specify a package requirement".into(),
+                        ));
+                    }
+                }
+            }
+        }
         if self.assets.len() > 512 {
             return Err(PluginInstallError::Invalid("too many assets".into()));
         }
@@ -300,6 +376,11 @@ impl PluginInstallHandler {
             backend_packages,
         } = request;
         plan.validate(python_version)?;
+        if !plan.build_stages.is_empty() {
+            return Err(PluginInstallError::Invalid(
+                "build stages require a verified executor; refusing to publish an incomplete install".into(),
+            ));
+        }
         if !valid_segment(plugin_id) || !valid_segment(revision) {
             return Err(PluginInstallError::Invalid(
                 "unsafe plugin id or revision".into(),
@@ -522,6 +603,7 @@ mod tests {
     #[test]
     fn rejects_path_traversal_and_duplicate_assets() {
         let mut plan = PluginInstallPlan {
+            build_stages: vec![],
             asset_hooks: vec![],
             packages: vec![],
             requirements: vec![],
@@ -555,6 +637,7 @@ mod tests {
         let mut present = asset("rvc_weights", "rvc/voice.pth", true);
         present.sha256 = Some(hash_file(&plugin.join("rvc/voice.pth")).await.unwrap());
         let plan = PluginInstallPlan {
+            build_stages: vec![],
             asset_hooks: vec![],
             packages: vec![],
             requirements: vec![],
@@ -594,6 +677,7 @@ mod tests {
             .inspect_assets(
                 "mock_tts",
                 &PluginInstallPlan {
+                    build_stages: vec![],
                     asset_hooks: vec![],
                     assets: vec![present],
                     packages: vec![],
@@ -693,6 +777,7 @@ exit 3
             assets_directory: root.join("models"),
         };
         let plan = PluginInstallPlan {
+            build_stages: vec![],
             asset_hooks: vec![],
             backend: Some("torch-cpu".into()),
             supported_backends: vec![],
@@ -761,6 +846,143 @@ exit 3
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn builtin_fish_cuda_exposes_build_stages_through_real_python_sdk() {
+        use std::time::Duration;
+
+        let source = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
+        let host = crate::ai_runtime::PythonHostConfig {
+            python_executable: std::env::var("NEUROMITA_TEST_PYTHON")
+                .unwrap_or_else(|_| "python3".into())
+                .into(),
+            sdk_root: source.clone(),
+            plugins_directory: source.join("plugins/builtin"),
+            models_directory: None,
+            request_timeout: Duration::from_secs(10),
+        };
+        let plan = crate::ai_runtime::fetch_install_plan(&host, "fish_speech_compiled")
+            .await
+            .unwrap();
+        plan.validate("3.12.10").unwrap();
+        assert_eq!(plan.supported_backends, ["torch-cuda"]);
+        assert!(plan.build_stages.iter().any(|stage| {
+            stage.kind == BuildStageKind::RuntimeJit && stage.backend == "torch-cuda"
+        }));
+        assert!(
+            !plan
+                .requirements
+                .iter()
+                .any(|entry| entry.starts_with("triton-windows"))
+        );
+    }
+
+    #[test]
+    fn build_stage_contract_is_typed_and_fails_closed_on_invalid_plans() {
+        let mut plan = PluginInstallPlan {
+            build_stages: vec![],
+            packages: vec![],
+            requirements: vec!["triton-windows<3.4".into()],
+            assets: vec![],
+            backend: Some("torch-cuda".into()),
+            supported_backends: vec![],
+            required_backends: vec![],
+            supported_python_minors: vec![],
+            actions: vec![],
+            asset_hooks: vec![],
+        };
+        let jit = BuildStage {
+            id: "triton_jit".into(),
+            kind: BuildStageKind::RuntimeJit,
+            backend: "torch-cuda".into(),
+            platform: BuildPlatform::Windows,
+            requirement: None,
+        };
+        let wheel = BuildStage {
+            id: "triton_wheel".into(),
+            kind: BuildStageKind::PythonWheel,
+            backend: "torch-cuda".into(),
+            platform: BuildPlatform::Windows,
+            requirement: Some("triton-windows<3.4".into()),
+        };
+        plan.build_stages = vec![wheel.clone(), jit.clone()];
+        plan.validate("3.12.10").unwrap();
+        let wire = serde_json::to_value(&plan).unwrap();
+        assert_eq!(wire["build_stages"][0]["kind"], "python_wheel");
+        assert_eq!(wire["build_stages"][1]["kind"], "runtime_jit");
+        assert_eq!(
+            serde_json::from_value::<PluginInstallPlan>(wire).unwrap(),
+            plan
+        );
+
+        plan.build_stages.push(jit.clone());
+        assert!(plan.validate("3.12.10").is_err());
+        plan.build_stages = vec![BuildStage {
+            backend: "remote-api".into(),
+            ..jit.clone()
+        }];
+        assert!(plan.validate("3.12.10").is_err());
+        plan.build_stages = vec![BuildStage {
+            requirement: Some("triton<3.4".into()),
+            ..wheel.clone()
+        }];
+        assert!(plan.validate("3.12.10").is_err());
+        plan.build_stages = vec![BuildStage {
+            requirement: Some("malformed ; command".into()),
+            ..wheel
+        }];
+        assert!(plan.validate("3.12.10").is_err());
+        plan.build_stages = vec![BuildStage {
+            requirement: Some("triton<3.4".into()),
+            ..jit
+        }];
+        assert!(plan.validate("3.12.10").is_err());
+    }
+
+    #[tokio::test]
+    async fn build_stage_blocks_overlay_publication_before_any_writer() {
+        let root = std::env::temp_dir().join(format!("c4-build-reject-{}", Uuid::new_v4()));
+        let handler = PluginInstallHandler {
+            resolver: DependencyResolver {
+                uv_executable: root.join("uv"),
+                python_executable: root.join("python"),
+                cache_directory: root.join("cache"),
+                timeout: std::time::Duration::from_secs(3),
+            },
+            overlays: OverlayInstaller {
+                uv_executable: root.join("uv"),
+                python_executable: root.join("python"),
+                overlays_directory: root.join("overlays"),
+                cache_directory: root.join("cache"),
+                timeout: std::time::Duration::from_secs(3),
+            },
+            assets_directory: root.join("models"),
+        };
+        let plan = PluginInstallPlan {
+            build_stages: vec![BuildStage {
+                id: "compile_kernel".into(),
+                kind: BuildStageKind::RuntimeJit,
+                backend: "torch-cuda".into(),
+                platform: BuildPlatform::Linux,
+                requirement: None,
+            }],
+            packages: vec![],
+            requirements: vec![],
+            assets: vec![],
+            backend: Some("torch-cuda".into()),
+            supported_backends: vec![],
+            required_backends: vec![],
+            supported_python_minors: vec![],
+            actions: vec![],
+            asset_hooks: vec![],
+        };
+        let result = handler
+            .install("fish", "v1", "3.12.10", Some("torch-cuda"), &plan, &[])
+            .await;
+        assert!(matches!(result, Err(PluginInstallError::Invalid(_))));
+        assert!(!root.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn refuses_symlinked_assets() {
         use std::os::unix::fs::symlink;
         let root = std::env::temp_dir().join(format!("nm-asset-link-{}", Uuid::new_v4()));
@@ -785,6 +1007,7 @@ exit 3
             assets_directory: root.clone(),
         };
         let plan = PluginInstallPlan {
+            build_stages: vec![],
             asset_hooks: vec![],
             packages: vec![],
             requirements: vec![],

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::{PromptMessage, PromptRole};
+use crate::identity::EventId;
 
 /// Ordered, provider-owned transformations of the text prompt. Timeline facts
 /// and character history are never modified by this pipeline.
@@ -21,19 +22,84 @@ pub enum MessageTransform {
     TrailingSystemToUserPrefix { tag: String },
 }
 
-fn joined<'a>(texts: impl Iterator<Item = &'a str>) -> String {
-    texts
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
+/// The lineage of every text fragment survives message joins and role conversions.
+/// A fragment with a source is a complete projected Timeline message, not an
+/// arbitrary text span guessed after a provider transform.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PromptFragment {
+    pub(crate) text: String,
+    pub(crate) source: Option<EventId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TrackedPrompt {
+    pub(crate) role: PromptRole,
+    pub(crate) fragments: Vec<PromptFragment>,
+}
+
+impl TrackedPrompt {
+    pub(crate) fn new(message: PromptMessage, source: Option<EventId>) -> Self {
+        Self {
+            role: message.role,
+            fragments: vec![PromptFragment {
+                text: message.text.to_string(),
+                source,
+            }],
+        }
+    }
+
+    pub(crate) fn text(&self) -> String {
+        self.fragments
+            .iter()
+            .map(|part| part.text.as_str())
+            .collect()
+    }
+
+    pub(crate) fn message(&self) -> PromptMessage {
+        PromptMessage {
+            role: self.role,
+            text: self.text().into(),
+        }
+    }
+
+    pub(crate) fn prepend(&mut self, text: String) {
+        self.fragments
+            .insert(0, PromptFragment { text, source: None });
+    }
+
+    fn append(&mut self, text: String) {
+        self.fragments.push(PromptFragment { text, source: None });
+    }
+
+    fn join(&mut self, next: Self) {
+        if !self.text().is_empty() && !next.text().is_empty() {
+            self.append("\n\n".into());
+        }
+        self.fragments.extend(next.fragments);
+    }
+}
+
+fn untracked(role: PromptRole, text: impl Into<String>) -> TrackedPrompt {
+    TrackedPrompt {
+        role,
+        fragments: vec![PromptFragment {
+            text: text.into(),
+            source: None,
+        }],
+    }
+}
+
+fn joined(messages: &[TrackedPrompt], trim: bool) -> String {
+    messages
+        .iter()
+        .map(TrackedPrompt::text)
+        .map(|text| if trim { text.trim().to_owned() } else { text })
+        .filter(|s| !trim || !s.is_empty())
         .collect::<Vec<_>>()
         .join("\n\n")
 }
 
-fn prefix(tag: &str, text: &str) -> String {
-    format!("{tag}\n{text}")
-}
-
-fn convert_system(messages: Vec<PromptMessage>, tag: &str) -> Vec<PromptMessage> {
+fn convert_system(messages: Vec<TrackedPrompt>, tag: &str) -> Vec<TrackedPrompt> {
     let leading = messages
         .iter()
         .take_while(|m| m.role == PromptRole::System)
@@ -42,22 +108,22 @@ fn convert_system(messages: Vec<PromptMessage>, tag: &str) -> Vec<PromptMessage>
         .into_iter()
         .enumerate()
         .filter_map(|(index, mut message)| {
-            if message.role == PromptRole::System && message.text.trim().is_empty() {
+            if message.role == PromptRole::System && message.text().trim().is_empty() {
                 return None;
             }
             if index >= leading && message.role == PromptRole::System {
                 message.role = PromptRole::User;
-                message.text = prefix(tag, &message.text).into();
+                message.prepend(format!("{tag}\n"));
             }
             Some(message)
         })
         .collect()
 }
 
-pub fn apply_message_transforms(
-    mut messages: Vec<PromptMessage>,
+pub(crate) fn apply_tracked_transforms(
+    mut messages: Vec<TrackedPrompt>,
     transforms: &[MessageTransform],
-) -> Vec<PromptMessage> {
+) -> Vec<TrackedPrompt> {
     for transform in transforms {
         match transform {
             MessageTransform::MergeSystemMessages => {
@@ -66,29 +132,18 @@ pub fn apply_message_transforms(
                     .take_while(|m| m.role == PromptRole::System)
                     .count();
                 if leading > 0 {
-                    let text = joined(messages[..leading].iter().map(|m| m.text.as_ref()));
+                    let text = joined(&messages[..leading], true);
                     if !text.is_empty() {
                         messages.drain(..leading);
-                        messages.insert(
-                            0,
-                            PromptMessage {
-                                role: PromptRole::System,
-                                text: text.into(),
-                            },
-                        );
+                        messages.insert(0, untracked(PromptRole::System, text));
                     }
                 }
             }
             MessageTransform::EnsureAlternatingRoles => {
-                let mut merged: Vec<PromptMessage> = Vec::with_capacity(messages.len());
+                let mut merged: Vec<TrackedPrompt> = Vec::with_capacity(messages.len());
                 for message in messages {
                     if let Some(last) = merged.last_mut().filter(|m| m.role == message.role) {
-                        last.text = [last.text.as_ref(), message.text.as_ref()]
-                            .into_iter()
-                            .filter(|s| !s.is_empty())
-                            .collect::<Vec<_>>()
-                            .join("\n\n")
-                            .into();
+                        last.join(message);
                     } else {
                         merged.push(message);
                     }
@@ -100,17 +155,15 @@ pub fn apply_message_transforms(
                     .last()
                     .is_none_or(|m| m.role == PromptRole::Assistant)
                 {
-                    messages.push(PromptMessage {
-                        role: PromptRole::User,
-                        text: fallback_user_text.as_str().into(),
-                    });
+                    messages.push(untracked(PromptRole::User, fallback_user_text.clone()));
                 }
             }
             MessageTransform::SystemToUserPrefix { tag } => {
                 let context = messages
                     .iter()
                     .filter(|m| m.role == PromptRole::System)
-                    .map(|m| m.text.trim())
+                    .map(TrackedPrompt::text)
+                    .map(|text| text.trim().to_owned())
                     .filter(|s| !s.is_empty())
                     .map(|text| format!("{tag} {text}"))
                     .collect::<Vec<_>>()
@@ -120,17 +173,14 @@ pub fn apply_message_transforms(
                     let context = context.trim().to_owned();
                     if let Some(message) = messages.iter_mut().find(|m| m.role == PromptRole::User)
                     {
-                        message.text = format!("{context}\n\n{}", message.text).into();
+                        message.prepend(format!("{context}\n\n"));
                     } else {
-                        messages.push(PromptMessage {
-                            role: PromptRole::User,
-                            text: context.into(),
-                        });
+                        messages.push(untracked(PromptRole::User, context));
                     }
                 }
             }
             MessageTransform::SystemMessagesToUser { tag } => {
-                messages = convert_system(messages, tag)
+                messages = convert_system(messages, tag);
             }
             MessageTransform::NormalizeSystemMessages { tag } => {
                 messages = convert_system(messages, tag);
@@ -139,33 +189,40 @@ pub fn apply_message_transforms(
                     .take_while(|m| m.role == PromptRole::System)
                     .count();
                 if leading >= 2 {
-                    let text = messages[..leading]
-                        .iter()
-                        .map(|m| m.text.as_ref())
-                        .collect::<Vec<_>>()
-                        .join("\n\n");
+                    let text = joined(&messages[..leading], false);
                     messages.drain(..leading);
-                    messages.insert(
-                        0,
-                        PromptMessage {
-                            role: PromptRole::System,
-                            text: text.into(),
-                        },
-                    );
+                    messages.insert(0, untracked(PromptRole::System, text));
                 }
             }
             MessageTransform::TrailingSystemToUserPrefix { tag } => {
-                if let Some(mut message) = messages.pop_if(|m| m.role == PromptRole::System)
-                    && !message.text.trim().is_empty()
+                if let Some(message) = messages.pop_if(|m| m.role == PromptRole::System)
+                    && !message.text().trim().is_empty()
                 {
-                    message.role = PromptRole::User;
-                    message.text = format!("{tag} {}", message.text.trim()).into();
-                    messages.push(message);
+                    messages.push(untracked(
+                        PromptRole::User,
+                        format!("{tag} {}", message.text().trim()),
+                    ));
                 }
             }
         }
     }
     messages
+}
+
+pub fn apply_message_transforms(
+    messages: Vec<PromptMessage>,
+    transforms: &[MessageTransform],
+) -> Vec<PromptMessage> {
+    apply_tracked_transforms(
+        messages
+            .into_iter()
+            .map(|message| TrackedPrompt::new(message, None))
+            .collect(),
+        transforms,
+    )
+    .into_iter()
+    .map(|message| message.message())
+    .collect()
 }
 
 #[cfg(test)]
@@ -297,6 +354,85 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn alternating_roles_preserves_distinct_event_ids_for_identical_text() {
+        let first = EventId::new();
+        let second = EventId::new();
+        let messages = vec![
+            TrackedPrompt::new(
+                super::super::PromptMessage {
+                    role: PromptRole::System,
+                    text: "trusted instruction".into(),
+                },
+                None,
+            ),
+            TrackedPrompt::new(
+                super::super::PromptMessage {
+                    role: PromptRole::User,
+                    text: "same".into(),
+                },
+                Some(first),
+            ),
+            TrackedPrompt::new(
+                super::super::PromptMessage {
+                    role: PromptRole::User,
+                    text: "same".into(),
+                },
+                Some(second),
+            ),
+        ];
+        let transformed =
+            apply_tracked_transforms(messages, &[MessageTransform::EnsureAlternatingRoles]);
+        assert_eq!(transformed.len(), 2);
+        assert_eq!(transformed[0].role, PromptRole::System);
+        assert!(
+            transformed[0]
+                .fragments
+                .iter()
+                .all(|part| part.source.is_none())
+        );
+        assert_eq!(transformed[1].text(), "same\n\nsame");
+        assert_eq!(
+            transformed[1]
+                .fragments
+                .iter()
+                .filter_map(|part| part.source)
+                .collect::<Vec<_>>(),
+            vec![first, second]
+        );
+    }
+
+    #[test]
+    fn moved_system_prefix_never_inherits_user_event_provenance() {
+        let origin = EventId::new();
+        let transformed = apply_tracked_transforms(
+            vec![
+                TrackedPrompt::new(
+                    super::super::PromptMessage {
+                        role: PromptRole::System,
+                        text: "policy".into(),
+                    },
+                    None,
+                ),
+                TrackedPrompt::new(
+                    super::super::PromptMessage {
+                        role: PromptRole::User,
+                        text: "media".into(),
+                    },
+                    Some(origin),
+                ),
+            ],
+            &[MessageTransform::SystemToUserPrefix {
+                tag: "[INSTRUCTION]".into(),
+            }],
+        );
+        assert_eq!(transformed.len(), 1);
+        assert_eq!(transformed[0].role, PromptRole::User);
+        assert_eq!(transformed[0].text(), "[INSTRUCTION] policy\n\nmedia");
+        assert_eq!(transformed[0].fragments[0].source, None);
+        assert_eq!(transformed[0].fragments[1].source, Some(origin));
     }
 
     #[test]

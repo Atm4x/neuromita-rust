@@ -6,6 +6,8 @@ use uuid::Uuid;
 pub const MAX_ACTIVE_FACTS: usize = 256;
 pub const MAX_RETAINED_MEMORIES: usize = 1024;
 pub const MAX_MEMORY_EDIT_CHANGES: usize = MAX_ACTIVE_FACTS;
+pub const MAX_SOURCE_RELATIONS: usize = 128;
+pub const MAX_EXTRACTED_RELATIONS: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -71,6 +73,7 @@ impl MemoryIsland {
 pub enum MemoryKind {
     #[default]
     Fact,
+    RagOnly,
     Island(MemoryIsland),
 }
 
@@ -80,6 +83,8 @@ pub struct MemoryRecord {
     pub id: MemoryId,
     pub priority: MemoryPriority,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entities: Vec<String>,
     #[serde(default, skip_serializing_if = "is_fact")]
     pub kind: MemoryKind,
     #[serde(default, skip_serializing_if = "is_active")]
@@ -117,6 +122,7 @@ impl MemoryRecord {
             id,
             priority,
             content: content.into(),
+            entities: Vec::new(),
             kind: MemoryKind::Fact,
             state: MemoryState::Active,
             protected: false,
@@ -133,7 +139,13 @@ impl MemoryRecord {
 
     pub fn is_valid(&self) -> bool {
         let content = self.content.trim();
-        !content.is_empty() && content.chars().count() <= 2000
+        !content.is_empty()
+            && content.chars().count() <= 2000
+            && self.entities.len() <= 32
+            && self
+                .entities
+                .iter()
+                .all(|name| !name.trim().is_empty() && name.chars().count() <= 200)
     }
 }
 
@@ -150,6 +162,25 @@ pub enum MemoryCommand {
     EnsureFact {
         priority: MemoryPriority,
         content: String,
+    },
+    /// Trusted-local, exact-identity insertion from a versioned MemoryRecord archive.
+    /// Never modifies an existing ID; an identical record is an idempotent no-op.
+    ImportRecord {
+        record: MemoryRecord,
+    },
+    SeedFromPrompt {
+        priority: MemoryPriority,
+        content: String,
+        entities: Vec<String>,
+        rag_only: bool,
+    },
+    LinkEntities(MemoryRelation),
+    /// The extractor must supply the source revision captured before inference.
+    /// An edited, forgotten or replaced source must not accept late results.
+    ReplaceExtractedRelations {
+        source: MemoryId,
+        expected_revision: u64,
+        relations: Vec<MemoryRelation>,
     },
     /// Explicit lexical Jaccard dedup on active facts only. This does not run inference.
     /// A threshold of 800 represents Python MEMORY_DEDUP_THRESHOLD=0.8.
@@ -269,6 +300,39 @@ impl MemoryCapacityPlan {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryRelation {
+    pub subject: String,
+    pub predicate: String,
+    pub object: String,
+}
+
+impl MemoryRelation {
+    pub fn is_valid(&self) -> bool {
+        [&self.subject, &self.predicate, &self.object]
+            .iter()
+            .all(|value| !value.trim().is_empty() && value.chars().count() <= 200)
+    }
+}
+
+/// Source identity and revision for an extraction committed in the Timeline.
+/// This is projection input, not an independently mutable graph database.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtractedRelations {
+    pub source: MemoryId,
+    pub source_revision: u64,
+    pub relations: Vec<MemoryRelation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvenancedRelation {
+    pub source: MemoryId,
+    pub source_revision: u64,
+    pub relation: MemoryRelation,
+}
+
 /// Canonical committed operation; upserts include complete values, not partial deltas.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
@@ -279,6 +343,8 @@ impl MemoryCapacityPlan {
 )]
 pub enum MemoryChange {
     Upsert(MemoryRecord),
+    UpsertRelation(MemoryRelation),
+    ReplaceExtractedRelations(ExtractedRelations),
     Delete(MemoryId),
     /// An explicit, auditable protection transition separate from model-authored upserts.
     SetProtection {
@@ -290,11 +356,16 @@ pub enum MemoryChange {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CharacterMemories {
     records: BTreeMap<MemoryId, MemoryRecord>,
+    revision_counter: u64,
+    revisions: BTreeMap<MemoryId, u64>,
+    relations: BTreeSet<MemoryRelation>,
+    extracted: BTreeMap<MemoryId, ExtractedRelations>,
 }
 
 impl CharacterMemories {
     pub(crate) fn ensure_unique(&self) -> Result<(), &'static str> {
         let mut facts = BTreeSet::new();
+        let mut rag_only = BTreeSet::new();
         let mut islands = BTreeSet::new();
         for record in self.records.values() {
             if record.state == MemoryState::Deleted {
@@ -306,6 +377,11 @@ impl CharacterMemories {
                         return Err("duplicate memory content");
                     }
                 }
+                MemoryKind::RagOnly => {
+                    if !rag_only.insert(normalized_content(&record.content)) {
+                        return Err("duplicate RAG-only memory content");
+                    }
+                }
                 MemoryKind::Island(island) => {
                     if !islands.insert(island) {
                         return Err("duplicate memory island");
@@ -314,6 +390,53 @@ impl CharacterMemories {
             }
         }
         Ok(())
+    }
+
+    pub fn source_revision(&self, id: MemoryId) -> Option<u64> {
+        self.revisions.get(&id).copied()
+    }
+
+    pub fn source_revisions(&self) -> BTreeMap<MemoryId, u64> {
+        self.revisions.clone()
+    }
+
+    pub fn extracted_relations_at(&self, as_of_unix_ms: u64) -> Vec<ProvenancedRelation> {
+        self.extracted
+            .values()
+            .filter(|batch| {
+                self.revisions.get(&batch.source) == Some(&batch.source_revision)
+                    && self
+                        .records
+                        .get(&batch.source)
+                        .is_some_and(|record| record.available_at(as_of_unix_ms))
+            })
+            .flat_map(|batch| {
+                batch
+                    .relations
+                    .iter()
+                    .cloned()
+                    .map(|relation| ProvenancedRelation {
+                        source: batch.source,
+                        source_revision: batch.source_revision,
+                        relation,
+                    })
+            })
+            .collect()
+    }
+
+    pub fn relations_at(&self, as_of_unix_ms: u64) -> Vec<MemoryRelation> {
+        let mut relations = self.relations.clone();
+        relations.extend(
+            self.extracted_relations_at(as_of_unix_ms)
+                .into_iter()
+                .map(|link| link.relation),
+        );
+        relations.into_iter().collect()
+    }
+
+    /// Untimed administrative projection; generation must use relations_at(now).
+    pub fn relations(&self) -> Vec<MemoryRelation> {
+        self.relations_at(0)
     }
 
     /// Current active, non-expired facts are projected by explicit maintenance;
@@ -332,6 +455,17 @@ impl CharacterMemories {
         self.records
             .values()
             .filter(|record| record.kind == MemoryKind::Fact && record.available_at(as_of_unix_ms))
+            .cloned()
+            .collect()
+    }
+
+    pub fn searchable_at(&self, as_of_unix_ms: u64) -> Vec<MemoryRecord> {
+        self.records
+            .values()
+            .filter(|record| {
+                matches!(record.kind, MemoryKind::Fact | MemoryKind::RagOnly)
+                    && record.available_at(as_of_unix_ms)
+            })
             .cloned()
             .collect()
     }
@@ -377,6 +511,48 @@ impl CharacterMemories {
 
     pub fn apply_committed(&mut self, change: &MemoryChange) -> Result<(), &'static str> {
         match change {
+            MemoryChange::ReplaceExtractedRelations(batch) => {
+                let source = self
+                    .records
+                    .get(&batch.source)
+                    .ok_or("graph extraction source is absent")?;
+                if source.state != MemoryState::Active
+                    || !matches!(source.kind, MemoryKind::Fact | MemoryKind::RagOnly)
+                    || self.revisions.get(&batch.source) != Some(&batch.source_revision)
+                {
+                    return Err("graph extraction source revision is stale");
+                }
+                if batch.relations.len() > MAX_SOURCE_RELATIONS
+                    || batch.relations.iter().any(|relation| !relation.is_valid())
+                    || batch.relations.iter().collect::<BTreeSet<_>>().len()
+                        != batch.relations.len()
+                {
+                    return Err("invalid or duplicate graph extraction relation");
+                }
+                let retained = self
+                    .extracted
+                    .iter()
+                    .filter(|(source, _)| **source != batch.source)
+                    .map(|(_, value)| value.relations.len())
+                    .sum::<usize>();
+                if retained + batch.relations.len() > MAX_EXTRACTED_RELATIONS {
+                    return Err("extracted relation capacity exceeded");
+                }
+                if batch.relations.is_empty() {
+                    self.extracted.remove(&batch.source);
+                } else {
+                    self.extracted.insert(batch.source, batch.clone());
+                }
+            }
+            MemoryChange::UpsertRelation(relation) => {
+                if !relation.is_valid() {
+                    return Err("invalid entity relation");
+                }
+                if !self.relations.contains(relation) && self.relations.len() >= 1024 {
+                    return Err("entity relation capacity exceeded");
+                }
+                self.relations.insert(relation.clone());
+            }
             MemoryChange::Upsert(record) => {
                 if !record.is_valid() {
                     return Err("invalid memory record");
@@ -412,6 +588,14 @@ impl CharacterMemories {
                 if next_active_facts > MAX_ACTIVE_FACTS {
                     return Err("active memory capacity exceeded");
                 }
+                if self.records.get(&record.id) != Some(record) {
+                    self.revision_counter = self
+                        .revision_counter
+                        .checked_add(1)
+                        .ok_or("memory revision overflow")?;
+                    self.revisions.insert(record.id, self.revision_counter);
+                    self.extracted.remove(&record.id);
+                }
                 self.records.insert(record.id, record.clone());
             }
             // Legacy physical delete is kept for exact replay compatibility.
@@ -421,6 +605,8 @@ impl CharacterMemories {
                     return Err("protected memory must be unprotected before purge");
                 }
                 self.records.remove(id);
+                self.revisions.remove(id);
+                self.extracted.remove(id);
             }
             MemoryChange::SetProtection { id, protected } => {
                 let record = self.records.get_mut(id).ok_or("unknown memory id")?;
@@ -519,6 +705,17 @@ impl CharacterMemories {
                     next.apply_committed(&change)?;
                     changes.push(change);
                 }
+                MemoryCommand::ImportRecord { record } => {
+                    if let Some(existing) = next.get(record.id) {
+                        if existing == record {
+                            continue;
+                        }
+                        return Err("import memory id conflicts with an existing record");
+                    }
+                    let change = MemoryChange::Upsert(record.clone());
+                    next.apply_committed(&change)?;
+                    changes.push(change);
+                }
                 MemoryCommand::EnsureFact { priority, content } => {
                     if content.trim().is_empty() || content.chars().count() > 2000 {
                         return Err("invalid memory record");
@@ -551,6 +748,94 @@ impl CharacterMemories {
                             *priority,
                             content.clone(),
                         ));
+                        next.apply_committed(&change)?;
+                        changes.push(change);
+                    }
+                }
+                MemoryCommand::SeedFromPrompt {
+                    priority,
+                    content,
+                    entities,
+                    rag_only,
+                } => {
+                    if content.trim().is_empty()
+                        || content.chars().count() > 2000
+                        || entities.len() > 32
+                        || entities
+                            .iter()
+                            .any(|name| name.trim().is_empty() || name.chars().count() > 200)
+                    {
+                        return Err("invalid seeded memory record");
+                    }
+                    let expected_kind = if *rag_only {
+                        MemoryKind::RagOnly
+                    } else {
+                        MemoryKind::Fact
+                    };
+                    let matches = next
+                        .records
+                        .values()
+                        .filter(|record| record.content == *content)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if matches.len() > 1 {
+                        return Err("ambiguous exact seeded memory match");
+                    }
+                    if let Some(mut previous) = matches.into_iter().next() {
+                        if previous.kind != expected_kind {
+                            return Err("prompt seed conflicts with retained memory kind");
+                        }
+                        if previous.state == MemoryState::Active
+                            && (!rag_only || previous.priority == *priority)
+                        {
+                            continue;
+                        }
+                        if previous.protected {
+                            return Err("protected memory cannot be re-seeded");
+                        }
+                        previous.state = MemoryState::Active;
+                        previous.priority = *priority;
+                        let change = MemoryChange::Upsert(previous);
+                        next.apply_committed(&change)?;
+                        changes.push(change);
+                    } else {
+                        let mut record =
+                            MemoryRecord::fact(MemoryId::new(), *priority, content.clone());
+                        record.kind = expected_kind;
+                        record.entities = entities.clone();
+                        let change = MemoryChange::Upsert(record);
+                        next.apply_committed(&change)?;
+                        changes.push(change);
+                    }
+                }
+                MemoryCommand::ReplaceExtractedRelations {
+                    source,
+                    expected_revision,
+                    relations,
+                } => {
+                    if next.source_revision(*source) != Some(*expected_revision) {
+                        return Err("graph extraction source revision is stale");
+                    }
+                    let batch = ExtractedRelations {
+                        source: *source,
+                        source_revision: *expected_revision,
+                        relations: relations.clone(),
+                    };
+                    if next.extracted.get(source) == Some(&batch)
+                        || (batch.relations.is_empty() && !next.extracted.contains_key(source))
+                    {
+                        continue;
+                    }
+                    let change = MemoryChange::ReplaceExtractedRelations(batch);
+                    next.apply_committed(&change)?;
+                    changes.push(change);
+                }
+                MemoryCommand::LinkEntities(relation) => {
+                    if !relation.is_valid() {
+                        return Err("invalid entity relation");
+                    }
+                    if !next.relations.contains(relation) {
+                        let change = MemoryChange::UpsertRelation(relation.clone());
                         next.apply_committed(&change)?;
                         changes.push(change);
                     }
@@ -748,6 +1033,7 @@ mod tests {
         let id = MemoryId::new();
         let mut book = CharacterMemories::default();
         book.apply_committed(&MemoryChange::Upsert(MemoryRecord {
+            entities: Vec::new(),
             id,
             priority: MemoryPriority::Low,
             content: "Player likes TEA".into(),
@@ -773,6 +1059,7 @@ mod tests {
         assert_eq!(
             changes[0],
             MemoryChange::Upsert(MemoryRecord {
+                entities: Vec::new(),
                 id,
                 priority: MemoryPriority::Normal,
                 content: "Player likes TEA".into(),
@@ -811,6 +1098,7 @@ mod tests {
         let mut book = CharacterMemories::default();
         for (id, content) in [(left, "tea"), (right, "coffee")] {
             book.apply_committed(&MemoryChange::Upsert(MemoryRecord {
+                entities: Vec::new(),
                 id,
                 priority: MemoryPriority::Normal,
                 content: content.into(),
@@ -846,6 +1134,7 @@ mod tests {
         let mut book = CharacterMemories::default();
         for (id, content) in [(a, "first"), (b, "second")] {
             book.apply_committed(&MemoryChange::Upsert(MemoryRecord {
+                entities: Vec::new(),
                 id,
                 priority: MemoryPriority::Normal,
                 content: content.into(),

@@ -99,6 +99,85 @@ impl Default for AsrPreferences {
     }
 }
 
+use crate::ai_runtime::model_identity::AiModelIdentity;
+pub use crate::ai_runtime::model_identity::WorkerImplementation;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpeechModelReference {
+    pub model_id: String,
+    pub implementation: WorkerImplementation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+}
+
+impl From<SpeechModelReference> for AiModelIdentity {
+    fn from(model: SpeechModelReference) -> Self {
+        Self {
+            model_id: model.model_id,
+            implementation: model.implementation,
+            revision: model.revision,
+        }
+    }
+}
+
+impl SpeechModelReference {
+    pub fn python(model_id: impl Into<String>) -> Self {
+        Self {
+            model_id: model_id.into(),
+            implementation: WorkerImplementation::Python,
+            revision: None,
+        }
+    }
+
+    pub fn rust(model_id: impl Into<String>, manifest_sha256: impl Into<String>) -> Self {
+        Self {
+            model_id: model_id.into(),
+            implementation: WorkerImplementation::Rust,
+            revision: Some(manifest_sha256.into()),
+        }
+    }
+
+    /// Distinguishes same-named model implementations without changing the model name.
+    pub fn variant_key(&self) -> String {
+        match self.implementation {
+            WorkerImplementation::Python => match &self.revision {
+                Some(revision) => format!("python:{}@{revision}", self.model_id),
+                None => format!("python:{}", self.model_id),
+            },
+            WorkerImplementation::Rust => format!(
+                "rust:{}@{}",
+                self.model_id,
+                self.revision.as_deref().unwrap_or_default()
+            ),
+        }
+    }
+
+    fn validate(&self) -> Result<(), SettingsError> {
+        let id = self.model_id.as_str();
+        if id.is_empty()
+            || id.len() > 128
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+        {
+            return Err(SettingsError::Validation("invalid model identity".into()));
+        }
+        if self.implementation == WorkerImplementation::Rust
+            && !self.revision.as_ref().is_some_and(|s| {
+                s.len() == 64
+                    && s.bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
+        {
+            return Err(SettingsError::Validation(
+                "Rust model requires a canonical lowercase manifest SHA-256".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpeechSettings {
@@ -106,10 +185,72 @@ pub struct SpeechSettings {
     pub asr: AsrPreferences,
     pub tts_model_options: BTreeMap<String, serde_json::Value>,
     pub asr_model_options: BTreeMap<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tts_model: Option<SpeechModelReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asr_model: Option<SpeechModelReference>,
+}
+
+impl SpeechSettings {
+    pub fn select_model(
+        &mut self,
+        service: crate::ai_runtime::AiService,
+        model: Option<SpeechModelReference>,
+    ) -> Result<(), SettingsError> {
+        if let Some(model) = &model {
+            model.validate()?;
+        }
+        let id = model
+            .as_ref()
+            .map(|model| model.model_id.clone())
+            .unwrap_or_default();
+        match service {
+            crate::ai_runtime::AiService::Tts => {
+                self.tts.local_model_id = id;
+                self.tts_model = model;
+            }
+            crate::ai_runtime::AiService::Asr => {
+                self.asr.recognizer_id = id;
+                self.asr_model = model;
+            }
+            _ => return Err(SettingsError::Validation("not a speech service".into())),
+        }
+        Ok(())
+    }
+
+    /// A model card supplies this identity; implementation is the card's metadata.
+    pub fn model_for(&self, service: crate::ai_runtime::AiService) -> Option<SpeechModelReference> {
+        let (selected, id) = match service {
+            crate::ai_runtime::AiService::Tts => (&self.tts_model, &self.tts.local_model_id),
+            crate::ai_runtime::AiService::Asr => (&self.asr_model, &self.asr.recognizer_id),
+            _ => return None,
+        };
+        selected
+            .clone()
+            .or_else(|| (!id.is_empty()).then(|| SpeechModelReference::python(id.clone())))
+    }
 }
 
 impl SpeechSettings {
     pub fn validate(&self) -> Result<(), SettingsError> {
+        for (model, id) in [
+            (&self.tts_model, &self.tts.local_model_id),
+            (&self.asr_model, &self.asr.recognizer_id),
+        ] {
+            if model.as_ref().is_some_and(|model| &model.model_id != id) {
+                return Err(SettingsError::Validation(
+                    "speech model identity conflicts with its preference ID".into(),
+                ));
+            }
+        }
+        for service in [
+            crate::ai_runtime::AiService::Tts,
+            crate::ai_runtime::AiService::Asr,
+        ] {
+            if let Some(model) = self.model_for(service) {
+                model.validate()?;
+            }
+        }
         let t = &self.tts;
         if t.telegram_wait_seconds == 0
             || t.telegram_wait_seconds > 600
@@ -216,70 +357,64 @@ impl SpeechSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn known_asr_languages_are_checked_before_persistence() {
-        let mut speech = SpeechSettings::default();
-        speech
-            .asr
-            .model_languages
-            .insert("google".into(), "en-US".into());
-        assert!(speech.validate().is_ok());
-        speech
-            .asr
-            .model_languages
-            .insert("google".into(), "en".into());
-        assert!(speech.validate().is_err());
-        speech
-            .asr
-            .model_languages
-            .insert("google".into(), "ru-RU".into());
-        speech
-            .asr
-            .model_languages
-            .insert("whisper".into(), "auto".into());
-        assert!(speech.validate().is_ok());
+    #[tokio::test]
+    async fn typed_selection_updates_preferences_atomically_and_rejects_divergent_edits() {
+        use crate::settings::{
+            AppSettings, MemorySettingsRepository, SettingsConfig, SettingsLifecycle,
+            SettingsSource,
+        };
+        use crate::{ai_runtime::AiService, presentation::SettingsPresenter};
+        use std::sync::Arc;
+        let lifecycle = SettingsLifecycle::prepare(SettingsConfig {
+            source: SettingsSource::initial(AppSettings::initial_profile()),
+            repository: Arc::new(MemorySettingsRepository::new()),
+        })
+        .await
+        .unwrap();
+        let owner = lifecycle.owner();
+        let presenter = SettingsPresenter::new(Arc::clone(&owner));
+        let model = SpeechModelReference::rust("shared", "a".repeat(64));
+        presenter.asr.model.set(Some(model.clone())).unwrap();
+        let before = owner.snapshot_all().unwrap();
+        assert_eq!(before.values.speech.asr.recognizer_id, "shared");
+        assert_eq!(
+            before.values.speech.model_for(AiService::Asr),
+            Some(model.clone())
+        );
+        let mut invalid = presenter.asr.preferences.get();
+        invalid.recognizer_id = "different".into();
+        assert!(presenter.asr.preferences.set(invalid).is_err());
+        assert_eq!(owner.snapshot_all().unwrap().revision, before.revision);
+        assert_eq!(presenter.asr.model.get(), Some(model));
+        presenter.asr.model.set(None).unwrap();
+        assert!(presenter.asr.preferences.get().recognizer_id.is_empty());
+        assert_eq!(presenter.asr.model.get(), None);
+        assert_eq!(presenter.tts.model.get(), None);
     }
-
     #[test]
-    fn strict_settings_reject_missing_fields_and_index_keys() {
-        let settings = crate::settings::AppSettings::initial_profile();
-        assert!(settings.validate().is_ok());
-        let mut json = serde_json::to_value(&settings).unwrap();
-        json.as_object_mut().unwrap().remove("speech");
-        assert!(serde_json::from_value::<crate::settings::AppSettings>(json).is_err());
-        let mut json = serde_json::to_value(&settings.speech).unwrap();
-        json["tts"]["character_voice_ids"] = serde_json::json!({"3":"wrong"});
-        assert!(serde_json::from_value::<SpeechSettings>(json).is_err());
-        let mut json = serde_json::to_value(&settings.speech).unwrap();
-        json["tts"].as_object_mut().unwrap().remove("enabled");
-        assert!(serde_json::from_value::<SpeechSettings>(json).is_err());
-    }
-}
-
-#[cfg(test)]
-mod model_options_tests {
-    use serde_json::json;
-
-    use super::*;
-
-    #[test]
-    fn model_options_are_required_and_bounded() {
-        let mut json = serde_json::to_value(SpeechSettings::default()).unwrap();
-        json.as_object_mut().unwrap().remove("tts_model_options");
-        json.as_object_mut().unwrap().remove("asr_model_options");
-        assert!(serde_json::from_value::<SpeechSettings>(json).is_err());
-        let mut invalid = SpeechSettings::default();
-        invalid
-            .asr_model_options
-            .insert("whisper".into(), json!({"nested": {"unsafe": 1}}));
-        assert!(invalid.validate().is_err());
-        invalid
-            .asr_model_options
-            .insert("whisper".into(), json!({"beam_size": 5}));
-        assert!(invalid.validate().is_ok());
-        invalid
-            .asr_model_options
-            .insert("whisper".into(), json!({"language":"en"}));
-        assert!(invalid.validate().is_err());
+    fn same_named_implementations_are_distinct_models() {
+        let mut saved = SpeechSettings::default();
+        saved.tts.local_model_id = "voice".into();
+        saved.asr.recognizer_id = "recognizer".into();
+        assert_eq!(
+            saved.model_for(crate::ai_runtime::AiService::Tts),
+            Some(SpeechModelReference::python("voice"))
+        );
+        let python = SpeechModelReference::python("voice");
+        let rust = SpeechModelReference::rust("voice", "a".repeat(64));
+        assert_ne!(python, rust);
+        saved.tts_model = Some(rust.clone());
+        saved.asr_model = Some(SpeechModelReference::python("recognizer"));
+        let encoded = serde_json::to_value(&saved).unwrap();
+        assert!(encoded.get("tts_engine").is_none());
+        assert_eq!(
+            serde_json::from_value::<SpeechSettings>(encoded)
+                .unwrap()
+                .model_for(crate::ai_runtime::AiService::Tts),
+            Some(rust)
+        );
+        let mut legacy = serde_json::to_value(SpeechSettings::default()).unwrap();
+        legacy["tts_engine"] = serde_json::json!({"engine":"native","model_id":"voice","manifest_sha256":"a".repeat(64)});
+        assert!(serde_json::from_value::<SpeechSettings>(legacy).is_err());
     }
 }

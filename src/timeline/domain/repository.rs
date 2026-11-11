@@ -18,6 +18,93 @@ pub trait TimelineRepository {
     ) -> Result<BranchInfo, TimelineError>;
     fn branch(&self, id: BranchId) -> Result<BranchInfo, TimelineError>;
     fn world(&self, id: BranchId) -> Result<Vec<TimelineFact>, TimelineError>;
+    /// Discover only fork markers for one session and recipient. Does not
+    /// enumerate unrelated events or grant execution/replay permission.
+    fn regenerate_admission_branches(
+        &self,
+        session: SessionId,
+        character: CharacterId,
+    ) -> Result<Vec<BranchId>, TimelineError>;
+    /// Ordered keyset enumeration. SQLite overrides this to bound source reads;
+    /// transient storage has no independent writers and filters its own branches.
+    fn regenerate_admission_branches_page(
+        &self,
+        session: SessionId,
+        character: CharacterId,
+        after: Option<BranchId>,
+        limit: usize,
+    ) -> Result<Vec<BranchId>, TimelineError> {
+        Ok(self
+            .regenerate_admission_branches(session, character)?
+            .into_iter()
+            .filter(|branch| after.is_none_or(|previous| branch.0 > previous.0))
+            .take(limit)
+            .collect())
+    }
+    /// A duplicate in a later page must invalidate the earlier page too.
+    /// The persistent repository implements this via an indexed request lookup.
+    fn regenerate_admission_request_duplicate(
+        &self,
+        session: SessionId,
+        child: BranchId,
+        request: Uuid,
+    ) -> Result<bool, TimelineError> {
+        for character in CharacterId::ALL {
+            for candidate in self.regenerate_admission_branches(session, character)? {
+                if candidate == child {
+                    continue;
+                }
+                let info = self.branch(candidate)?;
+                let marker = self
+                    .read(
+                        candidate,
+                        info.fork_sequence,
+                        Some(info.fork_sequence + 1),
+                        1,
+                        None,
+                    )?
+                    .into_iter()
+                    .next()
+                    .ok_or(TimelineError::NotFound)?;
+                if let Some(receipt) =
+                    crate::timeline::RegenerateAdmissionReceipt::from_marker(&marker.draft.payload)?
+                    && receipt.request.0 == request
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+    /// Read only local facts for the admitted request on its child branch.
+    /// A Regenerate RequestId is minted before the child fork and can never
+    /// occur in the inherited parent prefix. This is evidence, not a replay permit.
+    fn regenerate_request_facts(
+        &self,
+        branch: BranchId,
+        request: Uuid,
+    ) -> Result<Vec<TimelineFact>, TimelineError> {
+        self.branch(branch)?;
+        Ok(self
+            .world(branch)?
+            .into_iter()
+            .filter(|fact| {
+                fact.branch_id == branch
+                    && fact
+                        .draft
+                        .payload
+                        .get("request_id")
+                        .and_then(Value::as_str)
+                        .and_then(|id| Uuid::parse_str(id).ok())
+                        == Some(request)
+            })
+            .collect())
+    }
+    /// A monotonic fence for consistent cross-owner read-only enumeration.
+    /// Transient stores have no independent writer.
+    fn enumeration_revision(&self) -> Result<Option<u64>, TimelineError> {
+        Ok(None)
+    }
     fn event(&self, branch: BranchId, id: EventId) -> Result<TimelineFact, TimelineError>;
     /// Reconcile an uncertain request after restart using committed source facts.
     /// None means no accepted reply in this branch prefix, not that the request
@@ -188,6 +275,21 @@ pub trait TimelineRepository {
         checkpoint: EventId,
         child: BranchId,
     ) -> Result<BranchInfo, TimelineError>;
+    fn fork_at_player_input(
+        &mut self,
+        parent: BranchId,
+        input: EventId,
+        character: CharacterId,
+        child: BranchId,
+    ) -> Result<BranchInfo, TimelineError>;
+    fn fork_at_regenerate_input(
+        &mut self,
+        parent: BranchId,
+        input: EventId,
+        character: CharacterId,
+        child: BranchId,
+        receipt: &crate::timeline::RegenerateAdmissionReceipt,
+    ) -> Result<BranchInfo, TimelineError>;
     fn view(
         &self,
         branch: BranchId,
@@ -216,6 +318,30 @@ impl TimelineRepository for TimelineStore {
     }
     fn world(&self, id: BranchId) -> Result<Vec<TimelineFact>, TimelineError> {
         TimelineStore::world(self, id)
+    }
+    fn regenerate_admission_branches(
+        &self,
+        session: SessionId,
+        character: CharacterId,
+    ) -> Result<Vec<BranchId>, TimelineError> {
+        let mut result = Vec::new();
+        for branch in self.persisted_branches() {
+            if branch.info.session_id != session || branch.info.parent.is_none() {
+                continue;
+            }
+            let marker = branch.events.first().ok_or(TimelineError::NotFound)?;
+            if marker.draft.kind != super::EventKind::BranchCreated {
+                return Err(TimelineError::Invalid("invalid fork marker"));
+            }
+            if let Some(receipt) =
+                crate::timeline::RegenerateAdmissionReceipt::from_marker(&marker.draft.payload)?
+                && receipt.character == character
+            {
+                result.push(branch.info.id);
+            }
+        }
+        result.sort_by_key(|branch| branch.0);
+        Ok(result)
     }
     fn event(&self, branch: BranchId, id: EventId) -> Result<TimelineFact, TimelineError> {
         TimelineStore::event(self, branch, id)
@@ -272,6 +398,25 @@ impl TimelineRepository for TimelineStore {
         child: BranchId,
     ) -> Result<BranchInfo, TimelineError> {
         TimelineStore::fork(self, parent, checkpoint, child)
+    }
+    fn fork_at_player_input(
+        &mut self,
+        parent: BranchId,
+        input: EventId,
+        character: CharacterId,
+        child: BranchId,
+    ) -> Result<BranchInfo, TimelineError> {
+        TimelineStore::fork_at_player_input(self, parent, input, character, child)
+    }
+    fn fork_at_regenerate_input(
+        &mut self,
+        parent: BranchId,
+        input: EventId,
+        character: CharacterId,
+        child: BranchId,
+        receipt: &crate::timeline::RegenerateAdmissionReceipt,
+    ) -> Result<BranchInfo, TimelineError> {
+        TimelineStore::fork_at_regenerate_input(self, parent, input, character, child, receipt)
     }
     fn view(
         &self,

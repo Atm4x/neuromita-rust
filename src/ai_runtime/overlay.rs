@@ -4,7 +4,10 @@ use std::{path::PathBuf, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
-use super::layer::{LayerError, LayerInstaller, valid_segment, validate_lock};
+use super::layer::{
+    LayerError, LayerInstaller, reject_symlinked_layer_components, reject_unsafe_layer_receipt,
+    valid_segment, validate_lock,
+};
 
 pub type OverlayError = LayerError;
 
@@ -103,15 +106,10 @@ pub fn load_installed_overlay(
         ));
     }
     let path = overlays_directory.join(plugin_id).join(revision);
+    reject_symlinked_layer_components(&path)?;
+    let _reader = super::revision_lease::RevisionLease::shared(&path)?;
     let marker = path.join(".neuromita-overlay.json");
-    if path.is_symlink() || marker.is_symlink() {
-        return Err(LayerError::Conflict);
-    }
-    if let Ok(stat) = std::fs::metadata(&marker)
-        && (!stat.is_file() || stat.len() > 131_072)
-    {
-        return Err(LayerError::Conflict);
-    }
+    reject_unsafe_layer_receipt(&marker)?;
     let bytes = std::fs::read(&marker).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             LayerError::NotInstalled(path.display().to_string())
@@ -207,6 +205,88 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn receipt_loader_rejects_symlinked_plugin_parent_and_overlay_root() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!("nm-overlay-receipt-link-{}", Uuid::new_v4()));
+        let outside = root.join("outside");
+        let overlay_root = root.join("overlays");
+        std::fs::create_dir_all(outside.join("rev1")).unwrap();
+        std::fs::create_dir_all(&overlay_root).unwrap();
+        let spec = plan();
+        std::fs::write(
+            outside.join("rev1/.neuromita-overlay.json"),
+            serde_json::to_vec(&spec).unwrap(),
+        )
+        .unwrap();
+        symlink(&outside, overlay_root.join("mock_tts")).unwrap();
+        assert!(load_installed_overlay(&overlay_root, "mock_tts", "rev1").is_err());
+
+        std::fs::remove_file(overlay_root.join("mock_tts")).unwrap();
+        std::fs::remove_dir(&overlay_root).unwrap();
+        let nested = outside.join("mock_tts/rev1");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            nested.join(".neuromita-overlay.json"),
+            serde_json::to_vec(&spec).unwrap(),
+        )
+        .unwrap();
+        symlink(&outside, &overlay_root).unwrap();
+        assert!(load_installed_overlay(&overlay_root, "mock_tts", "rev1").is_err());
+        std::fs::remove_file(&overlay_root).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn installed_layer_rejects_symlinked_and_oversized_receipts() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!("nm-layer-marker-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let uv = root.join("uv");
+        let python = root.join("python");
+        std::fs::write(&uv, "fake").unwrap();
+        std::fs::write(&python, "fake").unwrap();
+        let installer = OverlayInstaller {
+            uv_executable: uv,
+            python_executable: python,
+            overlays_directory: root.join("overlays"),
+            cache_directory: root.join("cache"),
+            timeout: Duration::from_secs(5),
+        };
+        let spec = plan();
+        let revision = installer.install(&spec).await.unwrap();
+        let marker = revision.join(".neuromita-overlay.json");
+        let foreign = root.join("foreign-receipt.json");
+        std::fs::write(&foreign, serde_json::to_vec(&spec).unwrap()).unwrap();
+        std::fs::remove_file(&marker).unwrap();
+        symlink(&foreign, &marker).unwrap();
+        assert!(matches!(
+            installer.installed(&spec).await,
+            Err(LayerError::Conflict)
+        ));
+        assert!(matches!(
+            installer.install(&spec).await,
+            Err(LayerError::Conflict)
+        ));
+
+        std::fs::remove_file(&marker).unwrap();
+        let mut oversized = serde_json::to_vec(&spec).unwrap();
+        oversized.extend(vec![b' '; 131_073]);
+        std::fs::write(&marker, oversized).unwrap();
+        assert!(matches!(
+            installer.installed(&spec).await,
+            Err(LayerError::Conflict)
+        ));
+
+        std::fs::remove_file(&marker).unwrap();
+        std::fs::write(&marker, serde_json::to_vec(&spec).unwrap()).unwrap();
+        assert!(installer.installed(&spec).await.unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn installs_empty_lock_and_rejects_mutated_revision() {
         let root = std::env::temp_dir().join(format!("nm-overlay-{}", Uuid::new_v4()));
@@ -232,6 +312,215 @@ mod tests {
             installer.installed(&changed).await,
             Err(LayerError::Conflict)
         ));
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlinked_overlay_revision_and_parent_cannot_escape_portable_install_root() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!("nm-overlay-symlink-{}", Uuid::new_v4()));
+        let outside = root.join("external");
+        let overlay_root = root.join("overlays");
+        tokio::fs::create_dir_all(&outside).await.unwrap();
+        tokio::fs::create_dir_all(&overlay_root).await.unwrap();
+        let uv = root.join("uv");
+        let python = root.join("python");
+        tokio::fs::write(&uv, "fake").await.unwrap();
+        tokio::fs::write(&python, "fake").await.unwrap();
+        let installer = OverlayInstaller {
+            uv_executable: uv,
+            python_executable: python,
+            overlays_directory: overlay_root.clone(),
+            cache_directory: root.join("cache"),
+            timeout: Duration::from_secs(5),
+        };
+        let spec = plan();
+        let plugin_parent = overlay_root.join("mock_tts");
+        symlink(&outside, &plugin_parent).unwrap();
+        assert!(matches!(
+            installer.installed(&spec).await,
+            Err(LayerError::Invalid(_))
+        ));
+        assert!(matches!(
+            installer.install(&spec).await,
+            Err(LayerError::Invalid(_))
+        ));
+        assert!(!outside.join("rev1").exists());
+
+        tokio::fs::remove_file(&plugin_parent).await.unwrap();
+        tokio::fs::create_dir(&plugin_parent).await.unwrap();
+        let revision = plugin_parent.join("rev1");
+        symlink(&outside, &revision).unwrap();
+        assert!(matches!(
+            installer.installed(&spec).await,
+            Err(LayerError::Invalid(_))
+        ));
+        assert!(matches!(
+            installer.install(&spec).await,
+            Err(LayerError::Invalid(_))
+        ));
+        assert!(!outside.join(".neuromita-overlay.json").exists());
+
+        tokio::fs::remove_file(&revision).await.unwrap();
+        tokio::fs::remove_dir(&plugin_parent).await.unwrap();
+        tokio::fs::remove_dir(&overlay_root).await.unwrap();
+        symlink(&outside, &overlay_root).unwrap();
+        assert!(matches!(
+            installer.installed(&spec).await,
+            Err(LayerError::Invalid(_))
+        ));
+        assert!(matches!(
+            installer.install(&spec).await,
+            Err(LayerError::Invalid(_))
+        ));
+        assert!(!outside.join("mock_tts").exists());
+        tokio::fs::remove_file(&overlay_root).await.unwrap();
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancellation_and_timeout_clean_uv_staging_without_changing_active_revision() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("nm-overlay-cancel-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let uv = root.join("uv");
+        let python = root.join("python");
+        tokio::fs::write(
+            &uv,
+            r#"#!/bin/sh
+target=''
+prev=''
+for arg do
+    if [ "$prev" = --target ]; then target="$arg"; fi
+    prev="$arg"
+done
+mkdir -p "$target/partial"
+printf '%s' "$$" > "$target/uv.pid"
+printf 'started' > "$target/started"
+exec sleep 120
+"#,
+        )
+        .await
+        .unwrap();
+        std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o755)).unwrap();
+        tokio::fs::write(&python, "fake").await.unwrap();
+        let installer = OverlayInstaller {
+            uv_executable: uv.clone(),
+            python_executable: python,
+            overlays_directory: root.join("overlays"),
+            cache_directory: root.join("cache"),
+            timeout: Duration::from_secs(30),
+        };
+        let stable = plan();
+        let stable_path = installer.install(&stable).await.unwrap();
+        let mut pending = stable.clone();
+        pending.revision = "rev2".into();
+        pending.packages.push(LockedPackage {
+            name: "fish-speech-lib".into(),
+            version: "1.0".into(),
+        });
+        let parent = installer.overlays_directory.join("mock_tts");
+        let staging_paths = || -> Vec<PathBuf> {
+            std::fs::read_dir(&parent)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| {
+                    path.is_dir()
+                        && path
+                            .file_name()
+                            .unwrap()
+                            .to_string_lossy()
+                            .starts_with(".staging-")
+                })
+                .collect()
+        };
+        let task = tokio::spawn({
+            let installer = installer.clone();
+            let pending = pending.clone();
+            async move { installer.install(&pending).await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if staging_paths()
+                    .iter()
+                    .any(|path| path.join("started").exists())
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        #[cfg(target_os = "linux")]
+        let uv_pid = {
+            let staging = staging_paths().into_iter().next().unwrap();
+            tokio::fs::read_to_string(staging.join("uv.pid"))
+                .await
+                .unwrap()
+                .parse::<u32>()
+                .unwrap()
+        };
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        #[cfg(target_os = "linux")]
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while std::path::Path::new(&format!("/proc/{uv_pid}")).exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cancelled uv process should exit");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !staging_paths().is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cancelled uv staging should be removed");
+        assert!(installer.installed(&stable).await.unwrap());
+        assert_eq!(stable_path, installer.installed_path(&stable).unwrap());
+        assert!(!installer.installed_path(&pending).unwrap().exists());
+
+        let timed_out = OverlayInstaller {
+            timeout: Duration::from_millis(150),
+            ..installer.clone()
+        };
+        assert!(matches!(
+            timed_out.install(&pending).await,
+            Err(LayerError::Timeout)
+        ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !staging_paths().is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timed-out uv staging should be cleaned after child exit");
+        assert!(installer.installed(&stable).await.unwrap());
+
+        tokio::fs::write(
+            &uv,
+            r#"#!/bin/sh
+target=''
+prev=''
+for arg do
+    if [ "$prev" = --target ]; then target="$arg"; fi
+    prev="$arg"
+done
+mkdir -p "$target/fish_speech_lib-1.0.dist-info"
+printf 'Name: fish-speech-lib\nVersion: 1.0\n' > "$target/fish_speech_lib-1.0.dist-info/METADATA"
+"#,
+        )
+        .await
+        .unwrap();
+        let recovered = installer.install(&pending).await.unwrap();
+        assert!(recovered.is_dir());
+        assert!(installer.installed(&pending).await.unwrap());
+        assert!(installer.installed(&stable).await.unwrap());
+        assert!(staging_paths().is_empty());
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 

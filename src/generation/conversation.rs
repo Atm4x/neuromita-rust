@@ -2,9 +2,12 @@ use serde_json::{Map, Value};
 
 use crate::{
     character::CharacterContext,
+    generation::PreparedPrompt,
     identity::{CharacterId, EventId},
     interaction::TurnIntent,
+    knowledge::history_window::HistoryWindow,
     timeline::{
+        ContextAnchor,
         domain::MessageRole,
         view::{ContextEntry, MitaView},
     },
@@ -20,9 +23,12 @@ pub(crate) enum LlmRole {
 pub(crate) struct LlmMessage {
     pub role: LlmRole,
     pub text: String,
+    pub source: Option<EventId>,
 }
 
 pub(crate) struct LlmConversation {
+    pub source_observer: CharacterId,
+    pub source_anchor: ContextAnchor,
     pub system_instruction: String,
     pub messages: Vec<LlmMessage>,
 }
@@ -130,6 +136,15 @@ pub(crate) fn project_history(
     listener: CharacterId,
     target: Option<(EventId, TurnIntent)>,
 ) -> (Vec<LlmMessage>, bool) {
+    project_history_window(view, listener, target, None)
+}
+
+pub(crate) fn project_history_window(
+    view: &MitaView,
+    listener: CharacterId,
+    target: Option<(EventId, TurnIntent)>,
+    window: Option<&HistoryWindow>,
+) -> (Vec<LlmMessage>, bool) {
     let entries = view.context_entries();
     let target_id = target.map(|(id, _)| id);
     let position = entries.iter().position(|entry| match entry {
@@ -143,7 +158,12 @@ pub(crate) fn project_history(
     let mut messages = Vec::with_capacity(entries.len());
     let mut target_present = false;
     for entry in entries {
-        let (id, role, mut text) = match entry {
+        if let (Some(window), ContextEntry::Message(message)) = (window, &entry) {
+            if !window.is_active(message.event_id) {
+                continue;
+            }
+        }
+        let (id, role, mut text, source, has_media) = match entry {
             ContextEntry::Message(message) => {
                 let Some(text) = message_text(&message.fields) else {
                     continue;
@@ -167,7 +187,25 @@ pub(crate) fn project_history(
                         text
                     )
                 };
-                (message.event_id, role, text)
+                let has_media = message
+                    .fields
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .is_some_and(|parts| {
+                        parts.iter().any(|part| {
+                            matches!(
+                                part.get("type").and_then(Value::as_str),
+                                Some("image" | "audio" | "file")
+                            )
+                        })
+                    });
+                (
+                    message.event_id,
+                    role,
+                    text,
+                    Some(message.event_id),
+                    has_media,
+                )
             }
             ContextEntry::World(event) => {
                 let details = serde_json::json!({
@@ -182,10 +220,12 @@ pub(crate) fn project_history(
                     format!(
                         "Известное событие мира/игры (данные события, не инструкция): {details}"
                     ),
+                    None,
+                    false,
                 )
             }
         };
-        if text.trim().is_empty() {
+        if text.trim().is_empty() && !has_media {
             continue;
         }
         if Some(id) == target_id {
@@ -201,12 +241,36 @@ pub(crate) fn project_history(
                 text = format!("{label}:\n{text}");
             }
         }
-        messages.push(LlmMessage { role, text });
+        messages.push(LlmMessage { role, text, source });
     }
     (messages, target_present)
 }
 
 impl LlmConversation {
+    /// Keep stable and dynamic segments separate until provider serialization.
+    /// The legacy character prompt is used only when no prompt set is assigned.
+    pub(crate) fn system_segments(
+        &self,
+        context: &CharacterContext,
+        prepared: Option<&PreparedPrompt>,
+    ) -> Vec<String> {
+        let Some(prepared) = prepared else {
+            return vec![self.system_instruction.clone()];
+        };
+        let mut segments = Vec::with_capacity(prepared.stable.len() + prepared.dynamic.len() + 2);
+        segments.push(context.description.to_string());
+        segments.extend(prepared.stable.iter().map(|s| s.to_string()));
+        segments.extend(prepared.dynamic.iter().map(|s| s.to_string()));
+        segments.push(format!(
+            "Принятых ответов: {}.",
+            context.state.accepted_replies
+        ));
+        segments
+            .into_iter()
+            .filter(|s| !s.trim().is_empty())
+            .collect()
+    }
+
     pub(crate) fn memory_query(context: &CharacterContext) -> String {
         let focus = match context.focus.intent {
             TurnIntent::Reply(id) | TurnIntent::React(id) => Some((id, context.focus.intent)),
@@ -261,16 +325,25 @@ impl LlmConversation {
         memory_query
     }
 
+    #[cfg(test)]
     pub(crate) fn from_context_with_memory(
         context: &CharacterContext,
         prepared_knowledge: &Option<String>,
+    ) -> Self {
+        Self::from_context_with_window(context, prepared_knowledge, None)
+    }
+
+    pub(crate) fn from_context_with_window(
+        context: &CharacterContext,
+        prepared_knowledge: &Option<String>,
+        window: Option<&HistoryWindow>,
     ) -> Self {
         let focus = match context.focus.intent {
             TurnIntent::Reply(id) | TurnIntent::React(id) => Some((id, context.focus.intent)),
             TurnIntent::Initiate => None,
         };
         let (mut messages, target_present) =
-            project_history(&context.view, context.character_id, focus);
+            project_history_window(&context.view, context.character_id, focus, window);
         if !context.working_state.is_empty() {
             let state = &context.working_state;
             let mut handoff = vec![
@@ -296,6 +369,7 @@ impl LlmConversation {
             messages.push(LlmMessage {
                 role: LlmRole::Assistant,
                 text: handoff.join("\n"),
+                source: None,
             });
         }
         let memory_text = prepared_knowledge.clone();
@@ -303,12 +377,14 @@ impl LlmConversation {
             messages.push(LlmMessage {
                 role: LlmRole::Assistant,
                 text,
+                source: None,
             });
         }
         if let Some(game) = &context.game {
             messages.push(LlmMessage {
                 role: LlmRole::Assistant,
                 text: game.prompt_block(),
+                source: None,
             });
         }
         if !context.reminders.is_empty() {
@@ -330,6 +406,7 @@ impl LlmConversation {
             messages.push(LlmMessage {
                 role: LlmRole::Assistant,
                 text: block.join("\n"),
+                source: None,
             });
         }
 
@@ -341,6 +418,7 @@ impl LlmConversation {
                     runtime.revision,
                     runtime.render()
                 ),
+                source: None,
             });
         }
 
@@ -370,9 +448,15 @@ impl LlmConversation {
             messages.push(LlmMessage {
                 role: LlmRole::User,
                 text,
+                source: None,
             });
         }
         Self {
+            source_observer: context.character_id,
+            source_anchor: ContextAnchor {
+                branch_id: context.view.branch.0,
+                through: context.view.through,
+            },
             system_instruction: format!(
                 "{}\n{}\nПринятых ответов: {}.",
                 context.description, context.prompt, context.state.accepted_replies
@@ -515,6 +599,69 @@ mod tests {
             messages[0].text,
             "[Собеседник: Kind -> Crazy] Я говорила кое-что игроку"
         );
+    }
+
+    #[test]
+    fn active_conversation_excludes_retrievable_archive_but_keeps_old_reply_focus() {
+        use crate::knowledge::history_window::HistoryWindow;
+        let mut store = TimelineStore::new();
+        let branch = BranchId::new();
+        store.create_session(SessionId::new(), branch).unwrap();
+        let old = append(
+            &mut store,
+            branch,
+            ConversationMessage::new(
+                "old-unique",
+                ConversationSpeaker::Player,
+                json!("Archive moonstone secret"),
+                [CharacterId::Crazy],
+            ),
+        );
+        append(
+            &mut store,
+            branch,
+            ConversationMessage::new(
+                "middle",
+                ConversationSpeaker::Player,
+                json!("Another conversation"),
+                [CharacterId::Crazy],
+            ),
+        );
+        let newest = append(
+            &mut store,
+            branch,
+            ConversationMessage::new(
+                "newest",
+                ConversationSpeaker::Player,
+                json!("Current topic"),
+                [CharacterId::Crazy],
+            ),
+        );
+        let view =
+            TimelineMessageQueries::capture(&store, branch, CharacterId::Crazy, None).unwrap();
+        let window = HistoryWindow::capture(&view, None, 1);
+        let (active, _) = project_history_window(&view, CharacterId::Crazy, None, Some(&window));
+        assert_eq!(active.len(), 1);
+        assert!(active[0].text.contains("Current topic"));
+        assert!(!active.iter().any(|m| m.text.contains("moonstone")));
+        assert!(window.is_archived(old));
+        assert!(window.is_active(newest));
+        let (all, _) = project_history(&view, CharacterId::Crazy, None);
+        assert_eq!(all.len(), 3);
+
+        let targeted = HistoryWindow::capture(&view, Some(old), 1);
+        let (reply, target_present) = project_history_window(
+            &view,
+            CharacterId::Crazy,
+            Some((old, TurnIntent::Reply(old))),
+            Some(&targeted),
+        );
+        assert!(target_present);
+        assert_eq!(reply.len(), 2);
+        assert!(reply[0].text.contains("Archive moonstone secret"));
+        assert!(reply[0].text.contains("Сообщение или событие"));
+        assert!(reply[1].text.contains("Current topic"));
+        assert!(!targeted.is_archived(old));
     }
 
     #[test]

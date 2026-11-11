@@ -218,6 +218,7 @@ mod tests {
     }
     fn plan() -> PluginInstallPlan {
         PluginInstallPlan {
+            build_stages: vec![],
             packages: vec![],
             requirements: vec![],
             assets: vec![ModelAssetRequirement {

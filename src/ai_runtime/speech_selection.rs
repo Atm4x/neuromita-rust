@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::settings::{SpeechSettings, TtsBackend};
+use crate::settings::{SpeechSettings, TtsBackend, WorkerImplementation};
 
 use super::{
     AiRuntimeError, AiService, ModelActivation, PythonHostConfig, fetch_speech_plugin_inspection,
@@ -24,6 +24,8 @@ pub enum SpeechSelectionError {
     },
     #[error("selected plugin {0} has multiple verified revisions; select one explicitly")]
     AmbiguousRevision(String),
+    #[error("selected plugin {plugin_id} does not have the pinned revision {revision}")]
+    UnknownRevision { plugin_id: String, revision: String },
     #[error("selected plugin {plugin_id} is not ready: {reasons:?}")]
     NotReady {
         plugin_id: String,
@@ -71,6 +73,12 @@ pub fn select_speech_model(
     inventory: &SpeechInventory,
     service: AiService,
 ) -> Result<Option<SpeechSelection>, SpeechSelectionError> {
+    if settings
+        .model_for(service)
+        .is_some_and(|model| model.implementation != WorkerImplementation::Python)
+    {
+        return Ok(None);
+    }
     let (plugin_id, language_hint) = match service {
         AiService::Tts => {
             if !settings.tts.enabled || settings.tts.backend != TtsBackend::Local {
@@ -106,10 +114,21 @@ pub fn select_speech_model(
     }
     .cloned()
     .unwrap_or_else(|| serde_json::json!({}));
-    let asset_revision = match option.installed_revisions.as_slice() {
-        [] => None,
-        [revision] => Some(revision.clone()),
-        _ => return Err(SpeechSelectionError::AmbiguousRevision(plugin_id.clone())),
+    let pinned = settings.model_for(service).and_then(|model| model.revision);
+    let asset_revision = if let Some(revision) = pinned {
+        if !option.installed_revisions.contains(&revision) {
+            return Err(SpeechSelectionError::UnknownRevision {
+                plugin_id: plugin_id.clone(),
+                revision,
+            });
+        }
+        Some(revision)
+    } else {
+        match option.installed_revisions.as_slice() {
+            [] => None,
+            [revision] => Some(revision.clone()),
+            _ => return Err(SpeechSelectionError::AmbiguousRevision(plugin_id.clone())),
+        }
     };
     Ok(Some(SpeechSelection {
         service,
@@ -179,6 +198,38 @@ pub async fn resolve_speech_activations(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn explicit_python_revision_is_used_and_missing_pin_never_selects_another() {
+        use crate::settings::SpeechModelReference;
+        let mut settings = SpeechSettings::default();
+        settings
+            .select_model(
+                AiService::Asr,
+                Some(SpeechModelReference {
+                    model_id: "whisper".into(),
+                    implementation: WorkerImplementation::Python,
+                    revision: Some("rev2".into()),
+                }),
+            )
+            .unwrap();
+        let inventory = SpeechInventory {
+            asr: vec![entry("whisper", &["rev1", "rev2"])],
+            ..Default::default()
+        };
+        assert_eq!(
+            select_speech_model(&settings, &inventory, AiService::Asr)
+                .unwrap()
+                .unwrap()
+                .asset_revision
+                .as_deref(),
+            Some("rev2")
+        );
+        settings.asr_model.as_mut().unwrap().revision = Some("missing".into());
+        assert!(matches!(
+            select_speech_model(&settings, &inventory, AiService::Asr),
+            Err(SpeechSelectionError::UnknownRevision { .. })
+        ));
+    }
 
     fn entry(id: &str, revisions: &[&str]) -> SpeechModelOption {
         SpeechModelOption {
@@ -261,6 +312,38 @@ mod tests {
             serde_json::json!({"speaker":"default"})
         );
         assert!(selected[0].inspection.install_probe.installed);
+    }
+
+    #[test]
+    fn rust_model_entry_never_resolves_to_python_plugin_with_same_name() {
+        let mut settings = SpeechSettings::default();
+        settings.tts.enabled = true;
+        settings.tts.backend = TtsBackend::Local;
+        settings.tts.local_model_id = "same_id".into();
+        settings.asr.recognizer_id = "same_id".into();
+        settings.tts_model = Some(crate::settings::SpeechModelReference::rust(
+            "same_id",
+            "b".repeat(64),
+        ));
+        settings.asr_model = Some(crate::settings::SpeechModelReference::rust(
+            "same_id",
+            "b".repeat(64),
+        ));
+        let inventory = SpeechInventory {
+            tts: vec![entry("same_id", &[])],
+            asr: vec![entry("same_id", &[])],
+            errors: vec![],
+        };
+        assert!(
+            select_speech_model(&settings, &inventory, AiService::Tts)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            select_speech_model(&settings, &inventory, AiService::Asr)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

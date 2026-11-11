@@ -54,6 +54,499 @@ impl PresetApi {
     }
 }
 
+/// Explicit read-only entrypoint for user-initiated inspection of forgotten facts.
+/// This action never submits a model generation request or restores memory.
+pub struct HistoricalRecallApi;
+
+#[derive(Debug, thiserror::Error)]
+pub enum HistoricalRecallApiError {
+    #[error("application is unavailable")]
+    Unavailable,
+    #[error("character is unavailable")]
+    CharacterUnavailable,
+    #[error(transparent)]
+    Recall(#[from] crate::app::historical_recall::ExplicitRecallError),
+}
+
+impl HistoricalRecallApi {
+    /// Call only from an authenticated/locally trusted explicit user action.
+    /// This entrypoint does not itself authenticate the caller.
+    pub async fn inspect(
+        character: CharacterId,
+        selector: crate::knowledge::forgotten_recall::RecallSelector,
+        query: &str,
+    ) -> Result<Option<String>, HistoricalRecallApiError> {
+        let bindings = runtime::current().map_err(|_| HistoricalRecallApiError::Unavailable)?;
+        let owner = bindings
+            .characters
+            .get(character)
+            .ok_or(HistoricalRecallApiError::CharacterUnavailable)?;
+        crate::app::historical_recall::recall_from_character(
+            &bindings.knowledge,
+            &owner,
+            selector,
+            query,
+        )
+        .await
+        .map_err(Into::into)
+    }
+}
+
+/// Local, explicit history inspection. This API does not authenticate remote clients.
+/// It never passes retrieved history to ordinary generation.
+pub struct HistorySearchApi;
+
+#[derive(Debug, thiserror::Error)]
+pub enum HistorySearchApiError {
+    #[error("application is unavailable")]
+    Unavailable,
+    #[error("character is unavailable")]
+    CharacterUnavailable,
+    #[error(transparent)]
+    Character(#[from] CharacterError),
+    #[error(transparent)]
+    Search(#[from] crate::knowledge::history_retrieval::HistorySearchError),
+    #[error("history selection changed during inspection")]
+    StaleSelection,
+}
+
+enum HistorySearchSelection {
+    Keyword,
+    Fts,
+    Semantic {
+        fusion: crate::knowledge::retrieval_fusion::FusionMode,
+        minimum_cosine: Option<f64>,
+    },
+}
+
+impl HistorySearchApi {
+    /// Only invoke from an explicitly authorized local UI or equivalent boundary.
+    pub async fn inspect(
+        character: CharacterId,
+        query: &str,
+    ) -> Result<crate::knowledge::history_retrieval::HistorySearchResult, HistorySearchApiError>
+    {
+        Self::inspect_selected(character, query, HistorySearchSelection::Keyword).await
+    }
+
+    /// Explicit SQLite FTS5 history inspection over a single live Timeline
+    /// projection. Missing FTS5 is an error, never a keyword fallback.
+    pub async fn inspect_fts(
+        character: CharacterId,
+        query: &str,
+    ) -> Result<crate::knowledge::history_retrieval::HistorySearchResult, HistorySearchApiError>
+    {
+        Self::inspect_selected(character, query, HistorySearchSelection::Fts).await
+    }
+
+    /// Explicit semantic History mode; requires the application's configured
+    /// embedding provider. No lexical fallback if that provider is unavailable.
+    /// This is a local trusted-user API, not an authenticated remote endpoint.
+    pub async fn inspect_semantic(
+        character: CharacterId,
+        query: &str,
+        fusion: crate::knowledge::retrieval_fusion::FusionMode,
+        minimum_cosine: Option<f64>,
+    ) -> Result<crate::knowledge::history_retrieval::HistorySearchResult, HistorySearchApiError>
+    {
+        Self::inspect_selected(
+            character,
+            query,
+            HistorySearchSelection::Semantic {
+                fusion,
+                minimum_cosine,
+            },
+        )
+        .await
+    }
+
+    async fn inspect_selected(
+        character: CharacterId,
+        query: &str,
+        selection: HistorySearchSelection,
+    ) -> Result<crate::knowledge::history_retrieval::HistorySearchResult, HistorySearchApiError>
+    {
+        let bindings = runtime::current().map_err(|_| HistorySearchApiError::Unavailable)?;
+        let owner = bindings
+            .characters
+            .get(character)
+            .ok_or(HistorySearchApiError::CharacterUnavailable)?;
+        let captured = owner.memories().await?;
+        let context = owner.get_context(captured.anchor()).await?;
+        if context.view.character() != character
+            || context.view.branch.0 != captured.anchor().branch_id
+            || context.view.through != captured.anchor().through
+        {
+            return Err(HistorySearchApiError::StaleSelection);
+        }
+        let selected = match selection {
+            HistorySearchSelection::Keyword => crate::knowledge::history_retrieval::search_history(
+                character,
+                &context.view,
+                query,
+                Default::default(),
+            )?,
+            HistorySearchSelection::Fts => crate::knowledge::history_retrieval::search_history_fts(
+                character,
+                &context.view,
+                query,
+                Default::default(),
+            )?,
+            HistorySearchSelection::Semantic {
+                fusion,
+                minimum_cosine,
+            } => {
+                bindings
+                    .knowledge
+                    .search_history_semantic(
+                        character,
+                        &context.view,
+                        query,
+                        Default::default(),
+                        fusion,
+                        minimum_cosine,
+                    )
+                    .await?
+            }
+        };
+        let fresh = owner.memories().await?;
+        if captured.anchor() != fresh.anchor() || !captured.matches_version(&fresh) {
+            return Err(HistorySearchApiError::StaleSelection);
+        }
+        Ok(selected)
+    }
+}
+
+/// Trusted-local knowledge cache inspection and confirmed derived-data clear.
+/// The API does not authenticate remote clients and must not be exported there.
+pub struct KnowledgeCacheApi;
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum KnowledgeCacheApiError {
+    #[error("application is unavailable")]
+    Unavailable,
+    #[error("semantic embedding cache is not configured")]
+    BackendUnavailable,
+    #[error(transparent)]
+    Clear(#[from] crate::knowledge::KnowledgeCacheClearError),
+}
+
+impl KnowledgeCacheApi {
+    /// A preview can be displayed to a local user without leaking vector content.
+    pub fn preview()
+    -> Result<crate::knowledge::semantic_memory::EmbeddingCachePreview, KnowledgeCacheApiError>
+    {
+        let bindings = runtime::current().map_err(|_| KnowledgeCacheApiError::Unavailable)?;
+        bindings
+            .knowledge
+            .preview_embedding_cache_clear()
+            .ok_or(KnowledgeCacheApiError::BackendUnavailable)
+    }
+
+    /// Clear only after an explicit confirmation tied to the original preview.
+    /// The canonical Timeline is never mutated by this operation.
+    pub fn clear_confirmed(
+        preview: &crate::knowledge::semantic_memory::EmbeddingCachePreview,
+        confirmed: bool,
+    ) -> Result<usize, KnowledgeCacheApiError> {
+        let bindings = runtime::current().map_err(|_| KnowledgeCacheApiError::Unavailable)?;
+        bindings
+            .knowledge
+            .clear_embedding_cache_confirmed(preview, confirmed)
+            .map_err(Into::into)
+    }
+}
+
+/// Explicit local graph maintenance against the canonical character memory owner.
+/// The caller is responsible for local-user authorization; no remote route is exposed.
+pub struct GraphMaintenanceApi;
+
+#[derive(Debug, thiserror::Error)]
+pub enum GraphMaintenanceApiError {
+    #[error("application is unavailable")]
+    Unavailable,
+    #[error("character is unavailable")]
+    CharacterUnavailable,
+    #[error("graph preview belongs to another character")]
+    ForeignPreview,
+    #[error(transparent)]
+    Character(#[from] CharacterError),
+    #[error(transparent)]
+    Maintenance(#[from] crate::knowledge::maintenance::GraphMaintenanceError),
+}
+
+impl GraphMaintenanceApi {
+    /// Report the running application's explicit typed GraphExtractor capability.
+    /// Unavailable is not a request to fall back to lexical reconstruction.
+    pub fn reindex_available() -> Result<bool, GraphMaintenanceApiError> {
+        let bindings = runtime::current().map_err(|_| GraphMaintenanceApiError::Unavailable)?;
+        Ok(bindings.graph_extractor.is_some())
+    }
+
+    /// Capture a read-only preview of exact source IDs at a caller-supplied clock time.
+    pub async fn preview(
+        character: CharacterId,
+        ids: &[crate::memory::MemoryId],
+        as_of_unix_ms: u64,
+        mode: crate::knowledge::maintenance::GraphMaintenanceMode,
+    ) -> Result<crate::knowledge::maintenance::GraphMaintenancePreview, GraphMaintenanceApiError>
+    {
+        let bindings = runtime::current().map_err(|_| GraphMaintenanceApiError::Unavailable)?;
+        let owner = bindings
+            .characters
+            .get(character)
+            .ok_or(GraphMaintenanceApiError::CharacterUnavailable)?;
+        let snapshot = owner.memories().await?;
+        crate::knowledge::maintenance::preview_graph_maintenance(snapshot, ids, as_of_unix_ms, mode)
+            .map_err(Into::into)
+    }
+
+    /// Apply one confirmed, version-checked batch using the running application's
+    /// explicitly configured typed extractor. Missing backends remain unavailable.
+    pub async fn apply_confirmed(
+        character: CharacterId,
+        plan: crate::knowledge::maintenance::GraphMaintenancePreview,
+        confirmed: bool,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<crate::character::MemoryEditResult, GraphMaintenanceApiError> {
+        if plan.character() != character {
+            return Err(GraphMaintenanceApiError::ForeignPreview);
+        }
+        let bindings = runtime::current().map_err(|_| GraphMaintenanceApiError::Unavailable)?;
+        let owner = bindings
+            .characters
+            .get(character)
+            .ok_or(GraphMaintenanceApiError::CharacterUnavailable)?;
+        crate::knowledge::maintenance::apply_graph_maintenance(
+            &owner,
+            plan,
+            bindings.graph_extractor.as_deref(),
+            confirmed,
+            cancel,
+        )
+        .await
+        .map_err(Into::into)
+    }
+}
+
+/// Trusted-local, bounded retained-memory-record transfer. This is not a
+/// SessionArchive or a World.db export, and must not be exposed as an unauthenticated route.
+pub struct MemoryTransferApi;
+
+#[derive(Debug, thiserror::Error)]
+pub enum MemoryTransferApiError {
+    #[error("application is unavailable")]
+    Unavailable,
+    #[error("character is unavailable")]
+    CharacterUnavailable,
+    #[error("transfer preview belongs to another character")]
+    ForeignPreview,
+    #[error(transparent)]
+    Character(#[from] CharacterError),
+    #[error(transparent)]
+    Transfer(#[from] crate::knowledge::memory_transfer::MemoryTransferError),
+}
+
+impl MemoryTransferApi {
+    pub async fn export(character: CharacterId) -> Result<Vec<u8>, MemoryTransferApiError> {
+        let bindings = runtime::current().map_err(|_| MemoryTransferApiError::Unavailable)?;
+        let owner = bindings
+            .characters
+            .get(character)
+            .ok_or(MemoryTransferApiError::CharacterUnavailable)?;
+        let snapshot = owner.memories().await?;
+        let bytes = crate::knowledge::memory_transfer::export_memory(&snapshot)?;
+        let fresh = owner.memories().await?;
+        if snapshot.anchor() != fresh.anchor() || !snapshot.matches_version(&fresh) {
+            return Err(MemoryTransferApiError::Transfer(
+                crate::knowledge::memory_transfer::MemoryTransferError::StalePreview,
+            ));
+        }
+        Ok(bytes)
+    }
+
+    pub async fn preview_import(
+        target: CharacterId,
+        bytes: &[u8],
+    ) -> Result<crate::knowledge::memory_transfer::MemoryImportPreview, MemoryTransferApiError>
+    {
+        let bindings = runtime::current().map_err(|_| MemoryTransferApiError::Unavailable)?;
+        let owner = bindings
+            .characters
+            .get(target)
+            .ok_or(MemoryTransferApiError::CharacterUnavailable)?;
+        let expected = owner.memories().await?;
+        crate::knowledge::memory_transfer::preview_memory_import(expected, bytes)
+            .map_err(Into::into)
+    }
+
+    pub async fn apply_confirmed(
+        target: CharacterId,
+        preview: crate::knowledge::memory_transfer::MemoryImportPreview,
+        confirmed: bool,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<crate::character::MemoryEditResult, MemoryTransferApiError> {
+        if preview.target_character() != target {
+            return Err(MemoryTransferApiError::ForeignPreview);
+        }
+        let bindings = runtime::current().map_err(|_| MemoryTransferApiError::Unavailable)?;
+        let owner = bindings
+            .characters
+            .get(target)
+            .ok_or(MemoryTransferApiError::CharacterUnavailable)?;
+        crate::knowledge::memory_transfer::apply_memory_import(&owner, preview, confirmed, cancel)
+            .await
+            .map_err(Into::into)
+    }
+}
+
+/// Trusted-local, explicitly confirmed transfer of user-defined character variables.
+/// Computed state and Timeline history are not transferred.
+pub struct PortableTransferApi;
+
+#[derive(Debug, thiserror::Error)]
+pub enum PortableTransferApiError {
+    #[error("application is unavailable")]
+    Unavailable,
+    #[error("character is unavailable")]
+    CharacterUnavailable,
+    #[error("composite import preview belongs to another character")]
+    ForeignPreview,
+    #[error(transparent)]
+    Character(#[from] CharacterError),
+    #[error(transparent)]
+    Transfer(#[from] crate::knowledge::portable_transfer::PortableTransferError),
+}
+
+impl PortableTransferApi {
+    pub async fn export(character: CharacterId) -> Result<Vec<u8>, PortableTransferApiError> {
+        let bindings = runtime::current().map_err(|_| PortableTransferApiError::Unavailable)?;
+        let owner = bindings
+            .characters
+            .get(character)
+            .ok_or(PortableTransferApiError::CharacterUnavailable)?;
+        let snapshot = owner.portable_snapshot().await?;
+        let bytes = crate::knowledge::portable_transfer::export_portable(&snapshot)?;
+        let fresh = owner.portable_snapshot().await?;
+        if snapshot.memory.anchor() != fresh.memory.anchor()
+            || !snapshot.memory.matches_version(&fresh.memory)
+            || snapshot.variables.values() != fresh.variables.values()
+        {
+            return Err(PortableTransferApiError::Transfer(
+                crate::knowledge::portable_transfer::PortableTransferError::StalePreview,
+            ));
+        }
+        Ok(bytes)
+    }
+
+    pub async fn preview_import(
+        target: CharacterId,
+        bytes: &[u8],
+    ) -> Result<crate::knowledge::portable_transfer::PortableImportPreview, PortableTransferApiError>
+    {
+        let bindings = runtime::current().map_err(|_| PortableTransferApiError::Unavailable)?;
+        let owner = bindings
+            .characters
+            .get(target)
+            .ok_or(PortableTransferApiError::CharacterUnavailable)?;
+        let snapshot = owner.portable_snapshot().await?;
+        crate::knowledge::portable_transfer::preview_portable_import(snapshot, bytes)
+            .map_err(Into::into)
+    }
+
+    pub async fn apply_confirmed(
+        target: CharacterId,
+        preview: crate::knowledge::portable_transfer::PortableImportPreview,
+        confirmed: bool,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<crate::character::CharacterPortableResult, PortableTransferApiError> {
+        if preview.target_character() != target {
+            return Err(PortableTransferApiError::ForeignPreview);
+        }
+        let bindings = runtime::current().map_err(|_| PortableTransferApiError::Unavailable)?;
+        let owner = bindings
+            .characters
+            .get(target)
+            .ok_or(PortableTransferApiError::CharacterUnavailable)?;
+        crate::knowledge::portable_transfer::apply_portable_import(
+            &owner, preview, confirmed, cancel,
+        )
+        .await
+        .map_err(Into::into)
+    }
+}
+
+pub struct VariableTransferApi;
+
+#[derive(Debug, thiserror::Error)]
+pub enum VariableTransferApiError {
+    #[error("application is unavailable")]
+    Unavailable,
+    #[error("character is unavailable")]
+    CharacterUnavailable,
+    #[error("variable transfer preview belongs to another character")]
+    ForeignPreview,
+    #[error(transparent)]
+    Character(#[from] CharacterError),
+    #[error(transparent)]
+    Transfer(#[from] crate::knowledge::variable_transfer::VariableTransferError),
+}
+
+impl VariableTransferApi {
+    pub async fn export(character: CharacterId) -> Result<Vec<u8>, VariableTransferApiError> {
+        let bindings = runtime::current().map_err(|_| VariableTransferApiError::Unavailable)?;
+        let owner = bindings
+            .characters
+            .get(character)
+            .ok_or(VariableTransferApiError::CharacterUnavailable)?;
+        let snapshot = owner.user_variables().await?;
+        let bytes = crate::knowledge::variable_transfer::export_variables(&snapshot)?;
+        let current = owner.user_variables().await?;
+        if snapshot.anchor() != current.anchor() || snapshot.values() != current.values() {
+            return Err(VariableTransferApiError::Transfer(
+                crate::knowledge::variable_transfer::VariableTransferError::StalePreview,
+            ));
+        }
+        Ok(bytes)
+    }
+
+    pub async fn preview_import(
+        target: CharacterId,
+        bytes: &[u8],
+    ) -> Result<crate::knowledge::variable_transfer::VariableImportPreview, VariableTransferApiError>
+    {
+        let bindings = runtime::current().map_err(|_| VariableTransferApiError::Unavailable)?;
+        let owner = bindings
+            .characters
+            .get(target)
+            .ok_or(VariableTransferApiError::CharacterUnavailable)?;
+        let snapshot = owner.user_variables().await?;
+        crate::knowledge::variable_transfer::preview_variable_import(snapshot, bytes)
+            .map_err(Into::into)
+    }
+
+    pub async fn apply_confirmed(
+        target: CharacterId,
+        preview: crate::knowledge::variable_transfer::VariableImportPreview,
+        confirmed: bool,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<crate::character::CharacterVariablesSnapshot, VariableTransferApiError> {
+        if preview.target_character() != target {
+            return Err(VariableTransferApiError::ForeignPreview);
+        }
+        let bindings = runtime::current().map_err(|_| VariableTransferApiError::Unavailable)?;
+        let owner = bindings
+            .characters
+            .get(target)
+            .ok_or(VariableTransferApiError::CharacterUnavailable)?;
+        crate::knowledge::variable_transfer::apply_variable_import(
+            &owner, preview, confirmed, cancel,
+        )
+        .await
+        .map_err(Into::into)
+    }
+}
+
 pub struct ChatApi;
 
 impl ChatApi {

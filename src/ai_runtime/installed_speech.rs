@@ -20,7 +20,10 @@ use super::{
     install::PluginInstallPlan,
     layer::valid_segment,
     overlay::{LockedOverlay, OverlayInstaller, load_installed_overlay},
-    speech_catalog::{SpeechInventory, SpeechModelCatalog},
+    sdk::SdkPublisher,
+    speech_catalog::{
+        SpeechInventory, SpeechModelCatalog, executable_plugin_root, verify_executable_plugin,
+    },
     speech_selection::{inspect_speech_selection, select_speech_model},
 };
 
@@ -38,6 +41,14 @@ pub enum InstalledSpeechError {
     Inspection(#[from] super::AiRuntimeError),
 }
 
+/// An attested, read-only inventory of *speech overlays* selected by the
+/// persisted settings. Backend dependencies cannot be inferred from an overlay
+/// receipt: this type deliberately never claims a complete dependency closure.
+pub(crate) struct PersistedSpeechOverlayInventory {
+    pub(crate) selected: Vec<ServiceSelection>,
+    pub(crate) unresolved_backends: Vec<AiService>,
+}
+
 #[derive(Clone)]
 pub struct InstalledSpeechEnvironment {
     pub data_directory: PathBuf,
@@ -48,25 +59,69 @@ pub struct InstalledSpeechEnvironment {
 
 impl InstalledSpeechEnvironment {
     pub fn for_desktop(data_directory: PathBuf) -> Self {
-        let installed_sdk = data_directory.join("AIData/sdk");
-        let source_sdk = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
-        let sdk_root = if installed_sdk.join("neuromita_ai_sdk/host.py").is_file() {
-            installed_sdk
-        } else {
-            source_sdk.clone()
-        };
-        let installed_plugins = data_directory.join("AIData/Scripts");
-        let plugins_directory = if installed_plugins.is_dir() {
-            installed_plugins
-        } else {
-            source_sdk.join("plugins/builtin")
-        };
+        let publisher = SdkPublisher::new(data_directory.join("AIData"));
+        let sdk_root = publisher
+            .resolve_active()
+            .unwrap_or_else(|_| publisher.sdk_directory().join(".unavailable"));
+        let plugins_directory = executable_plugin_root(&data_directory);
         Self {
             data_directory,
             sdk_root,
             plugins_directory,
             timeout: Duration::from_secs(30),
         }
+    }
+
+    /// Resolve selected TTS/ASR overlays from the actual executable manifests
+    /// and immutable receipts, without running arbitrary plugin code.
+    /// Any ambiguous or unreadable selection fails closed. No empty-backend
+    /// vector returned here may be interpreted as proof that a backend is idle.
+    pub(crate) async fn persisted_speech_overlay_inventory(
+        &self,
+        speech: &SpeechSettings,
+    ) -> Result<PersistedSpeechOverlayInventory, InstalledSpeechError> {
+        let inventory = SpeechModelCatalog::for_desktop(self.data_directory.clone())
+            .snapshot()
+            .await;
+        self.resolve_persisted_speech_overlays(speech, &inventory)
+    }
+
+    fn resolve_persisted_speech_overlays(
+        &self,
+        speech: &SpeechSettings,
+        inventory: &SpeechInventory,
+    ) -> Result<PersistedSpeechOverlayInventory, InstalledSpeechError> {
+        if !inventory.errors.is_empty() {
+            return Err(InstalledSpeechError::Environment(format!(
+                "cannot attest selected speech inventory: {}",
+                inventory.errors.join("; ")
+            )));
+        }
+        let mut selected = Vec::new();
+        let mut unresolved_backends = Vec::new();
+        for service in [AiService::Tts, AiService::Asr] {
+            let Some(selection) = select_speech_model(speech, inventory, service)? else {
+                continue;
+            };
+            let service_name = match service {
+                AiService::Tts => "tts",
+                AiService::Asr => "asr",
+                _ => unreachable!(),
+            };
+            verify_executable_plugin(&self.plugins_directory, &selection.plugin_id, service_name)
+                .map_err(InstalledSpeechError::Environment)?;
+            let overlay = installed_overlay(&self.ai_data(), &selection.plugin_id)?;
+            selected.push(ServiceSelection {
+                service,
+                backends: Vec::new(),
+                overlays: vec![overlay],
+            });
+            unresolved_backends.push(service);
+        }
+        Ok(PersistedSpeechOverlayInventory {
+            selected,
+            unresolved_backends,
+        })
     }
 
     fn ai_data(&self) -> PathBuf {
@@ -85,10 +140,20 @@ impl InstalledSpeechEnvironment {
                 "absolute data, SDK, installed plugin directory and timeout required".into(),
             ));
         }
+        if self.sdk_root.starts_with(self.ai_data().join("sdk")) {
+            let active = SdkPublisher::new(self.ai_data())
+                .resolve_active()
+                .map_err(|error| InstalledSpeechError::Environment(error.to_string()))?;
+            if self.sdk_root != active {
+                return Err(InstalledSpeechError::Environment(
+                    "SDK selection changed".into(),
+                ));
+            }
+        }
         Ok(())
     }
 
-    fn installed_uv(&self) -> Result<PathBuf, InstalledSpeechError> {
+    pub(super) fn installed_uv(&self) -> Result<PathBuf, InstalledSpeechError> {
         let root = self.ai_data().join("bootstrap/uv");
         let mut matches = Vec::new();
         for entry in entries(&root)? {
@@ -145,17 +210,13 @@ impl InstalledSpeechEnvironment {
         }
         self.validate()?;
         for selected in &selected {
-            if !self
-                .plugins_directory
-                .join(&selected.plugin_id)
-                .join("plugin.json")
-                .is_file()
-            {
-                return Err(InstalledSpeechError::Environment(format!(
-                    "plugin {} absent from configured plugin root",
-                    selected.plugin_id
-                )));
-            }
+            let service = match selected.service {
+                AiService::Tts => "tts",
+                AiService::Asr => "asr",
+                _ => unreachable!("only speech services are selected"),
+            };
+            verify_executable_plugin(&self.plugins_directory, &selected.plugin_id, service)
+                .map_err(InstalledSpeechError::Environment)?;
         }
         let overlays = selected
             .iter()
@@ -390,6 +451,7 @@ mod tests {
 
     fn plan(kinds: &[&str], extra: &[&str]) -> PluginInstallPlan {
         PluginInstallPlan {
+            build_stages: vec![],
             packages: vec![],
             requirements: vec![],
             assets: vec![],
@@ -465,6 +527,182 @@ mod tests {
         assert_eq!(installed_overlay(&root, "mock_asr").unwrap(), receipt);
         std::fs::create_dir_all(root.join("overlays/mock_asr/rev2")).unwrap();
         assert!(installed_overlay(&root, "mock_asr").is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn write_selected_speech_plugin(root: &Path, id: &str, service: &str) {
+        let directory = root.join("AIData/plugins/builtin").join(id);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("plugin.json"),
+            serde_json::json!({
+                "id": id, "name": id, "kind": service,
+                "api_version": 1, "entrypoint": "plugin.py"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(directory.join("plugin.py"), "class Plugin: pass").unwrap();
+        let revision = root.join("AIData/overlays").join(id).join("r1");
+        std::fs::create_dir_all(&revision).unwrap();
+        let receipt = LockedOverlay {
+            plugin_id: id.into(),
+            revision: "r1".into(),
+            python_version: "3.12.10".into(),
+            packages: vec![],
+            actions: vec![],
+        };
+        std::fs::write(
+            revision.join(".neuromita-overlay.json"),
+            serde_json::to_vec(&receipt).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn desktop_environment_requires_attested_installed_sdk_without_source_fallback() {
+        let root = std::env::temp_dir().join(format!("nm-sdk-desktop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let before = InstalledSpeechEnvironment::for_desktop(root.clone());
+        assert!(!before.sdk_root.join("neuromita_ai_sdk/host.py").exists());
+        let publisher = SdkPublisher::new(root.join("AIData"));
+        let release = publisher.publish_embedded().unwrap();
+        let after = InstalledSpeechEnvironment::for_desktop(root.clone());
+        assert_eq!(after.sdk_root, release);
+        std::fs::write(release.join("neuromita_ai_sdk/host.py"), b"corrupted").unwrap();
+        let invalid = InstalledSpeechEnvironment::for_desktop(root.clone());
+        assert_ne!(invalid.sdk_root, release);
+        assert!(matches!(
+            publisher.resolve_active(),
+            Err(crate::ai_runtime::sdk::SdkError::Corrupt)
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn selected_speech_overlays_are_derived_from_real_executable_and_immutable_receipts() {
+        let root =
+            std::env::temp_dir().join(format!("nm-speech-selection-{}", uuid::Uuid::new_v4()));
+        write_selected_speech_plugin(&root, "custom_tts", "tts");
+        write_selected_speech_plugin(&root, "custom_asr", "asr");
+        let environment = InstalledSpeechEnvironment::for_desktop(root.clone());
+        let mut speech = SpeechSettings::default();
+        speech.tts.enabled = true;
+        speech.tts.backend = crate::settings::TtsBackend::Local;
+        speech.tts.local_model_id = "custom_tts".into();
+        speech.asr.recognizer_id = "custom_asr".into();
+        let attested = environment
+            .persisted_speech_overlay_inventory(&speech)
+            .await
+            .unwrap();
+        assert_eq!(attested.selected.len(), 2);
+        assert_eq!(attested.selected[0].service, AiService::Tts);
+        assert_eq!(attested.selected[1].service, AiService::Asr);
+        assert_eq!(attested.selected[0].overlays[0].plugin_id, "custom_tts");
+        assert_eq!(attested.selected[1].overlays[0].plugin_id, "custom_asr");
+        assert!(
+            attested
+                .selected
+                .iter()
+                .all(|item| item.backends.is_empty())
+        );
+        assert_eq!(
+            attested.unresolved_backends,
+            vec![AiService::Tts, AiService::Asr]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_or_ambiguous_selected_revision_fails_closed() {
+        let root =
+            std::env::temp_dir().join(format!("nm-speech-ambiguous-{}", uuid::Uuid::new_v4()));
+        write_selected_speech_plugin(&root, "custom_tts", "tts");
+        let environment = InstalledSpeechEnvironment::for_desktop(root.clone());
+        let mut speech = SpeechSettings::default();
+        speech.tts.enabled = true;
+        speech.tts.backend = crate::settings::TtsBackend::Local;
+        speech.tts.local_model_id = "custom_tts".into();
+        let first = environment
+            .persisted_speech_overlay_inventory(&speech)
+            .await
+            .unwrap();
+        assert_eq!(first.selected.len(), 1);
+        std::fs::create_dir_all(root.join("AIData/overlays/custom_tts/r2")).unwrap();
+        assert!(
+            environment
+                .persisted_speech_overlay_inventory(&speech)
+                .await
+                .is_err()
+        );
+        std::fs::remove_dir_all(root.join("AIData/overlays/custom_tts/r2")).unwrap();
+        std::fs::write(
+            root.join("AIData/overlays/custom_tts/r1/.neuromita-overlay.json"),
+            b"{}",
+        )
+        .unwrap();
+        assert!(
+            environment
+                .persisted_speech_overlay_inventory(&speech)
+                .await
+                .is_err()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unresolved_speech_plugin_and_corrupted_catalog_do_not_report_empty_inventory() {
+        let root = std::env::temp_dir().join(format!("nm-speech-unknown-{}", uuid::Uuid::new_v4()));
+        let environment = InstalledSpeechEnvironment::for_desktop(root.clone());
+        let mut speech = SpeechSettings::default();
+        speech.asr.recognizer_id = "not_installed".into();
+        assert!(
+            environment
+                .persisted_speech_overlay_inventory(&speech)
+                .await
+                .is_err()
+        );
+        write_selected_speech_plugin(&root, "custom_asr", "asr");
+        speech.asr.recognizer_id = "custom_asr".into();
+        let inventory = SpeechInventory {
+            asr: vec![super::super::speech_catalog::SpeechModelOption {
+                id: "custom_asr".into(),
+                name: "ASR".into(),
+                package_detected: true,
+                verified_assets: false,
+                installed_revisions: vec![],
+            }],
+            errors: vec!["ambiguous plugin identity".into()],
+            ..SpeechInventory::default()
+        };
+        assert!(
+            environment
+                .resolve_persisted_speech_overlays(&speech, &inventory)
+                .is_err()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn desktop_activation_and_inventory_select_the_same_plugin_root() {
+        let root = std::env::temp_dir().join(format!("speech-root-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("AIData/Scripts")).unwrap();
+        let legacy_environment = InstalledSpeechEnvironment::for_desktop(root.clone());
+        let legacy_inventory = SpeechModelCatalog::for_desktop(root.clone());
+        assert_eq!(
+            legacy_environment.plugins_directory,
+            legacy_inventory.plugin_roots[0]
+        );
+        assert_eq!(
+            legacy_environment.plugins_directory,
+            root.join("AIData/Scripts")
+        );
+
+        std::fs::create_dir_all(root.join("AIData/plugins/community")).unwrap();
+        let environment = InstalledSpeechEnvironment::for_desktop(root.clone());
+        let inventory = SpeechModelCatalog::for_desktop(root.clone());
+        assert_eq!(environment.plugins_directory, inventory.plugin_roots[0]);
+        assert_eq!(environment.plugins_directory, root.join("AIData/plugins"));
         std::fs::remove_dir_all(root).unwrap();
     }
 

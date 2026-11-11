@@ -86,6 +86,101 @@ impl AudioCapture for NativeCapture {
     }
 }
 
+/// Captures microphone samples at the device's native rate for audible monitoring.
+/// Recognition uses `NativeCapture` and its separate 16 kHz conversion path.
+pub struct NativeMonitorCapture {
+    _stream: cpal::Stream,
+    sample_rate: u32,
+    receive: mpsc::Receiver<Result<Vec<i16>, String>>,
+}
+
+impl NativeMonitorCapture {
+    pub fn start(backend: &str, identity: &str) -> Result<Self, DeviceError> {
+        let device = selected(backend, identity)?;
+        let config = device.default_input_config().map_err(error)?;
+        let sample_rate = config.sample_rate();
+        let (send, receive) = mpsc::channel(32);
+        let stream = match config.sample_format() {
+            cpal::SampleFormat::F32 => monitor_input::<f32>(&device, &config.into(), send),
+            cpal::SampleFormat::I16 => monitor_input::<i16>(&device, &config.into(), send),
+            cpal::SampleFormat::I32 => monitor_input::<i32>(&device, &config.into(), send),
+            cpal::SampleFormat::U16 => monitor_input::<u16>(&device, &config.into(), send),
+            format => {
+                return Err(error(format!(
+                    "unsupported capture sample format: {format}"
+                )));
+            }
+        }?;
+        stream.play().map_err(error)?;
+        Ok(Self {
+            _stream: stream,
+            sample_rate,
+            receive,
+        })
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    pub async fn next_samples(&mut self) -> Result<Option<Vec<i16>>, DeviceError> {
+        self.receive
+            .recv()
+            .await
+            .transpose()
+            .map_err(DeviceError::Stopped)
+    }
+}
+
+fn mono_pcm16<T>(data: &[T], channels: usize) -> Vec<i16>
+where
+    T: cpal::SizedSample,
+    f32: cpal::FromSample<T>,
+{
+    data.chunks_exact(channels)
+        .map(|frame| {
+            let mono = frame
+                .iter()
+                .map(|sample| sample.to_sample::<f32>())
+                .sum::<f32>()
+                / channels as f32;
+            (mono.clamp(-1.0, 1.0) * f32::from(i16::MAX)).round() as i16
+        })
+        .collect()
+}
+
+fn monitor_input<T>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    send: mpsc::Sender<Result<Vec<i16>, String>>,
+) -> Result<cpal::Stream, DeviceError>
+where
+    T: cpal::SizedSample,
+    f32: cpal::FromSample<T>,
+{
+    let channels = usize::from(config.channels);
+    let failure = send.clone();
+    let mut overloaded = false;
+    device
+        .build_input_stream(
+            config,
+            move |data: &[T], _| {
+                if overloaded {
+                    let _ = send.try_send(Err("microphone monitor consumer is too slow".into()));
+                    return;
+                }
+                if !data.is_empty() && send.try_send(Ok(mono_pcm16(data, channels))).is_err() {
+                    overloaded = true;
+                }
+            },
+            move |problem| {
+                let _ = failure.try_send(Err(problem.to_string()));
+            },
+            None,
+        )
+        .map_err(error)
+}
+
 struct Converter {
     rate: u32,
     weight: u32,
@@ -191,6 +286,20 @@ mod tests {
             assert_eq!(converter.filled, 128);
         }
     }
+    #[test]
+    fn monitor_preserves_native_sample_count_and_downmixes_channels() {
+        for native_rate in [44_100, 48_000, 96_000] {
+            let mut stereo = Vec::with_capacity(native_rate as usize * 2);
+            for _ in 0..native_rate {
+                stereo.extend_from_slice(&[0.25f32, -0.25f32]);
+            }
+            let monitor = mono_pcm16(&stereo, 2);
+            assert_eq!(monitor.len(), native_rate as usize);
+            assert!(monitor.iter().all(|sample| *sample == 0));
+        }
+        assert_eq!(mono_pcm16(&[0.5f32, -0.5f32], 1), [16384, -16384]);
+    }
+
     #[test]
     fn missing_backend_is_an_error() {
         assert!(NativeCapture::start("nonexistent backend", "missing").is_err());

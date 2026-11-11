@@ -3,6 +3,7 @@ import { CollapsibleSettingsSection, InnerSettingsSection } from "../components/
 import { SettingsScrollView } from "scroll-view.slint";
 import { SettingsTheme } from "theme.slint";
 import { I18n } from "../i18n.slint";
+import { SettingsUi } from "presets-state.slint";
 
 export component ModelsSettingsPage inherits SettingsScrollView {
     in-out property <bool> behavior-open;
@@ -26,10 +27,8 @@ export component ModelsSettingsPage inherits SettingsScrollView {
     in-out property <bool> schema-reasoning;
     in-out property <bool> react-enabled: true;
     in-out property <bool> react-l2: true;
-    in-out property <bool> tools-enabled: true;
     in-out property <bool> working-state;
     in-out property <bool> action-memory;
-    in-out property <bool> deduplication: true;
     in-out property <bool> maintenance: true;
     in-out property <bool> memory-ttl: true;
     in-out property <bool> history-ttl;
@@ -45,7 +44,6 @@ export component ModelsSettingsPage inherits SettingsScrollView {
     in-out property <string> rag-max-results: "10";
     in-out property <string> working-state-limit: "2000";
     in-out property <string> action-tail: "4";
-    in-out property <string> dedup-threshold: "0.8";
     in-out property <string> low-priority-ttl: "15";
     in-out property <string> normal-priority-ttl: "30";
     in-out property <string> memory-maintenance-interval: "20";
@@ -75,8 +73,50 @@ export component ModelsSettingsPage inherits SettingsScrollView {
             }
             InnerSettingsSection {
                 title: I18n.i18n("settings.models.tools", "Инструменты (Tools)"); expanded <=> root.tools-open;
-                SettingsToggleRow { title: I18n.i18n("settings.models.tools-enable", "Вызов инструментов"); checked: root.tools-enabled; changed(value) => { root.tools-enabled = value; } }
-                for tool in ["Калькулятор", "Поиск в интернете", "Google поиск", "Чтение страниц", "Поиск воспоминаний", "Напоминания"]: SettingsToggleRow { title: tool; active: false; }
+                SettingsToggleRow {
+                    title: I18n.i18n("settings.models.tools-enable", "Вызов инструментов");
+                    checked: SettingsUi.tool-enabled;
+                    changed(value) => { SettingsUi.tool-option("enabled", value); }
+                }
+                SettingsToggleRow {
+                    title: I18n.i18n("settings.models.tool.calculator", "Калькулятор");
+                    checked: SettingsUi.tool-calculator;
+                    active: SettingsUi.tool-enabled;
+                    changed(value) => { SettingsUi.tool-option("calculator", value); }
+                }
+                SettingsToggleRow {
+                    title: I18n.i18n("settings.models.tool.web-search", "Поиск в интернете");
+                    checked: SettingsUi.tool-web-search;
+                    active: SettingsUi.tool-enabled && SettingsUi.tool-search-configured;
+                    changed(value) => { SettingsUi.tool-option("web_search", value); }
+                }
+                SettingsToggleRow {
+                    title: I18n.i18n("settings.models.tool.google-search", "Google поиск");
+                    active: false;
+                }
+                SettingsToggleRow {
+                    title: I18n.i18n("settings.models.tool.web-reader", "Чтение страниц");
+                    checked: SettingsUi.tool-web-reader;
+                    active: SettingsUi.tool-enabled && SettingsUi.tool-reader-configured;
+                    changed(value) => { SettingsUi.tool-option("web_reader", value); }
+                }
+                SettingsToggleRow {
+                    title: I18n.i18n("settings.models.tool.memory-search", "Поиск воспоминаний");
+                    checked: SettingsUi.tool-memory-search;
+                    active: SettingsUi.tool-enabled;
+                    changed(value) => { SettingsUi.tool-option("memory_search", value); }
+                }
+                SettingsToggleRow {
+                    title: I18n.i18n("settings.models.tool.reminder", "Напоминания");
+                    checked: SettingsUi.tool-reminder-enabled;
+                    active: false;
+                }
+                SettingsEntryRow {
+                    title: I18n.i18n("settings.models.tool-depth", "Макс. глубина цепочки тулов");
+                    value: SettingsUi.tool-max-depth;
+                    active: SettingsUi.tool-enabled;
+                    committed(value) => { SettingsUi.tool-depth-change(value); }
+                }
             }
         }
         CollapsibleSettingsSection {
@@ -111,8 +151,18 @@ export component ModelsSettingsPage inherits SettingsScrollView {
             InnerSettingsSection {
                 title: I18n.i18n("settings.models.hygiene", "Гигиена памяти");
                 expanded <=> root.hygiene-open;
-                SettingsToggleRow { title: I18n.i18n("settings.models.dedup", "Дедуп при добавлении"); checked: root.deduplication; changed(value) => { root.deduplication = value; } }
-                SettingsEntryRow { title: I18n.i18n("settings.models.dedup-threshold", "Порог дедупа (0.5–1.0)"); value <=> root.dedup-threshold; active: root.deduplication; }
+                SettingsToggleRow {
+                    title: I18n.i18n("settings.models.dedup", "Дедуп при добавлении");
+                    description: I18n.i18n("settings.models.dedup-note", "Только воспоминания, предложенные моделью; ручной редактор не затрагивается.");
+                    checked: SettingsUi.memory-dedup-enabled;
+                    changed(value) => { SettingsUi.memory-dedup-toggle(value); }
+                }
+                SettingsEntryRow {
+                    title: I18n.i18n("settings.models.dedup-threshold", "Порог дедупа (0.5–1.0)");
+                    value: SettingsUi.memory-dedup-threshold;
+                    active: SettingsUi.memory-dedup-enabled;
+                    committed(value) => { SettingsUi.memory-dedup-threshold-change(value); }
+                }
                 SettingsToggleRow { title: I18n.i18n("settings.models.maintenance", "Фоновая ревизия памяти"); checked: root.maintenance; changed(value) => { root.maintenance = value; } }
                 SettingsEntryRow { title: I18n.i18n("settings.models.maintenance-interval", "Интервал ревизии (сообщений)"); value <=> root.memory-maintenance-interval; active: root.maintenance; }
             }

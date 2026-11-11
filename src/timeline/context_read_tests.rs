@@ -26,6 +26,13 @@ impl TimelineRepository for Counted {
         self.reads.fetch_add(1, Ordering::Relaxed);
         TimelineStore::world(&self.inner, id)
     }
+    fn regenerate_admission_branches(
+        &self,
+        session: SessionId,
+        character: CharacterId,
+    ) -> Result<Vec<BranchId>, TimelineError> {
+        self.inner.regenerate_admission_branches(session, character)
+    }
     fn event(&self, branch: BranchId, id: EventId) -> Result<TimelineFact, TimelineError> {
         TimelineStore::event(&self.inner, branch, id)
     }
@@ -82,6 +89,32 @@ impl TimelineRepository for Counted {
     ) -> Result<BranchInfo, TimelineError> {
         TimelineStore::fork(&mut self.inner, parent, checkpoint, child)
     }
+    fn fork_at_player_input(
+        &mut self,
+        parent: BranchId,
+        input: EventId,
+        character: CharacterId,
+        child: BranchId,
+    ) -> Result<BranchInfo, TimelineError> {
+        TimelineStore::fork_at_player_input(&mut self.inner, parent, input, character, child)
+    }
+    fn fork_at_regenerate_input(
+        &mut self,
+        parent: BranchId,
+        input: EventId,
+        character: CharacterId,
+        child: BranchId,
+        receipt: &RegenerateAdmissionReceipt,
+    ) -> Result<BranchInfo, TimelineError> {
+        TimelineStore::fork_at_regenerate_input(
+            &mut self.inner,
+            parent,
+            input,
+            character,
+            child,
+            receipt,
+        )
+    }
     fn view(
         &self,
         branch: BranchId,
@@ -120,6 +153,7 @@ fn context_uses_one_prefix_read_for_history_state_and_memory() {
         "change".into(),
         json!(crate::memory::MemoryChange::Upsert(
             crate::memory::MemoryRecord {
+                entities: Vec::new(),
                 id: crate::memory::MemoryId::new(),
                 priority: crate::memory::MemoryPriority::High,
                 content: "known memory".into(),

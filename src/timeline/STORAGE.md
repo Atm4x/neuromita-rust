@@ -70,3 +70,21 @@ CFMD-адаптер реализует **те же** предметные кон
 validate_batch проверяет специальные факты: payload, actor, приватных witnesses и диапазоны. Изменения памяти последовательно проверяются внутри транзакции; неизвестный ID, переполнение и конечные exact collisions отклоняют весь пакет. Индекс памяти — производная проекция событий; SQLite читает её по родовой цепочке/cutoff в той же транзакции.
 
 TimelineConfig::Persistent восстанавливает существующую сессию или создаёт новую. Несколько сессий без selection дают Conflict. CLI хранит Timeline в data-dir/timeline.sqlite3. SQLite включён по умолчанию и собирается из vendor; --no-default-features не подменяет persistent конфигурацию transient-хранилищем.
+
+## TimelineAssetStore: защита локальных путей
+
+AssetStore получает `directory` из composition root и хранит бинарники по ключу `SHA-256(media_type || 0 || bytes)`. При создании, загрузке и чтении проверяются собственные каталоги `directory`, `staging`, `objects` и digest-shard; символические ссылки вместо этих каталогов запрещены. Файл объекта должен быть обычным файлом, а не ссылкой, даже если целевые байты имеют верный hash и размер. Отсутствие объекта или shard возвращает `Missing`, повреждённый или подменённый файловый объект — `Corrupt`. Ни импорт, ни чтение не делают fallback на внешний путь.
+
+Это защита от уже существующей подмены пути, **не** блокировка конкурентной модификации файловой системы другим процессом: `symlink_metadata` и последующий `open` не образуют единую атомарную операцию. Директория должна оставаться под контролем приложения; полноценная межпроцессная защита при конкурирующих недоверенных писателях требует платформенного `openat`/`no-follow` либо эквивалентного механизма. Reachability-aware GC остаётся отдельным контрактом: без полного набора живых веток и внешних архивных корней бинарники не удаляются автоматически.
+
+## Манифест удержания вложений (без удаления)
+
+`archive::retention_manifest_memory` и `archive::retention_manifest_sqlite` собирают полный список ссылок из **канонических фактов всех локальных сессий и веток**, а не из текущего видимого `MitaView`. Поэтому скрытые, отредактированные и унаследованные через fork сообщения продолжают удерживать исходные бинарники. Вызывающий код явно передаёт внешние архивы, которые нужно сохранить: каждый из них полностью валидируется по текущему `SessionArchive` contract перед включением ссылок. Несовпадающие метаданные при одинаковом digest и испорченный архив вызывают отказ.
+
+Этот API только формирует отсортированный манифест; он **не** сканирует filesystem и **не** удаляет бинарники. Список не может подтверждать отсутствие других архивов, не переданных вызывающим кодом. Удаление orphan-объектов потребует явного владения всеми archive roots и синхронизации с конкурентными import/append, поэтому до введения такого контракта автоматический GC запрещён.
+
+## Read-only orphan inventory (B15)
+
+`archive::inventory_memory` / `inventory_sqlite` combine the entire local canonical retention manifest with **only** explicitly supplied, integrity-checked external archives, then call `TimelineAssetStore::inventory`. The scan accepts only lowercase content-addressed objects at `objects/<first-two-hex>/<64-hex-digest>`, rejects symlinks and unexpected layout entries, and verifies every retained binary's declared MIME, hash and byte count. The sorted result lists retained references and on-disk `orphan_candidates` with digest and actual file size. MIME identity of candidates cannot be reconstructed from their filename, so candidates are not asserted to be valid attachments. Staging files are not included.
+
+**Safety limitation:** The scan is a read-only observation, never a proof of global liveness. External archives not passed to the caller, concurrent Timeline append/import/archive publication, and external filesystem changes can immediately invalidate the candidate list; non-atomic path inspection is not protection from hostile concurrent swaps. There is deliberately **no** quarantine, delete or GC API. A future collector requires exclusive coordination with writers, an authoritative archive-root registry and a race-safe filesystem primitive before any deletion is permitted.

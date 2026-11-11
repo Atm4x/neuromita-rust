@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeSet,
+    path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -50,6 +51,7 @@ pub enum EventKind {
     CharacterObservation,
     CharacterStateChanged,
     CharacterWorkingStateReplaced,
+    CharacterVariablesChanged,
     CharacterMemoryChanged,
     ReminderScheduled,
     ReminderUpdated,
@@ -73,8 +75,13 @@ pub enum EventKind {
     MessageRevised,
     MessageRestored,
     CharacterContextReset,
+    CharacterKnowledgeForgotten,
+    CharacterKnowledgeRevealed,
     Checkpoint,
     BranchCreated,
+    RegenerateAdmitted,
+    RegenerateAbandoned,
+    RegenerateMayHaveDispatched,
 }
 
 impl EventKind {
@@ -89,6 +96,7 @@ impl EventKind {
 pub enum AppliedEffect {
     CharacterStateChanged(CharacterBehavior),
     CharacterWorkingStateReplaced(CharacterWorkingState),
+    CharacterVariablesChanged(std::collections::BTreeMap<String, Value>),
     CharacterMemoryChanged(MemoryChange),
     /// Sanitized public match fact committed together with the reply.
     GameAdvanced(crate::games::GameFact),
@@ -105,6 +113,7 @@ pub enum CausalRelation {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CausalLink {
     pub relation: CausalRelation,
     pub event_id: EventId,
@@ -120,6 +129,7 @@ pub trait Event {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EventDraft {
     pub id: EventId,
     pub kind: EventKind,
@@ -180,6 +190,7 @@ impl Event for EventDraft {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TimelineFact {
     pub session_id: SessionId,
     pub branch_id: BranchId,
@@ -209,6 +220,7 @@ pub struct KnownEvent {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BranchInfo {
     pub id: BranchId,
     pub session_id: SessionId,
@@ -240,6 +252,10 @@ pub enum TimelineError {
     Invalid(&'static str),
     #[error("timeline storage failed: {0}")]
     Storage(String),
+    #[error(
+        "snapshot link was created at {destination:?}, but directory sync failed: {cause}; publication durability is unknown"
+    )]
+    SnapshotPublicationUncertain { destination: PathBuf, cause: String },
 }
 
 #[cfg(test)]

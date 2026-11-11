@@ -4,13 +4,18 @@ mod credentials;
 mod effects;
 pub mod gemini;
 mod http;
+mod live_multimodal;
+pub mod multimodal;
 pub mod openai;
 mod presets;
 pub use credentials::{ApplicationPresetCredentials, CredentialReference, SecretKey};
+pub(crate) use presets::StoredPresets;
 mod provider;
 pub mod python_import;
 mod structured;
+mod tools;
 mod transforms;
+mod web_tools;
 pub use effects::ResponseEffect;
 pub use presets::{
     EnvironmentPresetCredentials, GeminiPresetDefinition, JsonPresetRepository, PresetCatalog,
@@ -19,15 +24,17 @@ pub use presets::{
     PresetRepository, PresetTemplate,
 };
 pub use structured::{
-    RESPONSE_PROTOCOL_VERSION, ResponseSegment, SegmentIntent, StructuredResponse, ToolCall,
-    WorkingState,
+    ModelMemoryAddPolicy, RESPONSE_PROTOCOL_VERSION, ResponseSegment, SegmentIntent,
+    StructuredResponse, ToolCall, WorkingState,
 };
+pub use tools::ToolSettings;
 pub use transforms::{MessageTransform, apply_message_transforms};
+pub use web_tools::WebToolSettings;
 
 pub use provider::{
     GenerationError, GenerationInput, GenerationObserver, GenerationProvider, GenerationRequest,
-    PreparedRequest, PromptMessage, PromptRole, ProposedResponse, ProviderFuture, ProviderReply,
-    ProviderUsage, ResponseGenerator,
+    PreparedPrompt, PreparedRequest, PromptMessage, PromptRole, ProposedResponse, ProviderFuture,
+    ProviderReply, ProviderUsage, ResponseGenerator,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -53,6 +60,12 @@ impl ProviderTemplate {
         match self {
             Self::Gemini(_) => ProviderKind::Gemini,
             Self::OpenAi(_) => ProviderKind::OpenAi,
+        }
+    }
+    pub fn timeout(&self) -> std::time::Duration {
+        match self {
+            Self::Gemini(template) => template.settings().timeout(),
+            Self::OpenAi(template) => template.timeout(),
         }
     }
 }

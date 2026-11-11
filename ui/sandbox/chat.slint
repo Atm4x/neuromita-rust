@@ -2,7 +2,7 @@ import { CharacterCatalog } from "../characters/catalog.slint";
 import { ConversationUi } from "admin.slint";
 import { ScrollView } from "std-widgets.slint";
 import { SandboxTheme, Fa } from "theme.slint";
-import { Caption, Glyph, GhostButton, Centered } from "controls.slint";
+import { Caption, Glyph, GhostButton, Centered, Field } from "controls.slint";
 import { MessageRow } from "message.slint";
 import { ChatRow } from "models.slint";
 import { ActionSurface } from "../components/controls.slint";
@@ -29,19 +29,32 @@ component ConversationStrip inherits Rectangle {
 component ChatComposer inherits VerticalLayout {
     in-out property <string> draft;
     in property <bool> connected;
+    in property <bool> storage-connected;
     in property <bool> sending;
+    in property <string> active-request-id;
+    in property <int> microphone-phase;
+    in property <bool> generation-active;
+    private property <bool> activity-pulse;
+    callback cancel(string);
+    callback retry(string);
+    callback microphone-toggle(bool);
     in property <int> character;
+    Timer { interval: 340ms; running: root.microphone-phase == 2 || root.generation-active; triggered => { root.activity-pulse = !root.activity-pulse; } }
+    in-out property <string> attachment-path;
+    private property <bool> attachment-open;
     callback send(string);
-    height: 84px; spacing: 4px; padding: 0px;
+    callback attach(string, string);
+    height: root.attachment-open ? 171px : 84px; spacing: 4px; padding: 0px;
     Rectangle {
         height: 58px; border-radius: 20px; border-width: 1px;
         border-color: SandboxTheme.border; background: SandboxTheme.input;
         HorizontalLayout {
             padding-left: 12px; padding-top: 6px; padding-bottom: 6px; padding-right: 6px; spacing: 4px;
             Centered { width: 32px; ActionSurface {
-                width: 32px; height: 32px; label: I18n.i18n("sandbox.attach", "Прикрепить изображения");
-                enabled: false; border-radius: 9px;
-                Glyph { text: Fa.attach; color: SandboxTheme.muted; width: parent.width; height: parent.height; font-size: 12px; }
+                width: 32px; height: 32px; label: I18n.i18n("sandbox.attach", "Добавить локальный файл в историю");
+                enabled: root.storage-connected && !root.sending; border-radius: 9px;
+                activated => { root.attachment-open = !root.attachment-open; }
+                Glyph { text: Fa.attach; color: root.storage-connected && !root.sending ? SandboxTheme.icon : SandboxTheme.muted; width: parent.width; height: parent.height; font-size: 12px; }
             } }
             Rectangle {
                 horizontal-stretch: 1; min-width: 0px;
@@ -53,7 +66,7 @@ component ChatComposer inherits VerticalLayout {
                         selection-foreground-color: white;
                         single-line: false; wrap: word-wrap; vertical-alignment: center;
                         key-pressed(event) => {
-                            if event.text == "\n" && !event.modifiers.shift && root.connected && !root.sending && root.draft != "" {
+                            if event.text == "\n" && !event.modifiers.shift && root.connected && !root.sending && root.active-request-id == "" && root.draft != "" {
                                 root.send(root.draft); return accept;
                             }
                             return reject;
@@ -75,24 +88,78 @@ component ChatComposer inherits VerticalLayout {
                 enabled: false; border-radius: 9px;
                 Glyph { text: Fa.camera; color: SandboxTheme.muted; width: parent.width; height: parent.height; font-size: 12px; }
             } }
-            Centered { width: 32px; ActionSurface {
-                width: 32px; height: 32px; label: I18n.i18n("sandbox.mic", "Микрофон");
-                enabled: false; border-radius: 13px;
-                Glyph { text: Fa.microphone; color: SandboxTheme.muted; width: parent.width; height: parent.height; font-size: 14px; }
-            } }
             Centered { width: 42px; ActionSurface {
                 width: 42px; height: 42px;
-                label: I18n.i18n("sandbox.send", "Отправить сообщение");
-                enabled: root.connected && !root.sending && root.draft != "";
+                label: root.microphone-phase == 2 ? I18n.i18n("sandbox.mic.stop", "Остановить голосовой ввод")
+                    : root.microphone-phase == 1 || root.microphone-phase == 3 ? I18n.i18n("sandbox.mic.wait", "Микрофон переключается…")
+                    : I18n.i18n("sandbox.mic.start", "Начать голосовой ввод");
+                enabled: root.storage-connected && root.microphone-phase != 1 && root.microphone-phase != 3;
+                border-radius: 14px; border-width: 1px;
+                border-color: root.microphone-phase == 2 ? SandboxTheme.accent-alt : SandboxTheme.border;
+                background: root.microphone-phase == 2 ? #612b50 : root.microphone-phase == 4 ? #4d2237 : #1d1929;
+                Glyph { text: root.microphone-phase == 2 ? Fa.stop : Fa.microphone;
+                    color: parent.enabled ? SandboxTheme.icon : SandboxTheme.muted;
+                    width: parent.width; height: parent.height; font-size: root.microphone-phase == 2 ? 12px : 16px;
+                }
+                activated => { root.microphone-toggle(root.microphone-phase != 2); }
+            } }
+            if root.microphone-phase == 2: HorizontalLayout {
+                width: 22px; height: 30px; spacing: 2px; alignment: center;
+                for n in 3: Rectangle {
+                    width: 4px; height: root.activity-pulse ? (8px + n * 5px) : (22px - n * 5px);
+                    background: #ff86c1; border-radius: 2px;
+                    animate height { duration: 240ms; }
+                }
+            }
+            Centered { width: 42px; ActionSurface {
+                width: 42px; height: 42px;
+                label: root.generation-active ? I18n.i18n("sandbox.stop", "Отменить ответ") : I18n.i18n("sandbox.send", "Отправить сообщение");
+                enabled: root.active-request-id != "" || (root.connected && !root.generation-active && root.draft != "");
                 border-radius: 14px; border-width: 0px;
                 background: self.enabled ? (self.pressed ? #bc3981 : self.hovered ? #e6539e : SandboxTheme.accent-alt) : #39303f;
-                Glyph { text: Fa.send; color: parent.enabled ? white : #aaaaaf; font-size: 18px; width: parent.width; height: parent.height; }
-                activated => { root.send(root.draft); }
+                Glyph { text: root.generation-active ? Fa.stop : Fa.send;
+                    color: parent.enabled ? white : #aaaaaf;
+                    font-size: root.generation-active ? 15px : 18px;
+                    width: parent.width; height: parent.height;
+                }
+                activated => {
+                    if root.active-request-id != "" { root.cancel(root.active-request-id); }
+                    else if !root.sending { root.send(root.draft); }
+                }
             } }
+        }
+    }
+    if root.attachment-open: Rectangle {
+        height: 83px; border-radius: 10px; background: #0e101fdc;
+        border-width: 1px; border-color: SandboxTheme.border;
+        VerticalLayout {
+            padding: 8px; spacing: 6px;
+            HorizontalLayout {
+                spacing: 6px;
+                Field { text <=> root.attachment-path; horizontal-stretch: 1;
+                    placeholder: I18n.i18n("sandbox.attachment.path", "Абсолютный путь к локальному файлу");
+                    enabled: root.storage-connected && !root.sending;
+                }
+                GhostButton {
+                    text: I18n.i18n("sandbox.attachment.save", "В историю");
+                    enabled: root.storage-connected && !root.sending && root.attachment-path != "";
+                    activated => { root.attach(root.draft, root.attachment-path); }
+                }
+            }
+            Caption {
+                text: I18n.i18n("sandbox.attachment.note", "Файл сохраняется в Timeline без генерации. При следующем запросе медиа передаётся только совместимому провайдеру.");
+                color: SandboxTheme.muted; font-size: 10px;
+            }
         }
     }
     HorizontalLayout {
         padding-left: 6px; padding-right: 8px; spacing: 4px; height: 17px;
+        if root.generation-active: HorizontalLayout {
+            spacing: 6px;
+            Rectangle { width: 6px; height: 6px; border-radius: 3px; background: root.activity-pulse ? #ff8dbf : #795169; }
+            Caption { text: I18n.i18n("sandbox.mita-thinking", "Мита думает…"); color: #e2accd; font-size: 11px; }
+        }
+        if root.microphone-phase == 2: Caption { text: I18n.i18n("sandbox.mic.listening", "Слушаю микрофон…"); color: #ff9ccc; font-size: 10.6667px; }
         Rectangle { horizontal-stretch: 1; }
         Caption { text: I18n.i18n("sandbox.context-unavailable", "Контекст: —"); font-size: 10.6667px; color: SandboxTheme.muted; }
     }
@@ -100,14 +167,27 @@ component ChatComposer inherits VerticalLayout {
 
 export component SandboxChat inherits Rectangle {
     in property <[ChatRow]> messages;
+    in property <bool> has-older;
+    in property <bool> older-loading;
     in property <int> character;
     in property <bool> connected;
+    in property <bool> storage-connected;
     in property <bool> sending;
+    in property <string> active-request-id;
+    in property <int> microphone-phase;
+    in property <bool> generation-active;
     in-out property <string> draft;
+    in-out property <string> attachment-path;
     in-out property <bool> follow-tail;
     callback send(string);
+    callback attach(string, string);
     callback cancel(string);
+    callback retry(string);
+    callback microphone-toggle(bool);
+    callback hide-message(string);
+    callback copy-message(string);
     callback refresh();
+    callback load-older();
     background: #0e101ff7; border-color: SandboxTheme.border; border-width: 1px; border-radius: 20px;
     VerticalLayout {
         padding: 14px; spacing: 12px;
@@ -120,19 +200,37 @@ export component SandboxChat inherits Rectangle {
                 VerticalLayout {
                     padding-left: 6px; padding-right: 6px; padding-top: 4px; padding-bottom: 4px;
                     spacing: 4px; alignment: start;
+                    if root.has-older || root.older-loading: HorizontalLayout {
+                        padding: 4px; spacing: 4px; alignment: center;
+                        GhostButton {
+                            text: root.older-loading ? I18n.i18n("sandbox.history.loading", "Загрузка истории…") : I18n.i18n("sandbox.history.older", "Загрузить предыдущие 200 сообщений");
+                            enabled: root.has-older && !root.older-loading;
+                            activated => { root.load-older(); }
+                        }
+                    }
                     for item in root.messages: MessageRow {
                         item: item;
                         bubble-width: min(SandboxTheme.max-bubble-width, max(240px, (root.width - 98px) / 2));
                         character-name: CharacterCatalog.name(CharacterCatalog.entries[root.character]);
                         cancel(id) => { root.cancel(id); }
+                        retry(id) => { root.retry(id); }
+                        hide-message(id) => { root.hide-message(id); }
+                        copy-message(text) => { root.copy-message(text); }
+                        edit-message(id, text) => { ConversationUi.edit-target = id; ConversationUi.edit-draft = text; }
                     }
                 }
             }
         }
         ChatComposer {
-            connected: root.connected; sending: root.sending; character: root.character;
-            draft <=> root.draft;
+            connected: root.connected; storage-connected: root.storage-connected;
+            sending: root.sending; character: root.character;
+            active-request-id: root.active-request-id; microphone-phase: root.microphone-phase;
+            generation-active: root.generation-active;
+            draft <=> root.draft; attachment-path <=> root.attachment-path;
             send(text) => { root.send(text); }
+            attach(text, path) => { root.attach(text, path); }
+            cancel(id) => { root.cancel(id); }
+            microphone-toggle(enabled) => { root.microphone-toggle(enabled); }
         }
     }
 }

@@ -17,10 +17,10 @@ pub use config::{ConfigStore, LauncherConfig};
 pub use controller::{LauncherCommand, LauncherController, LauncherUpdate};
 pub use discovery::InstallSelection;
 pub use opener::{LocationOpener, SystemLocationOpener};
-pub use process::{IdentityProbe, ProcessIdentity, ProcessScan, identity_for_pid};
+pub use process::{IdentityProbe, ProcessIdentity, ProcessScan, identity_for_pid, scan_install};
 pub use session::{LaunchRequest, LauncherSession, OwnedProcessState, SessionStatus};
 
-use crate::launcher::{discovery::resolve_install, process::scan_install};
+use crate::launcher::discovery::resolve_install;
 
 pub fn run_cli(arguments: Vec<std::ffi::OsString>) -> std::io::Result<()> {
     cli::run(arguments)

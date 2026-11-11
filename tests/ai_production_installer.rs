@@ -110,7 +110,7 @@ exit 5
                 python_version: "3.12.10".into(),
                 python_timeout: Duration::from_secs(8),
             },
-            sdk_root: python_root.clone(),
+            sdk_root: root.join("AIData/sdk"),
             plugins_directory: python_root.join("plugins/builtin"),
             topology,
             timeout: Duration::from_secs(12),
@@ -419,5 +419,295 @@ async fn pinned_catalog_is_resolved_by_production_installer_and_fails_on_hash_ch
         manifest,
     };
     assert!(fixture.runtime.prepare(&[selected]).await.is_err());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn later_service_missing_assets_rejects_whole_selection_before_any_layers() {
+    let mut fixture = Fixture::new(ProcessTopology::Split).await;
+    fixture.add_plugin("first_tts", "InstallPlan()").await;
+    fixture
+        .add_plugin(
+            "second_asr",
+            "InstallPlan(assets=(AssetRequirement('weight', 'weights.bin'),))",
+        )
+        .await;
+    fixture.runtime.plugins_directory = fixture.root.join("plugins");
+    let choices = [
+        model(AiService::Tts, "first_tts"),
+        model(AiService::Asr, "second_asr"),
+    ];
+    let error = fixture.runtime.prepare(&choices).await.err().unwrap();
+    assert!(matches!(error, AiProductionError::Unready(_)), "{error}");
+    assert!(!fixture.root.join("AIData/backends").exists());
+    assert!(!fixture.root.join("AIData/overlays").exists());
+    assert!(!fixture.root.join("AIData/models").exists());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn later_service_unsupported_build_stage_rejects_without_partial_install() {
+    let mut fixture = Fixture::new(ProcessTopology::Split).await;
+    fixture.add_plugin("first_tts", "InstallPlan()").await;
+    fixture
+        .add_plugin(
+            "second_asr",
+            "InstallPlan(build_stages=(__import__('neuromita_ai_sdk').BuildStage('jit', 'runtime_jit', 'remote-api', 'linux'),))",
+        )
+        .await;
+    fixture.runtime.plugins_directory = fixture.root.join("plugins");
+    let choices = [
+        model(AiService::Tts, "first_tts"),
+        model(AiService::Asr, "second_asr"),
+    ];
+    let error = fixture.runtime.prepare(&choices).await.err().unwrap();
+    assert!(matches!(error, AiProductionError::Invalid(_)), "{error}");
+    assert!(!fixture.root.join("AIData/backends").exists());
+    assert!(!fixture.root.join("AIData/overlays").exists());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn second_service_invalid_catalog_does_not_publish_first_service() {
+    let mut fixture = Fixture::new(ProcessTopology::Split).await;
+    fixture.add_plugin("first_tts", "InstallPlan()").await;
+    fixture
+        .add_plugin(
+            "second_asr",
+            "InstallPlan(assets=(AssetRequirement('weight', 'weights.bin'),))",
+        )
+        .await;
+    fixture.runtime.plugins_directory = fixture.root.join("plugins");
+    let manifest = fixture.root.join("missing-model-source.json");
+    tokio::fs::write(&manifest, r#"{"schema_version":1,"entries":[]}"#)
+        .await
+        .unwrap();
+    let mut second = model(AiService::Asr, "second_asr");
+    second.assets = ModelAssets::Catalog {
+        revision: "v1".into(),
+        manifest,
+    };
+    let error = fixture
+        .runtime
+        .prepare(&[model(AiService::Tts, "first_tts"), second])
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(error, AiProductionError::Invalid(_)), "{error}");
+    assert!(!fixture.root.join("AIData/backends").exists());
+    assert!(!fixture.root.join("AIData/overlays").exists());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn later_service_corrupt_pinned_local_asset_rejects_before_any_layers() {
+    use neuromita::ai_runtime::assets::{AssetInput, AssetSource};
+    let mut fixture = Fixture::new(ProcessTopology::Split).await;
+    fixture.add_plugin("first_tts", "InstallPlan()").await;
+    fixture
+        .add_plugin(
+            "second_asr",
+            "InstallPlan(assets=(AssetRequirement('weight', 'weights.bin'),))",
+        )
+        .await;
+    fixture.runtime.plugins_directory = fixture.root.join("plugins");
+    let source = fixture.root.join("incorrect-weight.bin");
+    tokio::fs::write(&source, b"wrong bytes").await.unwrap();
+    let mut second = model(AiService::Asr, "second_asr");
+    second.assets = ModelAssets::Sources {
+        revision: "v1".into(),
+        inputs: vec![AssetInput {
+            role: "weight".into(),
+            relative_path: "weights.bin".into(),
+            sha256: "a".repeat(64),
+            source: AssetSource::LocalFile(source),
+        }],
+    };
+    let error = fixture
+        .runtime
+        .prepare(&[model(AiService::Tts, "first_tts"), second])
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(error, AiProductionError::Assets(_)), "{error}");
+    assert!(!fixture.root.join("AIData/backends").exists());
+    assert!(!fixture.root.join("AIData/overlays").exists());
+    assert!(!fixture.root.join("AIData/models").exists());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn later_service_unapproved_generated_hook_rejects_before_any_layers() {
+    let mut fixture = Fixture::new(ProcessTopology::Split).await;
+    fixture.add_plugin("first_tts", "InstallPlan()").await;
+    fixture
+        .add_plugin(
+            "second_asr",
+            "InstallPlan(assets=(AssetRequirement('weight', 'weights.bin'),), asset_hooks=(__import__('neuromita_ai_sdk').AssetHook('export', 'source_model'),))",
+        )
+        .await;
+    fixture.runtime.plugins_directory = fixture.root.join("plugins");
+    let mut second = model(AiService::Asr, "second_asr");
+    second.assets = ModelAssets::Generated {
+        revision: "v1".into(),
+        hook_id: "export".into(),
+        source_plugin_id: "source_model".into(),
+        source_revision: "v1".into(),
+        settings: json!({}),
+        approved_hook_id: None,
+    };
+    let error = fixture
+        .runtime
+        .prepare(&[model(AiService::Tts, "first_tts"), second])
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        matches!(
+            error,
+            AiProductionError::Generated(
+                neuromita::ai_runtime::assets::ModelGenerationError::NotApproved
+            )
+        ),
+        "{error}"
+    );
+    assert!(!fixture.root.join("AIData/backends").exists());
+    assert!(!fixture.root.join("AIData/overlays").exists());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn later_service_symlinked_asset_source_cannot_publish_earlier_backend() {
+    use neuromita::ai_runtime::assets::{AssetInput, AssetSource};
+    use std::os::unix::fs::symlink;
+
+    let mut fixture = Fixture::new(ProcessTopology::Split).await;
+    fixture.add_plugin("first_tts", "InstallPlan()").await;
+    fixture
+        .add_plugin(
+            "second_asr",
+            "InstallPlan(assets=(AssetRequirement('weight', 'weights.bin'),))",
+        )
+        .await;
+    fixture.runtime.plugins_directory = fixture.root.join("plugins");
+    let real_directory = fixture.root.join("real-weights");
+    tokio::fs::create_dir_all(&real_directory).await.unwrap();
+    tokio::fs::write(real_directory.join("weights.bin"), b"pinned data")
+        .await
+        .unwrap();
+    let linked_directory = fixture.root.join("linked-weights");
+    symlink(&real_directory, &linked_directory).unwrap();
+    let digest = ring::digest::digest(&ring::digest::SHA256, b"pinned data")
+        .as_ref()
+        .iter()
+        .map(|value| format!("{value:02x}"))
+        .collect::<String>();
+    let mut second = model(AiService::Asr, "second_asr");
+    second.assets = ModelAssets::Sources {
+        revision: "v1".into(),
+        inputs: vec![AssetInput {
+            role: "weight".into(),
+            relative_path: "weights.bin".into(),
+            sha256: digest,
+            source: AssetSource::LocalFile(linked_directory.join("weights.bin")),
+        }],
+    };
+    let error = fixture
+        .runtime
+        .prepare(&[model(AiService::Tts, "first_tts"), second])
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(error, AiProductionError::Assets(_)), "{error}");
+    assert!(!fixture.root.join("AIData/backends").exists());
+    assert!(!fixture.root.join("AIData/overlays").exists());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn changed_plugin_source_during_plan_preflight_rejects_without_layers() {
+    let mut fixture = Fixture::new(ProcessTopology::Split).await;
+    fixture.add_plugin("mutable_tts", "InstallPlan()").await;
+    fixture.runtime.plugins_directory = fixture.root.join("plugins");
+    let path = fixture.root.join("plugins/mutable_tts/plugin.py");
+    let original = tokio::fs::read_to_string(&path).await.unwrap();
+    let changed = original.replace(
+        "def install_plan(self): return replace(InstallPlan(), supported_backends=(\"remote-api\",))",
+        "def install_plan(self):\n        from pathlib import Path\n        Path(__file__).with_name('sidecar.txt').write_text('changed')\n        return replace(InstallPlan(), supported_backends=(\"remote-api\",))",
+    );
+    assert_ne!(
+        original, changed,
+        "fixture install-plan entrypoint must be present"
+    );
+    tokio::fs::write(path, changed).await.unwrap();
+    let error = fixture
+        .runtime
+        .prepare(&[model(AiService::Tts, "mutable_tts")])
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(error, AiProductionError::Source(_)), "{error}");
+    assert!(!fixture.root.join("AIData/backends").exists());
+    assert!(!fixture.root.join("AIData/overlays").exists());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn production_records_selected_models_and_completion_without_model_ready_claim() {
+    use neuromita::{
+        ai_runtime::install_operation::OperationExecution,
+        presentation::AiInstallOperationPresenter,
+    };
+    let fixture = Fixture::new(ProcessTopology::Split).await;
+    let selected = model(AiService::Asr, "mock_asr");
+    let config = fixture.runtime.prepare(&[selected]).await.unwrap();
+    assert_eq!(config.workers.len(), 1);
+    let views = AiInstallOperationPresenter::new(fixture.root.join("AIData"))
+        .list()
+        .unwrap();
+    assert_eq!(views.len(), 1);
+    let view = &views[0];
+    assert_eq!(view.execution, OperationExecution::RecordedComplete);
+    assert_eq!(view.models.len(), 1);
+    assert_eq!(view.models[0].service, AiService::Asr);
+    assert_eq!(view.models[0].plugin_id, "mock_asr");
+    assert_eq!(view.models[0].package_revision, "rev1");
+    assert_eq!(view.models[0].asset_revision, None);
+    assert!(view.needs_receipt_recheck);
+    assert!(view.stages.iter().all(|stage| {
+        stage.state == neuromita::ai_runtime::install_operation::StageState::Verified
+    }));
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn production_persists_safe_error_category_when_mock_uv_overlay_fails() {
+    use neuromita::{
+        ai_runtime::install_operation::{OperationExecution, OperationFailure},
+        presentation::AiInstallOperationPresenter,
+    };
+    let mut fixture = Fixture::new(ProcessTopology::Split).await;
+    fixture
+        .add_plugin(
+            "forced_failure",
+            "InstallPlan(packages=(__import__('neuromita_ai_sdk').PackageRequirement('examplepkg', '1.0.0'),))",
+        )
+        .await;
+    fixture.runtime.plugins_directory = fixture.root.join("plugins");
+    let error = fixture
+        .runtime
+        .prepare(&[model(AiService::Tts, "forced_failure")])
+        .await
+        .err()
+        .expect("mock uv must reject pip install");
+    assert!(matches!(error, AiProductionError::Plugin(_)), "{error}");
+    let views = AiInstallOperationPresenter::new(fixture.root.join("AIData"))
+        .list()
+        .unwrap();
+    assert_eq!(views.len(), 1);
+    assert_eq!(views[0].execution, OperationExecution::Interrupted);
+    assert_eq!(views[0].last_failure, Some(OperationFailure::Overlay));
+    assert_eq!(views[0].models[0].plugin_id, "forced_failure");
+    assert!(views[0].needs_receipt_recheck);
     fixture.close().await;
 }

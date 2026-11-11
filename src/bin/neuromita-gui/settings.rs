@@ -1,15 +1,18 @@
 use super::{
-    runtime::Command,
+    runtime::{Command, ToolOption},
     view::{
-        AppWindow, CharacterPresets, PresetItem, PresetParameterItem, PresetTemplateItem,
-        PromptSetItem, SettingsUi,
+        AppWindow, CharacterDebugItem, CharacterPresets, PresetItem, PresetParameterItem,
+        PresetTemplateItem, PromptSetItem, SettingsUi,
     },
 };
 use neuromita::{
     character::CharacterId,
     generation::{PresetConnectionEdit, PresetGenerationEdit, PresetId, PresetRecord},
+    presentation::CharacterDebugField,
     presentation::{GuiPresenter, PresetSlot, PresetsPresenter, PresetsView},
-    settings::{PersistenceState, PresetSelection, SettingsArea, SettingsSnapshot},
+    settings::{
+        PersistenceState, PresetSelection, SettingsArea, SettingsSnapshot, StructuredDisplayMode,
+    },
 };
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::{rc::Rc, sync::Arc};
@@ -63,6 +66,10 @@ pub fn execute(api: &GuiPresenter, command: Command) -> Result<(), String> {
             .update_connection(id, record)
             .map_err(|e| e.to_string())?,
         Command::DeletePreset(id) => api.presets.delete(id).map_err(|e| e.to_string())?,
+        Command::MovePreset(id, step) => api
+            .presets
+            .move_one(id, step)
+            .map_err(|error| error.to_string())?,
         Command::ActivePreset(id) => {
             api.presets
                 .require_configured(id)
@@ -106,8 +113,7 @@ pub fn execute(api: &GuiPresenter, command: Command) -> Result<(), String> {
             value.default_voice_id = current.default_voice_id;
             api.settings
                 .tts
-                .preferences
-                .set(value)
+                .save_python_preferences(value)
                 .map_err(|e| e.to_string())?;
         }
         Command::SaveCharacterVoice(character, voice_id) => {
@@ -127,12 +133,12 @@ pub fn execute(api: &GuiPresenter, command: Command) -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
         }
         Command::SelectAsrRecognizer(model_id) => {
-            let mut value = api.settings.asr.preferences.get();
-            value.recognizer_id = model_id;
+            let model = (!model_id.is_empty())
+                .then(|| neuromita::settings::SpeechModelReference::python(model_id));
             api.settings
                 .asr
-                .preferences
-                .set(value)
+                .model
+                .set(model)
                 .map_err(|e| e.to_string())?;
         }
         Command::SaveAsr(mut value, language) => {
@@ -175,6 +181,77 @@ pub fn execute(api: &GuiPresenter, command: Command) -> Result<(), String> {
             .hide_private
             .set(value)
             .map_err(|e| e.to_string())?,
+        Command::StructuredDisplay(mode) => api
+            .settings
+            .interface
+            .structured_display
+            .set(mode)
+            .map_err(|e| e.to_string())?,
+        Command::SetGuideLevel(level) => api
+            .settings
+            .onboarding
+            .guide_level
+            .set(level)
+            .map_err(|e| e.to_string())?,
+        Command::SetGuidePage(page) => api
+            .settings
+            .onboarding
+            .guide_page
+            .set(page)
+            .map_err(|e| e.to_string())?,
+        Command::SetGuideLanguage(language) => api
+            .settings
+            .interface
+            .language
+            .set(language)
+            .map_err(|e| e.to_string())?,
+        Command::SetToolOption(option, enabled) => {
+            let mut settings = api.settings.tools.state.get();
+            match option {
+                ToolOption::Enabled => settings.enabled = enabled,
+                ToolOption::Calculator => settings.calculator = enabled,
+                ToolOption::MemorySearch => settings.memory_search = enabled,
+                ToolOption::WebSearch => settings.web.search_enabled = enabled,
+                ToolOption::WebReader => settings.web.reader_enabled = enabled,
+            }
+            settings.web.enabled = settings.web.search_enabled || settings.web.reader_enabled;
+            settings.validate().map_err(|error| error.to_string())?;
+            api.settings
+                .tools
+                .state
+                .set(settings)
+                .map_err(|e| e.to_string())?;
+        }
+        Command::SetMemoryDedupEnabled(enabled) => {
+            let mut state = api.settings.memory.state.get();
+            state.model_add_dedup_enabled = enabled;
+            api.settings
+                .memory
+                .state
+                .set(state)
+                .map_err(|error| error.to_string())?;
+        }
+        Command::SetMemoryDedupThreshold(value) => {
+            let mut state = api.settings.memory.state.get();
+            state.threshold_per_mille = value;
+            api.settings
+                .memory
+                .state
+                .set(state)
+                .map_err(|error| error.to_string())?;
+        }
+        Command::SetToolDepth(value) => {
+            if !(1..=5).contains(&value) {
+                return Err("Tool chain depth must be between 1 and 5".into());
+            }
+            let mut settings = api.settings.tools.state.get();
+            settings.max_depth = value;
+            api.settings
+                .tools
+                .state
+                .set(settings)
+                .map_err(|e| e.to_string())?;
+        }
         Command::VoiceName(value) => api
             .settings
             .voice
@@ -184,6 +261,64 @@ pub fn execute(api: &GuiPresenter, command: Command) -> Result<(), String> {
         _ => return Err("Unsupported administration command".into()),
     }
     Ok(())
+}
+
+fn parse_memory_threshold(value: &str) -> Result<u16, String> {
+    let value = value.trim();
+    let (whole, fraction) = match value.split_once('.') {
+        Some((whole, fraction))
+            if !fraction.is_empty()
+                && fraction.len() <= 3
+                && fraction.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            (whole, fraction)
+        }
+        None => (value, ""),
+        _ => return Err("Memory dedup threshold must be between 0.500 and 1.000".into()),
+    };
+    let integer = match whole {
+        "0" => 0,
+        "1" => 1000,
+        _ => return Err("Memory dedup threshold must be between 0.500 and 1.000".into()),
+    };
+    let fraction = if fraction.is_empty() {
+        0
+    } else {
+        fraction.parse::<u16>().map_err(|error| error.to_string())?
+            * 10u16.pow(3 - fraction.len() as u32)
+    };
+    let parsed = integer + fraction;
+    if !(500..=1000).contains(&parsed) {
+        return Err("Memory dedup threshold must be between 0.500 and 1.000".into());
+    }
+    Ok(parsed)
+}
+
+#[cfg(test)]
+mod memory_threshold_tests {
+    use super::parse_memory_threshold;
+
+    #[test]
+    fn accepts_exact_fixed_point_thresholds() {
+        for (input, expected) in [
+            ("0.5", 500),
+            ("0.800", 800),
+            ("0.925", 925),
+            ("1", 1000),
+            ("1.000", 1000),
+        ] {
+            assert_eq!(parse_memory_threshold(input).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_or_ambiguous_thresholds() {
+        for input in [
+            "", "0.499", "1.001", "0.8009", "0.8e0", "NaN", "800", "-0.8",
+        ] {
+            assert!(parse_memory_threshold(input).is_err(), "{input:?}");
+        }
+    }
 }
 
 fn id(value: &str) -> Result<PresetId, String> {
@@ -444,6 +579,17 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
     });
     let send = dispatch.clone();
     let weak = window.as_weak();
+    settings.on_preset_move(move |value, step| {
+        if let Some(component) = weak.upgrade() {
+            let ui = component.global::<SettingsUi>();
+            match id(&value) {
+                Ok(id) => send(Command::MovePreset(id, step)),
+                Err(error) => ui.set_settings_error(error.into()),
+            }
+        }
+    });
+    let send = dispatch.clone();
+    let weak = window.as_weak();
     settings.on_preset_activate(move |value| {
         if let Some(component) = weak.upgrade() {
             let window = component.global::<SettingsUi>();
@@ -464,6 +610,12 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
     });
     let send = dispatch.clone();
     settings.on_prompt_reload(move || send(Command::RefreshPromptCatalog));
+    let send = dispatch.clone();
+    settings.on_character_debug_select(move |index| {
+        if let Some(character) = CharacterId::from_index(index) {
+            send(Command::DebugSelect(character));
+        }
+    });
     let send = dispatch.clone();
     settings.on_prompt_open_folder(move |index| {
         if let Some(character) = CharacterId::from_index(index) {
@@ -528,6 +680,63 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
         }
     });
     let send = dispatch.clone();
+    let weak = window.as_weak();
+    settings.on_structured_mode_change({
+        let send = dispatch.clone();
+        move |value| {
+            let mode = match value {
+                0 => StructuredDisplayMode::Off,
+                1 => StructuredDisplayMode::Brief,
+                2 => StructuredDisplayMode::Json,
+                _ => return,
+            };
+            send(Command::StructuredDisplay(mode));
+        }
+    });
+    settings.on_tool_option(move |name, enabled| {
+        let option = match name.as_str() {
+            "enabled" => Some(ToolOption::Enabled),
+            "calculator" => Some(ToolOption::Calculator),
+            "memory_search" => Some(ToolOption::MemorySearch),
+            "web_search" => Some(ToolOption::WebSearch),
+            "web_reader" => Some(ToolOption::WebReader),
+            _ => None,
+        };
+        if let Some(option) = option {
+            send(Command::SetToolOption(option, enabled));
+        } else if let Some(window) = weak.upgrade() {
+            window
+                .global::<SettingsUi>()
+                .set_settings_error("Unsupported tool".into());
+        }
+    });
+    let send = dispatch.clone();
+    let weak = window.as_weak();
+    settings.on_tool_depth_change(move |value| match value.parse::<u8>() {
+        Ok(depth) if (1..=5).contains(&depth) => send(Command::SetToolDepth(depth)),
+        _ => {
+            if let Some(window) = weak.upgrade() {
+                window
+                    .global::<SettingsUi>()
+                    .set_settings_error("Tool chain depth must be between 1 and 5".into());
+            }
+        }
+    });
+    let send = dispatch.clone();
+    settings.on_memory_dedup_toggle(move |enabled| send(Command::SetMemoryDedupEnabled(enabled)));
+    let send = dispatch.clone();
+    let weak = window.as_weak();
+    settings.on_memory_dedup_threshold_change(move |value| match parse_memory_threshold(&value) {
+        Ok(value) => send(Command::SetMemoryDedupThreshold(value)),
+        Err(error) => {
+            if let Some(window) = weak.upgrade() {
+                window
+                    .global::<SettingsUi>()
+                    .set_settings_error(error.into());
+            }
+        }
+    });
+    let send = dispatch.clone();
     settings.on_section_visibility(move |index, checked| {
         if let Some(area) = area_for_section(index) {
             send(Command::SectionVisibility(area, checked));
@@ -548,6 +757,26 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
     settings.on_voice_name(move |value| dispatch(Command::VoiceName(value.into())));
 }
 
+pub fn render_character_debug(
+    window: &AppWindow,
+    character: CharacterId,
+    fields: &[CharacterDebugField],
+    error: Option<&str>,
+) {
+    let settings = window.global::<SettingsUi>();
+    settings.set_character_debug_character(character.index() as i32);
+    settings.set_character_debug_error(error.unwrap_or_default().into());
+    settings.set_character_debug_values(ModelRc::new(VecModel::from(
+        fields
+            .iter()
+            .map(|field| CharacterDebugItem {
+                label: field.label.as_str().into(),
+                value: field.value.as_str().into(),
+            })
+            .collect::<Vec<_>>(),
+    )));
+}
+
 pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {
     let window = window.global::<SettingsUi>();
     let settings = &model.settings;
@@ -562,6 +791,11 @@ pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {
             .collect::<Vec<_>>(),
     )));
     window.set_hide_private(settings.values.interface.hide_private);
+    window.set_structured_mode(match settings.values.interface.structured_display {
+        StructuredDisplayMode::Off => 0,
+        StructuredDisplayMode::Brief => 1,
+        StructuredDisplayMode::Json => 2,
+    });
     window.set_settings_persistence(match settings.persistence {
         PersistenceState::Pending => 0,
         PersistenceState::Saved(_) => 1,
@@ -575,6 +809,20 @@ pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {
     window.set_settings_voice_launcher(settings.values.voice.in_launcher);
     window.set_settings_voice_game(settings.values.voice.in_game);
     window.set_settings_voice_name(settings.values.voice.voice.as_str().into());
+    window.set_memory_dedup_enabled(settings.values.memory.model_add_dedup_enabled);
+    let threshold = settings.values.memory.threshold_per_mille;
+    window
+        .set_memory_dedup_threshold(format!("{}.{:03}", threshold / 1000, threshold % 1000).into());
+    let tools = &settings.values.tools;
+    window.set_tool_enabled(tools.enabled);
+    window.set_tool_calculator(tools.calculator);
+    window.set_tool_memory_search(tools.memory_search);
+    window.set_tool_reminder_enabled(settings.values.reminders.enabled);
+    window.set_tool_web_search(tools.web.search_enabled);
+    window.set_tool_web_reader(tools.web.reader_enabled);
+    window.set_tool_search_configured(tools.web.search_endpoint.is_some());
+    window.set_tool_reader_configured(!tools.web.reader_allowed_hosts.is_empty());
+    window.set_tool_max_depth(tools.max_depth.to_string().into());
     let previous = window.get_character_presets();
     let encode = |value: PresetSelection| match value {
         PresetSelection::Active => "active".into(),
@@ -871,4 +1119,33 @@ pub(super) fn provider_templates(
             available: provider.supported,
         })
         .collect::<Vec<_>>()
+}
+
+#[cfg(test)]
+mod preset_move_gui_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    #[test]
+    fn slint_move_callback_dispatches_selected_id_and_direction() {
+        let window = AppWindow::new().expect("Slint test window");
+        let captured = Rc::new(RefCell::new(Vec::new()));
+        let events = Rc::clone(&captured);
+        bind(
+            &window,
+            Rc::new(move |command| events.borrow_mut().push(command)),
+        );
+        let settings = window.global::<SettingsUi>();
+        settings.invoke_preset_move("42".into(), -1);
+        settings.invoke_preset_move("42".into(), 1);
+        let commands = captured.borrow();
+        assert!(matches!(
+            commands.first(),
+            Some(Command::MovePreset(PresetId(42), -1))
+        ));
+        assert!(matches!(
+            commands.get(1),
+            Some(Command::MovePreset(PresetId(42), 1))
+        ));
+    }
 }

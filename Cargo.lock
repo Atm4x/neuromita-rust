@@ -3026,6 +3026,8 @@ dependencies = [
  "cpal",
  "earshot",
  "iana-time-zone",
+ "libc",
+ "regex",
  "reqwest",
  "ring",
  "rusqlite",

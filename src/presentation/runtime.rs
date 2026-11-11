@@ -62,7 +62,11 @@ impl RuntimeStatePresenter {
     /// No new process or model is created by this call.
     pub async fn refresh_status(&self) -> RuntimeSnapshot {
         if let Some(runtime) = self.live_speech.upgrade() {
-            runtime.refresh().await
+            if let Some(supervisor) = self.supervisor.upgrade() {
+                supervisor.refresh_status().await;
+            }
+            runtime.refresh().await;
+            self.snapshot()
         } else if let Some(supervisor) = self.supervisor.upgrade() {
             supervisor.refresh_status().await
         } else {
@@ -71,10 +75,23 @@ impl RuntimeStatePresenter {
     }
 
     pub fn snapshot(&self) -> RuntimeSnapshot {
-        self.updates.as_ref().map_or_else(
+        let mut snapshot = self.updates.as_ref().map_or_else(
             || self.startup_failure.clone().unwrap_or_default(),
             |updates| updates.borrow().clone(),
-        )
+        );
+        if let Some(live) = self.live_speech.upgrade() {
+            if let Some(supervisor) = self.supervisor.upgrade() {
+                snapshot.services.extend(
+                    supervisor
+                        .status_snapshot()
+                        .services
+                        .into_iter()
+                        .filter(|(service, _)| !matches!(service, AiService::Tts | AiService::Asr)),
+                );
+            }
+            snapshot.services.extend(live.snapshot().services);
+        }
+        snapshot
     }
 
     pub fn observe(&self) -> Option<watch::Receiver<RuntimeSnapshot>> {

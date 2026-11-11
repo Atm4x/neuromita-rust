@@ -7,6 +7,7 @@ import { SandboxTheme, Fa } from "theme.slint";
 import { Caption, Glyph, GhostButton, QuickAction, GearButton, Strip, ValueRow, StatusRow, Centered } from "controls.slint";
 import { ActionSurface } from "../components/controls.slint";
 import { I18n } from "../i18n.slint";
+import { SettingsUi } from "../settings/presets-state.slint";
 
 component CharacterSelector inherits Rectangle {
     in property <int> character;
@@ -272,7 +273,23 @@ component DebugTab inherits ScrollView {
             Caption { text: I18n.i18n("sandbox.debug.structured", "Structured output (дебаг)"); font-size: 12px; font-weight: 700; }
             Rectangle { height: 29px; width: 120px; background: SandboxTheme.input; border-width: 1px; border-color: SandboxTheme.border; border-radius: 8px;
                 HorizontalLayout { padding-left: 10px; padding-right: 10px;
-                    Caption { text: I18n.i18n("sandbox.debug.off", "Выкл"); }
+                    Caption {
+                        text: SettingsUi.structured-mode == 1 ? I18n.i18n("sandbox.debug.brief", "Кратко")
+                            : SettingsUi.structured-mode == 2 ? "JSON" : I18n.i18n("sandbox.debug.off", "Выкл");
+                        horizontal-stretch: 1;
+                    }
+                    Glyph { text: Fa.down; font-size: 11px; width: 14px; }
+                }
+                TouchArea { mouse-cursor: pointer; clicked => { structured-choices.show(); } }
+                structured-choices := PopupWindow {
+                    y: 31px; width: 120px; height: 104px;
+                    Rectangle { background: #161322; border-radius: 8px; border-width: 1px; border-color: SandboxTheme.border;
+                        VerticalLayout { padding: 4px; spacing: 0px;
+                            QuickAction { text: I18n.i18n("sandbox.debug.off", "Выкл"); activated => { SettingsUi.structured-mode-change(0); structured-choices.close(); } }
+                            QuickAction { text: I18n.i18n("sandbox.debug.brief", "Кратко"); activated => { SettingsUi.structured-mode-change(1); structured-choices.close(); } }
+                            QuickAction { text: "JSON"; activated => { SettingsUi.structured-mode-change(2); structured-choices.close(); } }
+                        }
+                    }
                 }
             }
             CheckRow { title: I18n.i18n("sandbox.debug.expanded", "Развёрнуто по умолчанию"); }

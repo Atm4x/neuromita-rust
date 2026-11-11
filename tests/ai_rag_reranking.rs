@@ -5,7 +5,10 @@ use neuromita::{
     knowledge::{
         embedding::EmbeddingError,
         reranking::{RerankFuture, RerankPolicy, RerankProvider, rerank_prefix},
-        retrieval_fusion::{FusedHit, RetrievalKey, RetrievalSource},
+        retrieval_fusion::{
+            FusedHit, FusionConfig, FusionMode, RetrievalBucket, RetrievalHit, RetrievalKey,
+            RetrievalMethod, RetrievalSource, fuse,
+        },
     },
 };
 
@@ -29,6 +32,80 @@ fn hit(id: &str, score: f64) -> FusedHit {
         evidence: vec![],
         metadata: BTreeMap::new(),
     }
+}
+
+#[tokio::test]
+async fn reranker_can_promote_a_different_source_without_losing_method_provenance() {
+    let make = |source, content: &str| RetrievalHit {
+        key: RetrievalKey {
+            character: CharacterId::Crazy,
+            source,
+            id: "same-id".into(),
+        },
+        content: content.into(),
+        raw_score: Some(1.0),
+        metadata: BTreeMap::new(),
+    };
+    let buckets = [
+        RetrievalBucket {
+            method: RetrievalMethod::Keyword,
+            hits: vec![make(RetrievalSource::Memory, "canonical tea fact")],
+        },
+        RetrievalBucket {
+            method: RetrievalMethod::Keyword,
+            hits: vec![make(RetrievalSource::History, "archived tea message")],
+        },
+    ];
+    let selected = fuse(
+        CharacterId::Crazy,
+        &buckets,
+        FusionConfig {
+            mode: FusionMode::Rrf { k: 60 },
+            limit: 2,
+            minimum_graph: 0,
+        },
+    )
+    .unwrap();
+    assert_eq!(selected[0].key.source, RetrievalSource::Memory);
+    assert_eq!(selected[1].key.source, RetrievalSource::History);
+    assert_eq!(selected[0].key.id, selected[1].key.id);
+
+    let mut reranked = selected.clone();
+    rerank_prefix(
+        &FixedScores(Ok(vec![0.1, 0.9])),
+        "tea",
+        &mut reranked,
+        RerankPolicy {
+            alpha: 1.0,
+            limit: 2,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(reranked[0].key.source, RetrievalSource::History);
+    assert_eq!(reranked[1].key.source, RetrievalSource::Memory);
+    assert!(
+        reranked.iter().all(
+            |hit| hit.evidence.len() == 1 && hit.evidence[0].method == RetrievalMethod::Keyword
+        )
+    );
+    assert_eq!(reranked[0].content, "archived tea message");
+
+    let mut failure = selected.clone();
+    assert!(
+        rerank_prefix(
+            &FixedScores(Err(EmbeddingError::Transport("unavailable".into()))),
+            "tea",
+            &mut failure,
+            RerankPolicy {
+                alpha: 1.0,
+                limit: 2,
+            },
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(failure, selected);
 }
 
 #[tokio::test]
@@ -164,6 +241,7 @@ async fn reranker_reorders_authoritative_memory_selection_after_vector_fusion() 
     let records = [(1, "tea"), (2, "art")]
         .into_iter()
         .map(|(id, content)| MemoryRecord {
+            entities: Vec::new(),
             id: MemoryId(Uuid::from_u128(id)),
             priority: MemoryPriority::Normal,
             content: content.into(),

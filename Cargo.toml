@@ -10,6 +10,10 @@ name = "neuromita-gui"
 path = "src/bin/neuromita-gui/main.rs"
 required-features = ["gui"]
 
+[[test]]
+name = "updater_native_apply_e2e"
+harness = false
+
 [[example]]
 name = "gui_snapshot"
 required-features = ["gui"]
@@ -24,8 +28,10 @@ base64 = "0.23"
 chrono = { version = "0.4.45", default-features = false, features = ["std", "serde"] }
 chrono-tz = { version = "0.10.4", default-features = false, features = ["std"] }
 iana-time-zone = "0.1.65"
+libc = "0.2"
 rusqlite = { version = "0.41", optional = true, default-features = false, features = ["bundled", "libsqlite3-sys"] }
 ring = "0.17.14"
+regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "http2", "system-proxy"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
@@ -44,4 +50,4 @@ slint-build = { version = "=1.18.1", optional = true }
 serde_json = "1"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading", "Win32_System_Registry", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_System_JobObjects", "Win32_System_RemoteDesktop", "Win32_Security"] }

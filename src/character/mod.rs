@@ -3,8 +3,10 @@ mod lexical_dedup;
 pub mod memory;
 pub(crate) mod memory_access;
 mod model;
+mod portable_access;
 pub(crate) mod projection;
 pub mod state;
+mod variables_access;
 
 pub use crate::identity::CharacterId;
 pub(crate) use handler::AcceptanceContext;
@@ -17,3 +19,5 @@ pub use model::{
 };
 
 pub use memory_access::{CharacterMemorySnapshot, MemoryEditResult};
+pub use portable_access::{CharacterPortableResult, CharacterPortableSnapshot};
+pub use variables_access::CharacterVariablesSnapshot;

@@ -239,3 +239,7 @@ second authoritative message store was introduced.
 - [x] Unity chooses the responder and sends each turn explicitly via TCP `ServerLifecycle` (`publish_message`, `reply`, `react`, `initiate`). Rust never auto-initiates further turns.
 - [x] Generated replies use `ReplyTo` links; reactions use `ReactTo`; no transfer of knowledge follows either link.
 - [ ] Validate and update Unity C# transport and dynamic scene witness mapping against this Rust contract; Python structured-output provider parity remains separate.
+
+## Knowledge revisions & Regenerate correction (2026-11-09)
+
+See [timeline-knowledge-revision-and-regenerate](../../docs/05-architecture/timeline-knowledge-revision-and-regenerate.md). The native History Reset remains `CharacterContextReset`. `CharacterKnowledgeForgotten` / `CharacterKnowledgeRevealed` explicitly change effective knowledge at their own revision; old `MitaView(at)` remains unchanged. A story or `CausedBy` link never authorizes disclosure. B75 introduces an owner-only read-only plan for same-branch Regenerate; legacy branch-based admission must not be exposed as the character-scoped replacement path before atomic migration of receipt, hide/forget, provider queue and cancellation.

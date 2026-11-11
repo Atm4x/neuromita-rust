@@ -1,0 +1,1525 @@
+use std::{
+    fs,
+    path::PathBuf,
+    process::{Command, Output},
+};
+
+use neuromita::{
+    character::CharacterId,
+    knowledge::document_index::{self, DocumentError, SearchStatus},
+};
+use serde_json::Value;
+use uuid::Uuid;
+
+struct Fixture {
+    root: PathBuf,
+    documents: PathBuf,
+    index: PathBuf,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let root = std::env::temp_dir().join(format!("neuromita-document-r6-{}", Uuid::new_v4()));
+        let documents = root.join("kind-documents");
+        fs::create_dir_all(&documents).unwrap();
+        fs::write(
+            documents.join("notes.md"),
+            "NeuroMita watches the garden of sakura trees.\nThe archive is in Moscow.",
+        )
+        .unwrap();
+        fs::write(
+            documents.join("details.txt"),
+            "The garden has seven sakura trees.",
+        )
+        .unwrap();
+        fs::write(documents.join("ignored.bin"), "not in scoped text corpus").unwrap();
+        let index = root.join("documents-index.json");
+        Self {
+            root,
+            documents,
+            index,
+        }
+    }
+    fn call(&self, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_neuromita"))
+            .arg("documents")
+            .args(args)
+            .env_remove("GEMINI_API_KEY")
+            .output()
+            .unwrap()
+    }
+    fn run(&self, mode: &str, extra: &[&str]) -> Output {
+        let mut args = vec![
+            mode,
+            "--root",
+            self.documents.to_str().unwrap(),
+            "--character",
+            "Kind",
+            "--index",
+            self.index.to_str().unwrap(),
+        ];
+        args.extend_from_slice(extra);
+        self.call(&args)
+    }
+    fn build(&self) {
+        let r = self.run("build", &[]);
+        assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    }
+    fn query(&self, text: &str) -> Output {
+        self.run("query", &["--text", text])
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+#[test]
+fn indexes_queries_and_returns_character_scoped_document_provenance() {
+    let f = Fixture::new();
+    f.build();
+    let verify = f.run("verify", &[]);
+    assert!(
+        verify.status.success(),
+        "{}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    let output = f.query("sakura garden");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["status"], "selected");
+    assert_eq!(json["documents"], 2);
+    assert_eq!(json["hits"].as_array().unwrap().len(), 2);
+    assert_eq!(json["hits"][0]["source"], "Document");
+    assert_eq!(json["hits"][0]["metadata"]["source_path"], "details.txt");
+    assert_eq!(json["hits"][0]["metadata"]["chunk_index"], "0");
+    assert_eq!(
+        json["hits"][0]["metadata"]["source_sha256"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+    let without_matches = f.query("elephant cobalt");
+    assert!(without_matches.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&without_matches.stdout).unwrap()["status"],
+        "no_matches"
+    );
+}
+
+#[test]
+fn changed_or_new_source_rejects_stale_index_until_explicit_rebuild_into_new_path() {
+    let f = Fixture::new();
+    f.build();
+    fs::write(f.documents.join("details.txt"), "Completely changed text").unwrap();
+    assert!(!f.query("garden").status.success());
+    assert!(!f.run("verify", &[]).status.success());
+    assert!(!f.run("build", &[]).status.success());
+    let next = f.root.join("reindexed.json");
+    let r = f.call(&[
+        "build",
+        "--root",
+        f.documents.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--index",
+        next.to_str().unwrap(),
+    ]);
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    fs::write(f.documents.join("new.md"), "a new source appeared").unwrap();
+    assert!(!f.query("garden").status.success());
+}
+
+#[test]
+fn corrupt_or_modified_derived_index_is_rejected_without_source_write() {
+    let f = Fixture::new();
+    f.build();
+    let before = fs::read(f.documents.join("notes.md")).unwrap();
+    let mut index: Value = serde_json::from_slice(&fs::read(&f.index).unwrap()).unwrap();
+    index["documents"][0]["chunks"][0] = "forged text".into();
+    fs::write(&f.index, serde_json::to_vec_pretty(&index).unwrap()).unwrap();
+    assert!(!f.query("forged").status.success());
+    assert_eq!(fs::read(f.documents.join("notes.md")).unwrap(), before);
+    fs::write(&f.index, "{ malformed").unwrap();
+    assert!(!f.run("verify", &[]).status.success());
+}
+
+#[test]
+fn cross_character_scope_and_limits_refuse_queries() {
+    let f = Fixture::new();
+    f.build();
+    assert!(
+        !f.call(&[
+            "query",
+            "--root",
+            f.documents.to_str().unwrap(),
+            "--character",
+            "Crazy",
+            "--index",
+            f.index.to_str().unwrap(),
+            "--text",
+            "garden"
+        ])
+        .status
+        .success()
+    );
+    assert!(
+        !f.run("query", &["--text", "garden", "--limit", "21"])
+            .status
+            .success()
+    );
+    assert!(
+        !f.run("query", &["--text", "x", "--limit", "5"])
+            .status
+            .success()
+    );
+    assert!(
+        !f.run("query", &["--text", "garden", "--limit", "0"])
+            .status
+            .success()
+    );
+}
+
+#[test]
+fn empty_corpus_and_explicit_scope_are_honest() {
+    let f = Fixture::new();
+    fs::remove_file(f.documents.join("details.txt")).unwrap();
+    fs::remove_file(f.documents.join("notes.md")).unwrap();
+    f.build();
+    let result = f.query("garden");
+    assert!(result.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&result.stdout).unwrap()["status"],
+        "empty_corpus"
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&result.stdout).unwrap()["documents"],
+        0
+    );
+    assert!(!f.run("build", &[]).status.success());
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_documents_and_indexes_refuse_without_clobbering() {
+    use std::os::unix::fs::symlink;
+    let f = Fixture::new();
+    f.build();
+    symlink(f.documents.join("notes.md"), f.documents.join("linked.md")).unwrap();
+    assert!(!f.run("verify", &[]).status.success());
+    assert!(!f.query("garden").status.success());
+    assert!(!f.run("build", &[]).status.success());
+    fs::remove_file(f.documents.join("linked.md")).unwrap();
+    let other = f.root.join("linked-index.json");
+    symlink(&f.index, &other).unwrap();
+    let r = f.call(&[
+        "query",
+        "--root",
+        f.documents.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--index",
+        other.to_str().unwrap(),
+        "--text",
+        "garden",
+    ]);
+    assert!(!r.status.success());
+}
+
+#[test]
+fn retrieval_uses_existing_fusion_and_rejects_stale_index_in_core_api() {
+    let f = Fixture::new();
+    f.build();
+    let result =
+        document_index::search_verified(&f.documents, CharacterId::Kind, &f.index, "garden", 1)
+            .unwrap();
+    assert_eq!(result.status, SearchStatus::Selected);
+    assert_eq!(result.hits.len(), 1);
+    assert_eq!(
+        result.hits[0].key.source,
+        neuromita::knowledge::retrieval_fusion::RetrievalSource::Document
+    );
+    assert_eq!(result.hits[0].key.character, CharacterId::Kind);
+    assert!(matches!(
+        document_index::search_verified(&f.documents, CharacterId::Crazy, &f.index, "garden", 1),
+        Err(DocumentError::WrongScope)
+    ));
+}
+
+#[test]
+fn invalid_utf8_and_oversized_text_are_not_silently_indexed() {
+    let f = Fixture::new();
+    fs::write(f.documents.join("broken.md"), [0xff, 0xfe, 0xfd]).unwrap();
+    assert!(!f.run("build", &[]).status.success());
+    fs::remove_file(f.documents.join("broken.md")).unwrap();
+    fs::write(f.documents.join("huge.txt"), vec![b'a'; 128 * 1024 + 1]).unwrap();
+    assert!(!f.run("build", &[]).status.success());
+    assert!(!f.index.exists());
+}
+
+#[test]
+fn unicode_documents_are_chunked_deterministically_and_keep_stable_keys() {
+    let f = Fixture::new();
+    fs::write(
+        f.documents.join("notes.md"),
+        format!("{} сакура эндшпиль", "земля ".repeat(170)),
+    )
+    .unwrap();
+    f.build();
+    let actual = document_index::load_verified(&f.documents, CharacterId::Kind, &f.index).unwrap();
+    let notes = actual
+        .documents
+        .iter()
+        .find(|d| d.path == "notes.md")
+        .unwrap();
+    assert!(notes.chunks.len() >= 2);
+    assert!(notes.chunks.iter().all(|s| s.chars().count() <= 800));
+    let first = f.query("сакура эндшпиль");
+    let second = f.query("сакура эндшпиль");
+    assert!(first.status.success());
+    assert_eq!(first.stdout, second.stdout);
+    let hits: Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert!(
+        hits["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["id"] == "notes.md#1")
+    );
+}
+
+#[test]
+fn competing_builds_never_overwrite_a_published_index() {
+    let f = Fixture::new();
+    let arguments = [
+        "build",
+        "--root",
+        f.documents.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--index",
+        f.index.to_str().unwrap(),
+    ];
+    let (a, b) = std::thread::scope(|scope| {
+        let a = scope.spawn(|| f.call(&arguments));
+        let b = scope.spawn(|| f.call(&arguments));
+        (a.join().unwrap(), b.join().unwrap())
+    });
+    assert_ne!(a.status.success(), b.status.success());
+    assert!(f.run("verify", &[]).status.success());
+}
+
+#[test]
+fn reindex_prepares_immutable_distinct_revisions_without_activation() {
+    let f = Fixture::new();
+    let revisions = f.root.join("revisions");
+    fs::create_dir(&revisions).unwrap();
+    let prepare = || {
+        let result = f.call(&[
+            "reindex",
+            "--root",
+            f.documents.to_str().unwrap(),
+            "--character",
+            "Kind",
+            "--revisions-dir",
+            revisions.to_str().unwrap(),
+        ]);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        serde_json::from_slice::<Value>(&result.stdout).unwrap()
+    };
+    let first = prepare();
+    let original = PathBuf::from(first["index"].as_str().unwrap());
+    let previous_bytes = fs::read(&original).unwrap();
+    let second = prepare();
+    let subsequent = PathBuf::from(second["index"].as_str().unwrap());
+    assert_ne!(original, subsequent);
+    assert_ne!(first["index"], f.index.to_string_lossy().as_ref());
+    assert_eq!(first["fingerprint"], second["fingerprint"]);
+    assert_eq!(fs::read(&original).unwrap(), previous_bytes);
+    assert_eq!(fs::read_dir(&revisions).unwrap().count(), 2);
+
+    fs::write(
+        f.documents.join("notes.md"),
+        "Brand new violet orchard revision.",
+    )
+    .unwrap();
+    let third = prepare();
+    assert_ne!(third["fingerprint"], first["fingerprint"]);
+    assert_eq!(fs::read(&original).unwrap(), previous_bytes);
+    let old = f.call(&[
+        "verify",
+        "--root",
+        f.documents.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--index",
+        original.to_str().unwrap(),
+    ]);
+    assert!(!old.status.success());
+    let new = f.call(&[
+        "verify",
+        "--root",
+        f.documents.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--index",
+        third["index"].as_str().unwrap(),
+    ]);
+    assert!(
+        new.status.success(),
+        "{}",
+        String::from_utf8_lossy(&new.stderr)
+    );
+}
+
+#[test]
+fn reindex_rejects_revision_directory_inside_documents_and_invalid_character() {
+    let f = Fixture::new();
+    let inside = f.documents.join("index-revisions");
+    fs::create_dir(&inside).unwrap();
+    let invalid = f.call(&[
+        "reindex",
+        "--root",
+        f.documents.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--revisions-dir",
+        inside.to_str().unwrap(),
+    ]);
+    assert!(!invalid.status.success());
+    assert_eq!(fs::read_dir(&inside).unwrap().count(), 0);
+    let wrong = f.call(&[
+        "reindex",
+        "--root",
+        f.documents.to_str().unwrap(),
+        "--character",
+        "Unknown",
+        "--revisions-dir",
+        f.root.to_str().unwrap(),
+    ]);
+    assert!(!wrong.status.success());
+}
+
+#[test]
+fn explicit_import_updates_canonical_corpus_but_never_activates_stale_index() {
+    let f = Fixture::new();
+    f.build();
+    let source = f.root.join("external.txt");
+    fs::write(&source, "The migrating cranes return in autumn.").unwrap();
+    let output = f.call(&[
+        "import",
+        "--root",
+        f.documents.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--source",
+        source.to_str().unwrap(),
+        "--name",
+        "season.md",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(receipt["character"], "Kind");
+    assert_eq!(receipt["name"], "season.md");
+    assert_eq!(receipt["requires_reindex"], true);
+    assert_eq!(receipt["source_sha256"].as_str().unwrap().len(), 64);
+    assert_eq!(
+        fs::read(f.documents.join("season.md")).unwrap(),
+        fs::read(&source).unwrap()
+    );
+    assert!(!f.run("verify", &[]).status.success());
+    assert!(!f.query("cranes").status.success());
+    let revisions = f.root.join("revisions");
+    fs::create_dir(&revisions).unwrap();
+    let next = f.call(&[
+        "reindex",
+        "--root",
+        f.documents.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--revisions-dir",
+        revisions.to_str().unwrap(),
+    ]);
+    assert!(
+        next.status.success(),
+        "{}",
+        String::from_utf8_lossy(&next.stderr)
+    );
+    let next_receipt: Value = serde_json::from_slice(&next.stdout).unwrap();
+    let new_index = next_receipt["index"].as_str().unwrap();
+    let query = f.call(&[
+        "query",
+        "--root",
+        f.documents.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--index",
+        new_index,
+        "--text",
+        "migrating cranes",
+    ]);
+    assert!(
+        query.status.success(),
+        "{}",
+        String::from_utf8_lossy(&query.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&query.stdout).unwrap()["status"],
+        "selected"
+    );
+}
+
+#[test]
+fn import_rejects_unsafe_and_oversized_source_without_mutating_corpus() {
+    let f = Fixture::new();
+    let original = fs::read(f.documents.join("notes.md")).unwrap();
+    let source = f.root.join("incoming.md");
+    fs::write(&source, "valid text content").unwrap();
+    for name in [
+        "../escape.md",
+        ".private.md",
+        "bad.txt/another",
+        "bad.pdf",
+        " notes.md",
+        "notes.md",
+    ] {
+        let output = f.call(&[
+            "import",
+            "--root",
+            f.documents.to_str().unwrap(),
+            "--character",
+            "Kind",
+            "--source",
+            source.to_str().unwrap(),
+            "--name",
+            name,
+        ]);
+        assert!(!output.status.success(), "{name:?}");
+    }
+    assert_eq!(fs::read(f.documents.join("notes.md")).unwrap(), original);
+    assert!(!f.documents.join("escape.md").exists());
+    fs::write(&source, vec![b'a'; 128 * 1024 + 1]).unwrap();
+    assert!(
+        !f.call(&[
+            "import",
+            "--root",
+            f.documents.to_str().unwrap(),
+            "--character",
+            "Kind",
+            "--source",
+            source.to_str().unwrap(),
+            "--name",
+            "large.txt"
+        ])
+        .status
+        .success()
+    );
+    fs::write(&source, [0xff, 0xfe, 0x00]).unwrap();
+    assert!(
+        !f.call(&[
+            "import",
+            "--root",
+            f.documents.to_str().unwrap(),
+            "--character",
+            "Kind",
+            "--source",
+            source.to_str().unwrap(),
+            "--name",
+            "invalid.txt"
+        ])
+        .status
+        .success()
+    );
+    assert!(fs::read_dir(&f.documents).unwrap().all(|e| {
+        !e.unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".neuromita-document-import-")
+    }));
+    assert!(!f.documents.join("large.txt").exists());
+    assert!(!f.documents.join("invalid.txt").exists());
+}
+
+#[test]
+fn racing_importers_never_replace_canonical_document() {
+    let f = Fixture::new();
+    let a = f.root.join("a.txt");
+    let b = f.root.join("b.txt");
+    fs::write(&a, "first canonical choice").unwrap();
+    fs::write(&b, "second canonical choice").unwrap();
+    let exe = env!("CARGO_BIN_EXE_neuromita").to_string();
+    let root = f.documents.to_string_lossy().into_owned();
+    let a = a.to_string_lossy().into_owned();
+    let b = b.to_string_lossy().into_owned();
+    let handles = [a, b].map(|source| {
+        let root = root.clone();
+        let exe = exe.clone();
+        std::thread::spawn(move || {
+            Command::new(exe)
+                .args([
+                    "documents",
+                    "import",
+                    "--root",
+                    &root,
+                    "--character",
+                    "Kind",
+                    "--source",
+                    &source,
+                    "--name",
+                    "race.md",
+                ])
+                .output()
+                .unwrap()
+        })
+    });
+    let output = handles.map(|handle| handle.join().unwrap());
+    assert_eq!(output.iter().filter(|o| o.status.success()).count(), 1);
+    let actual = fs::read_to_string(f.documents.join("race.md")).unwrap();
+    assert!(actual == "first canonical choice" || actual == "second canonical choice");
+    assert!(fs::read_dir(&f.documents).unwrap().all(|e| {
+        !e.unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".neuromita-document-import-")
+    }));
+}
+
+#[cfg(unix)]
+#[test]
+fn import_rejects_symlink_inputs_and_existing_symlink_targets() {
+    use std::os::unix::fs::symlink;
+    let f = Fixture::new();
+    let source = f.root.join("original.md");
+    let link = f.root.join("linked.md");
+    fs::write(&source, "source owner test").unwrap();
+    symlink(&source, &link).unwrap();
+    let call = |input: &str, name: &str| {
+        f.call(&[
+            "import",
+            "--root",
+            f.documents.to_str().unwrap(),
+            "--character",
+            "Kind",
+            "--source",
+            input,
+            "--name",
+            name,
+        ])
+    };
+    assert!(!call(link.to_str().unwrap(), "linked.md").status.success());
+    let target = f.documents.join("already.md");
+    symlink(&source, &target).unwrap();
+    assert!(
+        !call(source.to_str().unwrap(), "already.md")
+            .status
+            .success()
+    );
+    assert_eq!(fs::read_to_string(&source).unwrap(), "source owner test");
+}
+
+#[test]
+fn versioned_fork_replaces_only_in_new_root_and_keeps_old_index_active() {
+    let f = Fixture::new();
+    fs::remove_file(f.documents.join("ignored.bin")).unwrap();
+    f.build();
+    let before = fs::read(f.documents.join("notes.md")).unwrap();
+    let expected = document_index::inspect_source(&f.documents, CharacterId::Kind).unwrap();
+    let digest = expected
+        .documents
+        .iter()
+        .find(|x| x.path == "notes.md")
+        .unwrap()
+        .source_sha256
+        .clone();
+    let source = f.root.join("new-notes.md");
+    fs::write(
+        &source,
+        "Revised meteor observations belong only to this version.",
+    )
+    .unwrap();
+    let output = f.root.join("kind-documents-v2");
+    let result = f.call(&[
+        "fork-replace",
+        "--root",
+        f.documents.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--name",
+        "notes.md",
+        "--expected-sha256",
+        &digest,
+        "--source",
+        source.to_str().unwrap(),
+        "--output",
+        output.to_str().unwrap(),
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let receipt: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(receipt["previous_sha256"], digest);
+    assert_eq!(receipt["requires_reindex"], true);
+    assert_eq!(receipt["output_root"], output.to_str().unwrap());
+    assert_eq!(fs::read(f.documents.join("notes.md")).unwrap(), before);
+    assert!(f.run("verify", &[]).status.success());
+    assert!(f.query("sakura").status.success());
+    assert_eq!(
+        fs::read_to_string(output.join("notes.md")).unwrap(),
+        fs::read_to_string(&source).unwrap()
+    );
+    assert_eq!(
+        fs::read(output.join("details.txt")).unwrap(),
+        fs::read(f.documents.join("details.txt")).unwrap()
+    );
+    let new_index = f.root.join("index-v2.json");
+    let built = f.call(&[
+        "build",
+        "--root",
+        output.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--index",
+        new_index.to_str().unwrap(),
+    ]);
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let queried = f.call(&[
+        "query",
+        "--root",
+        output.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--index",
+        new_index.to_str().unwrap(),
+        "--text",
+        "meteor",
+    ]);
+    assert!(queried.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&queried.stdout).unwrap()["status"],
+        "selected"
+    );
+    assert!(
+        !f.call(&[
+            "verify",
+            "--root",
+            output.to_str().unwrap(),
+            "--character",
+            "Kind",
+            "--index",
+            f.index.to_str().unwrap(),
+        ])
+        .status
+        .success()
+    );
+}
+
+#[test]
+fn versioned_fork_rejects_wrong_expected_hash_and_existing_output_without_touching_old() {
+    let f = Fixture::new();
+    fs::remove_file(f.documents.join("ignored.bin")).unwrap();
+    let source = f.root.join("new-notes.md");
+    fs::write(&source, "New immutable source").unwrap();
+    let expected = document_index::inspect_source(&f.documents, CharacterId::Kind).unwrap();
+    let digest = expected
+        .documents
+        .iter()
+        .find(|x| x.path == "notes.md")
+        .unwrap()
+        .source_sha256
+        .clone();
+    let old = fs::read(f.documents.join("notes.md")).unwrap();
+    let output = f.root.join("version2");
+    let call = |sha: &str| {
+        f.call(&[
+            "fork-replace",
+            "--root",
+            f.documents.to_str().unwrap(),
+            "--character",
+            "Kind",
+            "--name",
+            "notes.md",
+            "--expected-sha256",
+            sha,
+            "--source",
+            source.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+        ])
+    };
+    assert!(!call(&"0".repeat(64)).status.success());
+    assert!(!output.exists());
+    assert!(call(&digest).status.success());
+    assert!(!call(&digest).status.success());
+    assert_eq!(fs::read(f.documents.join("notes.md")).unwrap(), old);
+    assert_eq!(
+        fs::read_to_string(&source).unwrap(),
+        fs::read_to_string(output.join("notes.md")).unwrap()
+    );
+    assert!(fs::read_dir(&f.root).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".neuromita-document-fork-")
+    }));
+}
+
+#[test]
+fn versioned_fork_rejects_unowned_files_and_unsafe_replacement() {
+    let f = Fixture::new();
+    let expected = document_index::inspect_source(&f.documents, CharacterId::Kind).unwrap();
+    let digest = expected
+        .documents
+        .iter()
+        .find(|x| x.path == "notes.md")
+        .unwrap()
+        .source_sha256
+        .clone();
+    let source = f.root.join("new-notes.md");
+    fs::write(&source, "new").unwrap();
+    let out = f.root.join("version2");
+    let call = |source: &std::path::Path| {
+        f.call(&[
+            "fork-replace",
+            "--root",
+            f.documents.to_str().unwrap(),
+            "--character",
+            "Kind",
+            "--name",
+            "notes.md",
+            "--expected-sha256",
+            &digest,
+            "--source",
+            source.to_str().unwrap(),
+            "--output",
+            out.to_str().unwrap(),
+        ])
+    };
+    assert!(!call(&source).status.success());
+    assert!(!out.exists());
+    fs::remove_file(f.documents.join("ignored.bin")).unwrap();
+    assert!(!call(&f.documents.join("notes.md")).status.success());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let link = f.root.join("link.md");
+        symlink(&source, &link).unwrap();
+        assert!(!call(&link).status.success());
+    }
+    assert!(!out.exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn concurrent_fork_writers_cannot_overwrite_each_others_output() {
+    let f = Fixture::new();
+    fs::remove_file(f.documents.join("ignored.bin")).unwrap();
+    let snapshot = document_index::inspect_source(&f.documents, CharacterId::Kind).unwrap();
+    let digest = snapshot
+        .documents
+        .iter()
+        .find(|x| x.path == "notes.md")
+        .unwrap()
+        .source_sha256
+        .clone();
+    let root = f.documents.to_string_lossy().to_string();
+    let output = f.root.join("version2").to_string_lossy().to_string();
+    let source = f.root.join("revised.txt");
+    fs::write(&source, "Concurrent version is consistent").unwrap();
+    let input = source.to_string_lossy().to_string();
+    let handles = (0..2)
+        .map(|_| {
+            let (root, output, input, digest) =
+                (root.clone(), output.clone(), input.clone(), digest.clone());
+            std::thread::spawn(move || {
+                Command::new(env!("CARGO_BIN_EXE_neuromita"))
+                    .args([
+                        "documents",
+                        "fork-replace",
+                        "--root",
+                        &root,
+                        "--character",
+                        "Kind",
+                        "--name",
+                        "notes.md",
+                        "--expected-sha256",
+                        &digest,
+                        "--source",
+                        &input,
+                        "--output",
+                        &output,
+                    ])
+                    .output()
+                    .unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+    let results = handles
+        .into_iter()
+        .map(|h| h.join().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(results.iter().filter(|r| r.status.success()).count(), 1);
+    assert_eq!(
+        fs::read_to_string(f.root.join("version2/notes.md")).unwrap(),
+        "Concurrent version is consistent"
+    );
+    assert!(fs::read_dir(&f.root).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".neuromita-document-fork-")
+    }));
+}
+
+#[test]
+fn versioned_remove_keeps_original_index_and_produces_separate_verified_corpus() {
+    let f = Fixture::new();
+    fs::remove_file(f.documents.join("ignored.bin")).unwrap();
+    f.build();
+    let before = fs::read(f.documents.join("notes.md")).unwrap();
+    let original = document_index::inspect_source(&f.documents, CharacterId::Kind).unwrap();
+    let digest = original
+        .documents
+        .iter()
+        .find(|d| d.path == "notes.md")
+        .unwrap()
+        .source_sha256
+        .clone();
+    let output = f.root.join("version-without-notes");
+    let result = f.call(&[
+        "fork-remove",
+        "--root",
+        f.documents.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--name",
+        "notes.md",
+        "--expected-sha256",
+        &digest,
+        "--output",
+        output.to_str().unwrap(),
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let receipt: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(receipt["removed_name"], "notes.md");
+    assert_eq!(receipt["previous_sha256"], digest);
+    assert_eq!(receipt["remaining_documents"], 1);
+    assert_eq!(receipt["requires_reindex"], true);
+    assert!(!output.join("notes.md").exists());
+    assert_eq!(
+        fs::read(output.join("details.txt")).unwrap(),
+        fs::read(f.documents.join("details.txt")).unwrap()
+    );
+    assert_eq!(fs::read(f.documents.join("notes.md")).unwrap(), before);
+    assert!(f.run("verify", &[]).status.success());
+    assert!(f.query("Moscow").status.success());
+    let index = f.root.join("removed-index.json");
+    let built = f.call(&[
+        "build",
+        "--root",
+        output.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--index",
+        index.to_str().unwrap(),
+    ]);
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let q = f.call(&[
+        "query",
+        "--root",
+        output.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--index",
+        index.to_str().unwrap(),
+        "--text",
+        "Moscow",
+    ]);
+    assert!(q.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&q.stdout).unwrap()["status"],
+        "no_matches"
+    );
+    assert!(
+        !f.call(&[
+            "verify",
+            "--root",
+            output.to_str().unwrap(),
+            "--character",
+            "Kind",
+            "--index",
+            f.index.to_str().unwrap()
+        ])
+        .status
+        .success()
+    );
+}
+
+#[test]
+fn versioned_remove_rejects_wrong_sha_unknown_and_existing_output() {
+    let f = Fixture::new();
+    fs::remove_file(f.documents.join("ignored.bin")).unwrap();
+    let snapshot = document_index::inspect_source(&f.documents, CharacterId::Kind).unwrap();
+    let digest = snapshot
+        .documents
+        .iter()
+        .find(|d| d.path == "notes.md")
+        .unwrap()
+        .source_sha256
+        .clone();
+    let old = fs::read(f.documents.join("notes.md")).unwrap();
+    let output = f.root.join("removed-version");
+    let call = |name: &str, sha: &str| {
+        f.call(&[
+            "fork-remove",
+            "--root",
+            f.documents.to_str().unwrap(),
+            "--character",
+            "Kind",
+            "--name",
+            name,
+            "--expected-sha256",
+            sha,
+            "--output",
+            output.to_str().unwrap(),
+        ])
+    };
+    assert!(!call("notes.md", &"0".repeat(64)).status.success());
+    assert!(!call("missing.md", &digest).status.success());
+    assert!(!call("../notes.md", &digest).status.success());
+    assert!(!output.exists());
+    assert!(call("notes.md", &digest).status.success());
+    assert!(!call("notes.md", &digest).status.success());
+    assert_eq!(fs::read(f.documents.join("notes.md")).unwrap(), old);
+    assert_eq!(
+        fs::read_to_string(output.join("details.txt")).unwrap(),
+        "The garden has seven sakura trees."
+    );
+}
+
+#[test]
+fn versioned_remove_rejects_unowned_entries_and_symlink_source() {
+    let f = Fixture::new();
+    let snapshot = document_index::inspect_source(&f.documents, CharacterId::Kind).unwrap();
+    let digest = snapshot
+        .documents
+        .iter()
+        .find(|d| d.path == "notes.md")
+        .unwrap()
+        .source_sha256
+        .clone();
+    let out = f.root.join("removed-version");
+    let call = || {
+        f.call(&[
+            "fork-remove",
+            "--root",
+            f.documents.to_str().unwrap(),
+            "--character",
+            "Kind",
+            "--name",
+            "notes.md",
+            "--expected-sha256",
+            &digest,
+            "--output",
+            out.to_str().unwrap(),
+        ])
+    };
+    assert!(!call().status.success());
+    fs::remove_file(f.documents.join("ignored.bin")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        fs::remove_file(f.documents.join("details.txt")).unwrap();
+        let outside = f.root.join("outside.txt");
+        fs::write(&outside, "foreign source").unwrap();
+        symlink(&outside, f.documents.join("details.txt")).unwrap();
+        assert!(!call().status.success());
+    }
+    assert!(!out.exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn two_concurrent_removers_preserve_the_unique_published_winner() {
+    let f = Fixture::new();
+    fs::remove_file(f.documents.join("ignored.bin")).unwrap();
+    let snapshot = document_index::inspect_source(&f.documents, CharacterId::Kind).unwrap();
+    let digest = snapshot
+        .documents
+        .iter()
+        .find(|d| d.path == "notes.md")
+        .unwrap()
+        .source_sha256
+        .clone();
+    let root = f.documents.to_string_lossy().to_string();
+    let output = f.root.join("removed-v2").to_string_lossy().to_string();
+    let handles = (0..2)
+        .map(|_| {
+            let (root, output, digest) = (root.clone(), output.clone(), digest.clone());
+            std::thread::spawn(move || {
+                Command::new(env!("CARGO_BIN_EXE_neuromita"))
+                    .args([
+                        "documents",
+                        "fork-remove",
+                        "--root",
+                        &root,
+                        "--character",
+                        "Kind",
+                        "--name",
+                        "notes.md",
+                        "--expected-sha256",
+                        &digest,
+                        "--output",
+                        &output,
+                    ])
+                    .output()
+                    .unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+    let results = handles
+        .into_iter()
+        .map(|h| h.join().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(results.iter().filter(|r| r.status.success()).count(), 1);
+    assert!(!f.root.join("removed-v2/notes.md").exists());
+    assert_eq!(
+        fs::read(f.root.join("removed-v2/details.txt")).unwrap(),
+        fs::read(f.documents.join("details.txt")).unwrap()
+    );
+    assert!(fs::read_dir(&f.root).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".neuromita-document-fork-")
+    }));
+}
+
+#[test]
+fn versioned_remove_only_document_yields_empty_verified_corpus_without_fallback() {
+    let f = Fixture::new();
+    fs::remove_file(f.documents.join("ignored.bin")).unwrap();
+    fs::remove_file(f.documents.join("details.txt")).unwrap();
+    f.build();
+    let source = document_index::inspect_source(&f.documents, CharacterId::Kind).unwrap();
+    let digest = source.documents[0].source_sha256.clone();
+    let output = f.root.join("empty-version");
+    let removed = f.call(&[
+        "fork-remove",
+        "--root",
+        f.documents.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--name",
+        "notes.md",
+        "--expected-sha256",
+        &digest,
+        "--output",
+        output.to_str().unwrap(),
+    ]);
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&removed.stdout).unwrap()["remaining_documents"],
+        0
+    );
+    assert_eq!(fs::read_dir(&output).unwrap().count(), 0);
+    let index = f.root.join("empty-version-index.json");
+    assert!(
+        f.call(&[
+            "build",
+            "--root",
+            output.to_str().unwrap(),
+            "--character",
+            "Kind",
+            "--index",
+            index.to_str().unwrap()
+        ])
+        .status
+        .success()
+    );
+    let result = f.call(&[
+        "query",
+        "--root",
+        output.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--index",
+        index.to_str().unwrap(),
+        "--text",
+        "sakura",
+    ]);
+    assert!(result.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&result.stdout).unwrap()["status"],
+        "empty_corpus"
+    );
+    assert!(f.run("verify", &[]).status.success());
+}
+
+#[test]
+fn versioned_add_retains_selected_old_corpus_and_requires_explicit_new_index() {
+    let f = Fixture::new();
+    fs::remove_file(f.documents.join("ignored.bin")).unwrap();
+    f.build();
+    let original = document_index::inspect_source(&f.documents, CharacterId::Kind).unwrap();
+    let source = f.root.join("arrival.txt");
+    fs::write(
+        &source,
+        "New orange nebula evidence appears only in the fork",
+    )
+    .unwrap();
+    let out = f.root.join("added-v2");
+    let added = f.call(&[
+        "fork-add",
+        "--root",
+        f.documents.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--name",
+        "arrival.md",
+        "--source",
+        source.to_str().unwrap(),
+        "--output",
+        out.to_str().unwrap(),
+    ]);
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let receipt: Value = serde_json::from_slice(&added.stdout).unwrap();
+    assert_eq!(receipt["added_name"], "arrival.md");
+    assert_eq!(receipt["total_documents"], 3);
+    assert_eq!(receipt["requires_reindex"], true);
+    assert_eq!(receipt["source_sha256"].as_str().unwrap().len(), 64);
+    assert_eq!(
+        document_index::inspect_source(&f.documents, CharacterId::Kind).unwrap(),
+        original
+    );
+    assert!(!f.documents.join("arrival.md").exists());
+    assert!(f.run("verify", &[]).status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&f.query("orange nebula").stdout).unwrap()["status"],
+        "no_matches"
+    );
+    let revisions = f.root.join("revisions-v2");
+    fs::create_dir(&revisions).unwrap();
+    let indexed = f.call(&[
+        "reindex",
+        "--root",
+        out.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--revisions-dir",
+        revisions.to_str().unwrap(),
+    ]);
+    assert!(
+        indexed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
+    let revision: Value = serde_json::from_slice(&indexed.stdout).unwrap();
+    assert_eq!(revision["root"], out.to_str().unwrap());
+    assert_eq!(revision["documents"], 3);
+    let new_index = PathBuf::from(revision["index"].as_str().unwrap());
+    let result = f.call(&[
+        "query",
+        "--root",
+        out.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--index",
+        new_index.to_str().unwrap(),
+        "--text",
+        "orange nebula",
+    ]);
+    assert!(result.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&result.stdout).unwrap()["status"],
+        "selected"
+    );
+    assert_eq!(
+        fs::read(out.join("arrival.md")).unwrap(),
+        fs::read(&source).unwrap()
+    );
+    assert_eq!(
+        fs::read(out.join("notes.md")).unwrap(),
+        fs::read(f.documents.join("notes.md")).unwrap()
+    );
+    assert!(
+        !f.call(&[
+            "verify",
+            "--root",
+            out.to_str().unwrap(),
+            "--character",
+            "Kind",
+            "--index",
+            f.index.to_str().unwrap()
+        ])
+        .status
+        .success()
+    );
+}
+
+#[test]
+fn versioned_add_rejects_duplicate_name_invalid_input_and_unowned_files() {
+    let f = Fixture::new();
+    let input = f.root.join("new.txt");
+    fs::write(&input, "New valid evidence").unwrap();
+    let output = f.root.join("added-v2");
+    let call = |name: &str, path: &std::path::Path| {
+        f.call(&[
+            "fork-add",
+            "--root",
+            f.documents.to_str().unwrap(),
+            "--character",
+            "Kind",
+            "--name",
+            name,
+            "--source",
+            path.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+        ])
+    };
+    assert!(!call("fresh.md", &input).status.success());
+    fs::remove_file(f.documents.join("ignored.bin")).unwrap();
+    for name in [
+        "notes.md",
+        "../unsafe.md",
+        ".secret.md",
+        "UPPER.PDF",
+        " ",
+        "bad\\name.md",
+    ] {
+        assert!(!call(name, &input).status.success(), "{name}");
+    }
+    let invalid = f.root.join("invalid.md");
+    fs::write(&invalid, [0xff, 0xfe]).unwrap();
+    assert!(!call("valid.md", &invalid).status.success());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let link = f.root.join("input-link.md");
+        symlink(&input, &link).unwrap();
+        assert!(!call("valid.md", &link).status.success());
+        let root_link = f.root.join("root-link");
+        symlink(&f.documents, &root_link).unwrap();
+        assert!(
+            !f.call(&[
+                "fork-add",
+                "--root",
+                root_link.to_str().unwrap(),
+                "--character",
+                "Kind",
+                "--name",
+                "valid.md",
+                "--source",
+                input.to_str().unwrap(),
+                "--output",
+                output.to_str().unwrap()
+            ])
+            .status
+            .success()
+        );
+    }
+    assert!(!output.exists());
+    assert!(call("valid.md", &input).status.success());
+    assert!(!call("valid.md", &input).status.success());
+}
+
+#[test]
+fn versioned_add_enforces_file_and_corpus_capacity_and_accepts_empty_corpus() {
+    let f = Fixture::new();
+    fs::remove_file(f.documents.join("ignored.bin")).unwrap();
+    let input = f.root.join("new.txt");
+    fs::write(&input, "additional document").unwrap();
+    let output = f.root.join("added-v2");
+    let call = || {
+        f.call(&[
+            "fork-add",
+            "--root",
+            f.documents.to_str().unwrap(),
+            "--character",
+            "Kind",
+            "--name",
+            "new.md",
+            "--source",
+            input.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+        ])
+    };
+    for i in 0..46 {
+        fs::write(f.documents.join(format!("document{i}.md")), "existing").unwrap();
+    }
+    assert!(!call().status.success());
+    assert!(!output.exists());
+    for i in 0..46 {
+        fs::remove_file(f.documents.join(format!("document{i}.md"))).unwrap();
+    }
+    let big = vec![b'a'; 128 * 1024 + 1];
+    fs::write(&input, big).unwrap();
+    assert!(!call().status.success());
+    fs::write(&input, "additional document").unwrap();
+    fs::remove_file(f.documents.join("notes.md")).unwrap();
+    fs::remove_file(f.documents.join("details.txt")).unwrap();
+    assert!(call().status.success());
+    assert_eq!(fs::read_dir(&output).unwrap().count(), 1);
+    let built = f.root.join("from-empty.json");
+    assert!(
+        f.call(&[
+            "build",
+            "--root",
+            output.to_str().unwrap(),
+            "--character",
+            "Kind",
+            "--index",
+            built.to_str().unwrap()
+        ])
+        .status
+        .success()
+    );
+    assert_eq!(
+        document_index::inspect_source(&f.documents, CharacterId::Kind)
+            .unwrap()
+            .documents
+            .len(),
+        0
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn concurrent_versioned_add_publishers_are_no_clobber() {
+    let f = Fixture::new();
+    fs::remove_file(f.documents.join("ignored.bin")).unwrap();
+    let source = f.root.join("input.md");
+    fs::write(&source, "a retained addition").unwrap();
+    let root = f.documents.to_str().unwrap().to_string();
+    let input = source.to_str().unwrap().to_string();
+    let target = f.root.join("added-v2");
+    let output = target.to_str().unwrap().to_string();
+    let handles = (0..2)
+        .map(|_| {
+            let (root, input, output) = (root.clone(), input.clone(), output.clone());
+            std::thread::spawn(move || {
+                Command::new(env!("CARGO_BIN_EXE_neuromita"))
+                    .args([
+                        "documents",
+                        "fork-add",
+                        "--root",
+                        &root,
+                        "--character",
+                        "Kind",
+                        "--name",
+                        "new.md",
+                        "--source",
+                        &input,
+                        "--output",
+                        &output,
+                    ])
+                    .output()
+                    .unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+    let results = handles
+        .into_iter()
+        .map(|h| h.join().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| result.status.success())
+            .count(),
+        1
+    );
+    assert_eq!(
+        fs::read_to_string(target.join("new.md")).unwrap(),
+        "a retained addition"
+    );
+    assert!(!f.documents.join("new.md").exists());
+    assert!(fs::read_dir(&f.root).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".neuromita-document-fork-")
+    }));
+}
+
+#[test]
+fn versioned_add_refuses_exceeding_total_corpus_bytes() {
+    let f = Fixture::new();
+    fs::remove_file(f.documents.join("ignored.bin")).unwrap();
+    fs::remove_file(f.documents.join("notes.md")).unwrap();
+    fs::remove_file(f.documents.join("details.txt")).unwrap();
+    for i in 0..4 {
+        fs::write(
+            f.documents.join(format!("large{i}.md")),
+            vec![b'a'; 127 * 1024],
+        )
+        .unwrap();
+    }
+    let input = f.root.join("new.txt");
+    fs::write(&input, vec![b'b'; 8 * 1024]).unwrap();
+    let output = f.root.join("oversize-next");
+    let call = f.call(&[
+        "fork-add",
+        "--root",
+        f.documents.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--name",
+        "added.txt",
+        "--source",
+        input.to_str().unwrap(),
+        "--output",
+        output.to_str().unwrap(),
+    ]);
+    assert!(!call.status.success());
+    assert!(!output.exists());
+    assert_eq!(
+        document_index::inspect_source(&f.documents, CharacterId::Kind)
+            .unwrap()
+            .documents
+            .len(),
+        4
+    );
+}

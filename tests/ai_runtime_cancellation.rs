@@ -2,6 +2,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use neuromita::ai_runtime::{
     AiRuntimeError, AiService, AiSupervisor, ProcessTopology, PythonHostConfig,
+    runtime_status::RuntimePhase,
 };
 use serde_json::json;
 use tokio::time::{sleep, timeout};
@@ -84,6 +85,13 @@ class Plugin:
     .unwrap();
     request.abort();
     assert!(request.await.unwrap_err().is_cancelled());
+    let failed = timeout(Duration::from_secs(2), supervisor.refresh_status())
+        .await
+        .expect("cancelled worker must not block health observation")
+        .service(AiService::Tts);
+    assert_eq!(failed.phase, RuntimePhase::Failed);
+    assert!(failed.active_model.is_none());
+    assert!(failed.last_error.is_some());
     let error = timeout(
         Duration::from_secs(2),
         supervisor.call(AiService::Tts, "discover", json!({})),
@@ -100,6 +108,10 @@ class Plugin:
         .initialize(AiService::Tts, "slow_tts", json!({}))
         .await
         .unwrap();
+    let restarted = supervisor.refresh_status().await.service(AiService::Tts);
+    assert_eq!(restarted.phase, RuntimePhase::ModelReady);
+    assert_ne!(restarted.generation, failed.generation);
+    assert!(restarted.last_error.is_none());
     assert!(supervisor.discover(AiService::Tts).await.is_ok());
     supervisor.stop(AiService::Tts).await.unwrap();
     tokio::fs::remove_dir_all(root).await.unwrap();

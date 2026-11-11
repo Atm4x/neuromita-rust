@@ -1,4 +1,5 @@
 export struct PromptSetItem { character: int, name: string, author: string, version: string, description: string }
+export struct CharacterDebugItem { label: string, value: string }
 
 export struct CharacterPresets { reply: string, react: string, initiate: string, split: bool }
 
@@ -8,9 +9,27 @@ export struct PresetParameterItem { id: string, wire-key: string, title: string,
 export global SettingsUi {
     in-out property <[bool]> section-visible: [true, true, true, true, true, true, true, true, true, true, true, true];
     in-out property <bool> hide-private: true;
+    in-out property <bool> memory-dedup-enabled: false;
+    in-out property <string> memory-dedup-threshold: "0.800";
+    callback memory-dedup-toggle(bool);
+    callback memory-dedup-threshold-change(string);
+    in-out property <int> structured-mode: 0;
+    callback structured-mode-change(int);
+    in-out property <bool> tool-enabled: false;
+    in-out property <bool> tool-calculator: false;
+    in-out property <bool> tool-memory-search: true;
+    in-out property <bool> tool-reminder-enabled: true;
+    in-out property <bool> tool-web-search: false;
+    in-out property <bool> tool-web-reader: false;
+    in-out property <bool> tool-search-configured: false;
+    in-out property <bool> tool-reader-configured: false;
+    in-out property <string> tool-max-depth: "2";
+    callback tool-option(string, bool);
+    callback tool-depth-change(string);
     callback section-visibility(int, bool);
     callback set-hide-private(bool);
     in-out property <int> section;
+    in-out property <bool> models-rag-open: false;
     in-out property <[PresetItem]> settings-presets;
     in-out property <[PresetTemplateItem]> preset-templates;
     in-out property <[PresetParameterItem]> preset-parameters;
@@ -35,6 +54,10 @@ export global SettingsUi {
     in-out property <[CharacterPresets]> character-presets;
     in-out property <[PromptSetItem]> prompt-set-options;
     in-out property <[string]> character-prompt-sets;
+    in-out property <[CharacterDebugItem]> character-debug-values;
+    in-out property <int> character-debug-character: -1;
+    in-out property <string> character-debug-error;
+    in-out property <bool> character-debug-expanded: false;
     in-out property <int> selected-character;
     in-out property <bool> character-prompt-expanded: true;
     in-out property <string> preset-edit-id;
@@ -86,7 +109,9 @@ export global SettingsUi {
     callback preset-edit(string);
     callback preset-delete(string);
     callback preset-activate(string);
+    callback preset-move(string, int);
     callback character-prompt-set(int, string);
+    callback character-debug-select(int);
     callback prompt-reload();
     callback prompt-open-folder(int);
     callback character-preset(int, int, string);

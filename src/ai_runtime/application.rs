@@ -1,6 +1,7 @@
 //! Explicit application-owned activation of selected Python AI workers.
 
 use std::{collections::HashSet, sync::Arc};
+use uuid::Uuid;
 
 use tokio::{process::Command, time::timeout};
 
@@ -58,11 +59,20 @@ pub enum AiSpeechBindingError {
     Unprepared(AiService),
 }
 
+#[derive(Clone)]
+pub struct AiRecoveryHandle {
+    supervisor: std::sync::Weak<AiSupervisor>,
+    prepared_workers: Arc<[AiWorkerSelection]>,
+    hardware_service: Option<AiService>,
+}
+
 pub struct RunningAiApplication {
     supervisor: Arc<AiSupervisor>,
     active: Vec<AiService>,
     selected: HashSet<AiService>,
     worker_services: std::collections::HashMap<AiService, Vec<AiService>>,
+    prepared_workers: Arc<[AiWorkerSelection]>,
+    hardware_service: Option<AiService>,
     voice_profiles: Option<Arc<VoiceProfileStore>>,
 }
 
@@ -172,7 +182,7 @@ impl AiApplicationConfig {
     }
 
     pub async fn activate(self) -> Result<RunningAiApplication, AiApplicationError> {
-        self.activate_selected(None).await
+        Box::pin(self.activate_selected(None)).await
     }
 
     pub async fn activate_with_hardware(
@@ -183,7 +193,7 @@ impl AiApplicationConfig {
         config
             .validate()
             .map_err(|error| AiApplicationError::Invalid(error.to_string()))?;
-        self.activate_selected(Some((config, store))).await
+        Box::pin(self.activate_selected(Some((config, store)))).await
     }
 
     async fn activate_selected(
@@ -236,6 +246,8 @@ impl AiApplicationConfig {
                     .map(|service| (*service, worker.composition.services().to_vec()))
             })
             .collect();
+        let prepared_workers: Arc<[AiWorkerSelection]> = self.workers.clone().into();
+        let hardware_service = hardware.map(|(config, _)| config.selection.service);
         let mut active = Vec::new();
         if let Some((config, _)) = hardware {
             let worker = self
@@ -302,12 +314,68 @@ impl AiApplicationConfig {
             active,
             selected,
             worker_services,
+            prepared_workers,
+            hardware_service,
             voice_profiles: self.voice_profiles,
         })
     }
 }
 
 impl RunningAiApplication {
+    pub(crate) fn take_services(&mut self, services: &[AiService]) -> Self {
+        let active = self
+            .active
+            .iter()
+            .copied()
+            .filter(|service| services.contains(service))
+            .collect();
+        let selected = self
+            .selected
+            .iter()
+            .copied()
+            .filter(|service| services.contains(service))
+            .collect();
+        let worker_services = self
+            .worker_services
+            .iter()
+            .filter(|(service, _)| services.contains(service))
+            .map(|(service, members)| (*service, members.clone()))
+            .collect();
+        let prepared_workers = self
+            .prepared_workers
+            .iter()
+            .filter(|worker| services.contains(&worker.service))
+            .cloned()
+            .collect::<Vec<_>>()
+            .into();
+        self.active.retain(|service| !services.contains(service));
+        self.selected.retain(|service| !services.contains(service));
+        self.worker_services
+            .retain(|service, _| !services.contains(service));
+        self.prepared_workers = self
+            .prepared_workers
+            .iter()
+            .filter(|worker| !services.contains(&worker.service))
+            .cloned()
+            .collect::<Vec<_>>()
+            .into();
+        let hardware_service = self
+            .hardware_service
+            .filter(|service| services.contains(service));
+        if hardware_service.is_some() {
+            self.hardware_service = None;
+        }
+        Self {
+            supervisor: Arc::clone(&self.supervisor),
+            active,
+            selected,
+            worker_services,
+            prepared_workers,
+            hardware_service,
+            voice_profiles: self.voice_profiles.clone(),
+        }
+    }
+
     pub fn observe_status(
         &self,
     ) -> tokio::sync::watch::Receiver<super::runtime_status::RuntimeSnapshot> {
@@ -315,11 +383,16 @@ impl RunningAiApplication {
     }
 
     pub fn status_snapshot(&self) -> super::runtime_status::RuntimeSnapshot {
-        self.supervisor.status_snapshot()
+        let mut snapshot = self.supervisor.status_snapshot();
+        snapshot
+            .services
+            .retain(|service, _| self.worker_services.contains_key(service));
+        snapshot
     }
 
     pub async fn refresh_status(&self) -> super::runtime_status::RuntimeSnapshot {
-        self.supervisor.refresh_status().await
+        self.supervisor.refresh_status().await;
+        self.status_snapshot()
     }
 
     pub(crate) fn worker_services(&self, service: AiService) -> Option<&[AiService]> {
@@ -333,6 +406,124 @@ impl RunningAiApplication {
     }
     pub fn has_service(&self, service: AiService) -> bool {
         self.selected.contains(&service)
+    }
+
+    pub fn recovery_handle(&self) -> AiRecoveryHandle {
+        AiRecoveryHandle {
+            supervisor: Arc::downgrade(&self.supervisor),
+            prepared_workers: self.prepared_workers.clone(),
+            hardware_service: self.hardware_service,
+        }
+    }
+
+    pub async fn restart_failed_worker(
+        &self,
+        service: AiService,
+        expected_generation: uuid::Uuid,
+    ) -> Result<uuid::Uuid, AiApplicationError> {
+        self.recovery_handle()
+            .restart_failed_worker(service, expected_generation)
+            .await
+    }
+
+    /// Recover a hardware-profiled failed process without silently downgrading its
+    /// saved device selection. The candidate must pass the same verification as
+    /// the original activation before its generation can be published.
+    pub async fn recover_failed_hardware_worker(
+        &self,
+        service: AiService,
+        failed_generation: Uuid,
+        prepared: &AiApplicationConfig,
+        selection: &super::hardware::HardwareConfig,
+        store: &super::hardware::HardwareConfigStore,
+        check_current: &(dyn Fn() -> Result<(), AiRuntimeError> + Send + Sync),
+    ) -> Result<Uuid, AiApplicationError> {
+        prepared.validate()?;
+        if !self
+            .supervisor
+            .accepts_plan(prepared.topology, &prepared.host)
+        {
+            return Err(AiApplicationError::Invalid(
+                "recovery host or process topology differs from the running application".into(),
+            ));
+        }
+        selection
+            .validate()
+            .map_err(|error| AiApplicationError::Invalid(error.to_string()))?;
+        if selection.selection.service != service {
+            return Err(AiApplicationError::Invalid(
+                "hardware selection does not match the failed service".into(),
+            ));
+        }
+        let services = self.worker_services(service).ok_or_else(|| {
+            AiApplicationError::Invalid("service is not part of the running application".into())
+        })?;
+        let worker = prepared
+            .workers
+            .iter()
+            .find(|worker| worker.composition.services() == services)
+            .ok_or_else(|| {
+                AiApplicationError::Invalid(
+                    "prepared recovery does not contain the entire failed worker".into(),
+                )
+            })?;
+        super::hardware::verify_worker_plan(worker, selection)
+            .map_err(|error| AiApplicationError::Invalid(error.to_string()))?;
+        let verify = || store.verify_current(selection);
+        self.supervisor
+            .recover_failed_hardware_guarded(
+                service,
+                failed_generation,
+                &worker.composition,
+                &worker.models,
+                &selection.selection.profile(),
+                &verify,
+                check_current,
+            )
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Revalidate an application-prepared worker plan and recover only the failed
+    /// process generation; sibling split workers are never reconstructed.
+    pub async fn recover_failed_worker(
+        &self,
+        service: AiService,
+        failed_generation: Uuid,
+        prepared: &AiApplicationConfig,
+        check_current: &(dyn Fn() -> Result<(), AiRuntimeError> + Send + Sync),
+    ) -> Result<Uuid, AiApplicationError> {
+        prepared.validate()?;
+        if !self
+            .supervisor
+            .accepts_plan(prepared.topology, &prepared.host)
+        {
+            return Err(AiApplicationError::Invalid(
+                "recovery host or process topology differs from the running application".into(),
+            ));
+        }
+        let services = self.worker_services(service).ok_or_else(|| {
+            AiApplicationError::Invalid("service is not part of the running application".into())
+        })?;
+        let worker = prepared
+            .workers
+            .iter()
+            .find(|worker| worker.composition.services() == services)
+            .ok_or_else(|| {
+                AiApplicationError::Invalid(
+                    "prepared recovery does not contain the entire failed worker".into(),
+                )
+            })?;
+        self.supervisor
+            .recover_failed_composed_guarded(
+                service,
+                failed_generation,
+                &worker.composition,
+                &worker.models,
+                check_current,
+            )
+            .await
+            .map_err(Into::into)
     }
 
     pub fn speech_recognizer(&self) -> Option<super::speech::PythonSpeechRecognizer> {
@@ -373,6 +564,41 @@ impl RunningAiApplication {
             Some(error) => Err(error.into()),
             None => Ok(()),
         }
+    }
+}
+
+impl AiRecoveryHandle {
+    /// Re-activate only the original failed generation of a previously prepared
+    /// model plan. The handle has no ownership of the running application.
+    pub async fn restart_failed_worker(
+        &self,
+        service: AiService,
+        expected_generation: uuid::Uuid,
+    ) -> Result<uuid::Uuid, AiApplicationError> {
+        let worker = self
+            .prepared_workers
+            .iter()
+            .find(|worker| worker.composition.services().contains(&service))
+            .ok_or_else(|| AiApplicationError::Invalid("service is not selected".into()))?;
+        if self.hardware_service.is_some_and(|hardware_service| {
+            worker.composition.services().contains(&hardware_service)
+        }) {
+            return Err(AiApplicationError::Invalid(
+                "hardware-guarded worker requires renewed selection authorization".into(),
+            ));
+        }
+        let supervisor = self
+            .supervisor
+            .upgrade()
+            .ok_or(AiRuntimeError::NotRunning)?;
+        Ok(supervisor
+            .restart_failed_composed(
+                service,
+                expected_generation,
+                &worker.composition,
+                &worker.models,
+            )
+            .await?)
     }
 }
 
