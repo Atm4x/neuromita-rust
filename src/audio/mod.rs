@@ -6,4 +6,5 @@ pub mod monitor;
 pub mod native;
 pub mod segment;
 pub mod session;
+pub mod ticket;
 pub mod vad;

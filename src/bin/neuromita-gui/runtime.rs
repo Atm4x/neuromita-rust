@@ -336,12 +336,14 @@ fn speech_conversation(
 impl SpeechConversation for DesktopTranscriptSink {
     fn reply<'a>(
         &'a self,
+        ticket: &'a neuromita::audio::ticket::SpeechTicket,
         transcript: &'a Transcript,
     ) -> SpeechFuture<'a, Option<neuromita::voice::AudioArtifact>> {
         Box::pin(async move {
-            self.send
-                .send((self.origin, transcript.clone()))
-                .map_err(|_| SpeechSessionError::DispatchClosed)?;
+            if let Some(result) = ticket.admit(|| self.send.send((self.origin, transcript.clone())))
+            {
+                result.map_err(|_| SpeechSessionError::DispatchClosed)?;
+            }
             Ok(None)
         })
     }
@@ -1537,15 +1539,29 @@ mod speech_dispatch_tests {
             selection_revision: 4,
         };
         let sink = speech_conversation(&tx, captured);
-        sink.reply(&Transcript {
+        let stream = neuromita::audio::ticket::SpeechStream::new(CancellationToken::new());
+        let ticket = stream.ticket();
+        let transcript = Transcript {
             text: "spoken words".into(),
             language: None,
-        })
-        .await
-        .unwrap();
+        };
+        sink.reply(&ticket, &transcript).await.unwrap();
+        sink.reply(&ticket, &transcript).await.unwrap();
         let (origin, transcript) = rx.recv().await.unwrap();
         assert_eq!(transcript.text, "spoken words");
         assert_eq!(origin, captured);
+        assert!(rx.try_recv().is_err(), "duplicate ticket must not requeue");
+
+        let stale = stream.ticket();
+        stream.invalidate();
+        sink.reply(&stale, &transcript).await.unwrap();
+        assert!(rx.try_recv().is_err(), "reset ticket must not enqueue");
+
+        let fresh = stream.ticket();
+        sink.reply(&fresh, &transcript).await.unwrap();
+        let (fresh_origin, fresh_transcript) = rx.recv().await.unwrap();
+        assert_eq!(fresh_origin, captured);
+        assert_eq!(fresh_transcript.text, "spoken words");
         assert!(!chat_fence::accepts(
             origin.character.index() as i32,
             origin.selection_revision,
