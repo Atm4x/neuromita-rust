@@ -1370,8 +1370,19 @@ async fn observe(
                                 });
                             },
                             NativeDownloadEvent::Finished { result, .. } => {
-                                if let Some(operation) = active_native_download.take() {
-                                    native_owner.finish_download(operation).await;
+                                let journal = if let Some(operation) = active_native_download.take() {
+                                    native_owner.finish_download(operation).await
+                                } else {
+                                    Err("Отсутствует активная установка для завершения".into())
+                                };
+                                if let Err(error) = journal {
+                                    publish(Update::NativeError(error.clone()));
+                                    publish(Update::NativeDownloadStatus {
+                                        summary: format!("Проверка журнала установки не завершена: {error}"),
+                                        percent: -1,
+                                        active: false,
+                                    });
+                                    continue;
                                 }
                                 match result {
                                     Ok(installed) => {
