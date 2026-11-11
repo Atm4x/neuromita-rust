@@ -1,7 +1,7 @@
 name: Q2 onboarding Windows native Rust GUI check
 on:
   push:
-    branches: [codex/q2-onboarding-wiki-acceptance-20261111]
+    branches: [codex/q2-onboarding-wiki-acceptance-20261111, codex/q2-integration-qa-20261111]
   workflow_dispatch:
 permissions:
   contents: read
