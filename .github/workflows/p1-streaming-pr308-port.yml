@@ -29,6 +29,24 @@ jobs:
             src/generation/presets.rs src/presentation/presets.rs \
             ui/settings/api-presets.slint ui/settings/presets-state.slint > /tmp/p1-308.patch
           git apply --3way /tmp/p1-308.patch
+          python - <<'PY'
+          from pathlib import Path
+          p = Path("src/bin/neuromita-gui/runtime.rs")
+          s = p.read_text()
+          old = """                    Ok(snapshot) => publish(Update::Snapshot(Box::new(snapshot))),
+                    Err(error) => publish(Update::Error(error.to_string())),"""
+          new = """                    Ok(snapshot) => publish(Update::Snapshot(
+                        ChatOrigin { character, selection_revision },
+                        Box::new(snapshot),
+                    )),
+                    Err(error) => publish(Update::ChatError(
+                        ChatOrigin { character, selection_revision },
+                        error.to_string(),
+                    )),"""
+          assert s.count(old) == 1, "runtime request snapshot owner contract changed"
+          p.write_text(s.replace(old, new))
+          PY
+          git add src/bin/neuromita-gui/runtime.rs
           git diff --cached --check
           git diff --cached --stat
       - name: Linux GUI dependencies
