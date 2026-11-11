@@ -648,6 +648,135 @@ mod tests {
     }
 
     #[test]
+    fn python_keyword_casing_and_local_updates_match_active_dsl() {
+        // NeuroMitaPython src/DSL/dsl_engine.py (97059b0a): SET LOCAL
+        // and the optional IF/ELSEIF THEN keyword are case-insensitive.
+        let root = root();
+        let script = root.join("Crazy/Default/Main/state.script");
+        fs::write(
+            &script,
+            "SET local score = 3\nSET score = score + 2\nIF score == 5 then\n RETURN str(score)\nELSE\n RETURN 'incorrect'\nENDIF\n",
+        )
+        .unwrap();
+        let catalog = PromptCatalog::new(&root);
+        let rendered = catalog
+            .render(
+                CharacterId::Crazy,
+                None,
+                BTreeMap::new(),
+                "main_template.txt",
+            )
+            .unwrap();
+        assert_eq!(rendered.context, vec!["5".to_owned()]);
+
+        // The Python engine rejects an ELSE with arguments rather than
+        // silently treating it as an unconditional branch.
+        fs::write(
+            &script,
+            "IF False\n RETURN 'never'\nELSE unexpected\n RETURN 'incorrect'\nENDIF\n",
+        )
+        .unwrap();
+        let error = catalog
+            .render(
+                CharacterId::Crazy,
+                None,
+                BTreeMap::new(),
+                "main_template.txt",
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("ELSE must not have arguments"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_variables_are_script_scoped_and_reset_on_each_render() {
+        let root = root();
+        let set = root.join("Crazy/Default");
+        fs::write(set.join("config.json"), r#"{"variables":{"score":99}}"#).unwrap();
+        fs::write(
+            set.join("main_template.txt"),
+            "[<@Main/state.script>]\n[<@Main/next.script>]\n",
+        )
+        .unwrap();
+        fs::write(
+            set.join("Main/state.script"),
+            "SET LOCAL score = 3\nSET score = score + 2\nRETURN str(score)\n",
+        )
+        .unwrap();
+        fs::write(set.join("Main/next.script"), "RETURN str(score)\n").unwrap();
+        let snapshot = PromptCatalog::new(&root)
+            .capture(CharacterId::Crazy, None)
+            .unwrap()
+            .unwrap();
+        for _ in 0..2 {
+            let result = snapshot
+                .render(BTreeMap::new(), "main_template.txt")
+                .unwrap();
+            assert_eq!(result.context, vec!["5".to_owned(), "99".to_owned()]);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_b_a_character_switch_keeps_snapshots_and_defaults_isolated() {
+        let root = root();
+        let kind = root.join("Kind/Default");
+        fs::create_dir_all(kind.join("Main")).unwrap();
+        fs::write(
+            kind.join("config.json"),
+            r#"{"variables":{"player_name":"KindName"}}"#,
+        )
+        .unwrap();
+        fs::write(kind.join("main_template.txt"), "[<Main/identity.txt>]\n").unwrap();
+        let kind_identity = kind.join("Main/identity.txt");
+        fs::write(&kind_identity, "Kind [{player_name}]").unwrap();
+        let catalog = PromptCatalog::new(&root);
+        let a = catalog.capture(CharacterId::Crazy, None).unwrap().unwrap();
+        let b = catalog.capture(CharacterId::Kind, None).unwrap().unwrap();
+        assert_eq!(
+            a.render(BTreeMap::new(), "main_template.txt")
+                .unwrap()
+                .stable,
+            vec!["Привет Игрок.".to_owned()]
+        );
+        assert_eq!(
+            b.render(BTreeMap::new(), "main_template.txt")
+                .unwrap()
+                .stable,
+            vec!["Kind KindName".to_owned()]
+        );
+        assert_eq!(
+            a.render(BTreeMap::new(), "main_template.txt")
+                .unwrap()
+                .stable,
+            vec!["Привет Игрок.".to_owned()]
+        );
+
+        fs::write(&kind_identity, "Changed [{player_name}]").unwrap();
+        assert_eq!(
+            b.render(BTreeMap::new(), "main_template.txt")
+                .unwrap()
+                .stable,
+            vec!["Kind KindName".to_owned()]
+        );
+        let newly_admitted = catalog.capture(CharacterId::Kind, None).unwrap().unwrap();
+        assert_eq!(
+            newly_admitted
+                .render(BTreeMap::new(), "main_template.txt")
+                .unwrap()
+                .stable,
+            vec!["Changed KindName".to_owned()]
+        );
+        assert_eq!(
+            a.render(BTreeMap::new(), "main_template.txt")
+                .unwrap()
+                .stable,
+            vec!["Привет Игрок.".to_owned()]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn post_rules_use_selected_character_set_and_capture_config() {
         let root = root();
         let default_dir = root.join("Crazy/Default");
