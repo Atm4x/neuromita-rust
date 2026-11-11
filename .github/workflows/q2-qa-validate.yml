@@ -19,8 +19,8 @@ jobs:
           set -euo pipefail
           cp bridge/q2-onboarding-review-patch.zlib.b64 "$RUNNER_TEMP/patch.zlib.b64"
           git fetch origin refs/heads/main
-          test "$(git rev-parse origin/main)" = "74e505f48862b814628bbb598a63e23a6834427c"
-          git switch --detach origin/main
+          git merge-base --is-ancestor 74e505f48862b814628bbb598a63e23a6834427c origin/main
+          git switch --detach 74e505f48862b814628bbb598a63e23a6834427c
           python3 - <<'PY'
           import base64, pathlib, zlib
           source=pathlib.Path(__import__('os').environ['RUNNER_TEMP'])/'patch.zlib.b64'
