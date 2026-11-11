@@ -321,6 +321,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                             guide.wiki_target.expect("Guide Wiki link").into(),
                         );
                         window.set_onboarding_guide_title(guide.title("en").into());
+                        window.set_onboarding_guide_image(guide.image_key.into());
+                        window.set_onboarding_guide_targets(ModelRc::new(VecModel::from(
+                            guide
+                                .focus_steps()
+                                .iter()
+                                .map(|step| view::GuideFocusTarget {
+                                    number: i32::from(step.number),
+                                    left: step.rect.left,
+                                    top: step.rect.top,
+                                    width: step.rect.width,
+                                    height: step.rect.height,
+                                })
+                                .collect::<Vec<_>>(),
+                        )));
                         window.set_onboarding_guide_description_rich(
                             StyledText::from_markdown(&guide.description_markdown("en"))?,
                         );
@@ -347,7 +361,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                     30 => click(&window, 558.0, 58.0),
                     31 => {
-                        let _ = shot("wiki-back-to-guide")?;
+                        *reference.borrow_mut() = shot("wiki-back-to-guide")?;
                         if window.get_page() != view::PageId::Home
                             || !window.get_onboarding_guide_visible()
                             || window.get_onboarding_guide_page() != 1
@@ -355,6 +369,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                         {
                             return Err(format!("Wiki Back did not restore the existing Guide page; callbacks={}", reopened_guide.borrow()).into());
                         }
+                    }
+                    32 => {
+                        window.set_onboarding_guide_focus_step(2);
+                        window.set_onboarding_guide_zoom(1.7);
+                        window.set_onboarding_guide_focus_x(0.75);
+                        window.set_onboarding_guide_focus_y(0.55);
+                    }
+                    33 => {
+                        let image = shot("guide-image-focus-zoom")?;
+                        assert_changed(
+                            &reference.borrow(),
+                            &image,
+                            "Guide embedded asset zoom and numbered focus overlay",
+                        )?;
                     }
                     _ => {
                         *completed.borrow_mut() = Some(Ok(()));
