@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use super::{
@@ -20,6 +20,7 @@ use crate::{
     memory::{CharacterMemories, MemoryKind, MemoryState},
     timeline::domain::{MemoryId, MemoryRecord, ProjectedMessage},
     timeline::selection::TimelineTurn,
+    timeline::{KnowledgeDispatchLease, KnowledgeDispatchSource},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -261,6 +262,16 @@ pub struct SemanticMemoryRetriever {
     instance: uuid::Uuid,
     max_entries: usize,
     reranker: Option<(Arc<dyn RerankProvider>, RerankPolicy)>,
+    dispatch_authority: OnceLock<
+        Arc<
+            dyn Fn(
+                    TimelineTurn,
+                    Vec<KnowledgeDispatchSource>,
+                ) -> Result<KnowledgeDispatchLease, EmbeddingError>
+                + Send
+                + Sync,
+        >,
+    >,
 }
 
 impl SemanticMemoryRetriever {
@@ -279,7 +290,46 @@ impl SemanticMemoryRetriever {
             instance: uuid::Uuid::new_v4(),
             max_entries,
             reranker: None,
+            dispatch_authority: OnceLock::new(),
         })
+    }
+
+    /// Bind the retriever once to the Core Timeline owner. Standalone retrieval
+    /// remains explicitly caller-scoped; generation never trusts cache membership.
+    pub(crate) fn bind_dispatch_authority(
+        &self,
+        authority: Arc<
+            dyn Fn(
+                    TimelineTurn,
+                    Vec<KnowledgeDispatchSource>,
+                ) -> Result<KnowledgeDispatchLease, EmbeddingError>
+                + Send
+                + Sync,
+        >,
+    ) -> Result<(), EmbeddingError> {
+        self.dispatch_authority.set(authority).map_err(|_| {
+            EmbeddingError::Configuration("semantic retriever already belongs to a Core".into())
+        })
+    }
+
+    pub(crate) fn admit_dispatch(
+        &self,
+        turn: Option<TimelineTurn>,
+        sources: &[KnowledgeDispatchSource],
+    ) -> Result<Option<KnowledgeDispatchLease>, EmbeddingError> {
+        if let (Some(turn), Some(authority)) = (turn, self.dispatch_authority.get()) {
+            return authority(turn, sources.to_vec()).map(Some);
+        }
+        Ok(None)
+    }
+
+    pub(crate) fn authorize_dispatch(
+        &self,
+        turn: Option<TimelineTurn>,
+        sources: &[KnowledgeDispatchSource],
+    ) -> Result<(), EmbeddingError> {
+        drop(self.admit_dispatch(turn, sources)?);
+        Ok(())
     }
 
     pub fn with_reranker(
@@ -303,9 +353,33 @@ impl SemanticMemoryRetriever {
         &self,
         query: &str,
         hits: &mut [super::retrieval_fusion::FusedHit],
+        turn: Option<TimelineTurn>,
     ) -> Result<(), EmbeddingError> {
         if let Some((provider, policy)) = &self.reranker {
-            rerank_prefix(provider.as_ref(), query, hits, *policy).await?;
+            let evidence = hits
+                .iter()
+                .take(policy.limit)
+                .map(|hit| {
+                    let id = uuid::Uuid::parse_str(&hit.key.id)
+                        .map_err(|_| EmbeddingError::StaleKnowledge)?;
+                    match hit.key.source {
+                        RetrievalSource::Memory => Ok(KnowledgeDispatchSource::Memory(
+                            MemoryId(id),
+                            hit.content.clone(),
+                        )),
+                        RetrievalSource::History => Ok(KnowledgeDispatchSource::History(
+                            EventId(id),
+                            hit.content.clone(),
+                        )),
+                        _ => Err(EmbeddingError::StaleKnowledge),
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            {
+                let _dispatch = self.admit_dispatch(turn, &evidence)?;
+                rerank_prefix(provider.as_ref(), query, hits, *policy).await?;
+            }
+            self.authorize_dispatch(turn, &evidence)?;
         }
         Ok(())
     }
@@ -547,6 +621,7 @@ impl SemanticMemoryRetriever {
         character: CharacterId,
         messages: &[ProjectedMessage],
         query: &str,
+        turn: Option<TimelineTurn>,
     ) -> Result<(EmbeddingSpace, Vec<f64>, RetrievalCost), EmbeddingError> {
         let sources = messages
             .iter()
@@ -557,7 +632,7 @@ impl SemanticMemoryRetriever {
                 )
             })
             .collect::<Vec<_>>();
-        self.score_canonical_documents(character, &sources, query, None)
+        self.score_canonical_documents(character, &sources, query, turn)
             .await
             .map(|(space, scores, cost, _)| (space, scores, cost))
     }
@@ -628,6 +703,17 @@ impl SemanticMemoryRetriever {
                 content: (*content).to_string(),
             })
             .collect::<Vec<_>>();
+        let evidence = sources
+            .iter()
+            .map(|(id, content)| match id {
+                CachedSourceId::Memory(id) => {
+                    KnowledgeDispatchSource::Memory(*id, (*content).to_owned())
+                }
+                CachedSourceId::History(id) => {
+                    KnowledgeDispatchSource::History(*id, (*content).to_owned())
+                }
+            })
+            .collect::<Vec<_>>();
         let barrier = self
             .cache
             .lock()
@@ -656,10 +742,13 @@ impl SemanticMemoryRetriever {
                 }
             }
         }
-        let query_vector = self
-            .provider
-            .embed(EmbeddingPurpose::Query, query.clone())
-            .await?;
+        let query_vector = {
+            let _dispatch = self.admit_dispatch(turn, &evidence)?;
+            self.provider
+                .embed(EmbeddingPurpose::Query, query.clone())
+                .await?
+        };
+        self.authorize_dispatch(turn, &evidence)?;
         cost.embedded_characters += query.chars().count();
         cost.embedding_requests += 1;
         cost.embedded_texts += 1;
@@ -684,7 +773,11 @@ impl SemanticMemoryRetriever {
                 .collect::<Vec<_>>();
             cost.embedded_characters +=
                 texts.iter().map(|text| text.chars().count()).sum::<usize>();
-            let fresh = self.provider.embed_documents(texts).await?;
+            let fresh = {
+                let _dispatch = self.admit_dispatch(turn, &evidence)?;
+                self.provider.embed_documents(texts).await?
+            };
+            self.authorize_dispatch(turn, &evidence)?;
             cost.embedding_requests += self.provider.document_request_count(missing.len());
             cost.embedded_texts += missing.len();
             if fresh.len() != missing.len() {
@@ -864,7 +957,7 @@ impl SemanticMemoryRetriever {
         }
         let mut fused = fuse(character, &buckets, config)
             .map_err(|error| EmbeddingError::Response(error.to_string()))?;
-        self.rerank_fused(query, &mut fused).await?;
+        self.rerank_fused(query, &mut fused, turn).await?;
         let by_id = memories
             .iter()
             .map(|memory| (memory.id.0.to_string(), memory))
@@ -943,6 +1036,48 @@ mod b84_tests {
                 Embedding::new(vec![1.0, 0.5], &self.space)
             })
         }
+    }
+
+    #[tokio::test]
+    async fn external_document_embedding_never_starts_after_authority_invalidates() {
+        use crate::timeline::domain::BranchId;
+        use crate::timeline::selection::TimelineSelection;
+        let provider = Arc::new(CountedEmbeddingProvider {
+            space: EmbeddingSpace::new("test", "authority", "v1", 2).unwrap(),
+            calls: AtomicUsize::new(0),
+        });
+        let retriever = SemanticMemoryRetriever::new(provider.clone(), 8).unwrap();
+        let checks = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&checks);
+        retriever
+            .bind_dispatch_authority(Arc::new(move |_, _| {
+                if observed.fetch_add(1, Ordering::SeqCst) >= 2 {
+                    Err(EmbeddingError::StaleKnowledge)
+                } else {
+                    Ok(KnowledgeDispatchLease::transient_for_test())
+                }
+            }))
+            .unwrap();
+        let turn = TimelineTurn {
+            selection: TimelineSelection {
+                branch_id: BranchId(uuid::Uuid::new_v4()),
+                generation: 0,
+            },
+            character: CharacterId::Crazy,
+            context_head: 0,
+            context_epoch: 0,
+            trigger: None,
+        };
+        let sources = [(
+            CachedSourceId::Memory(MemoryId(uuid::Uuid::new_v4())),
+            "private document",
+        )];
+        let result = retriever
+            .score_canonical_documents(CharacterId::Crazy, &sources, "question", Some(turn))
+            .await;
+        assert!(matches!(result, Err(EmbeddingError::StaleKnowledge)));
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(checks.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test]

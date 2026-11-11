@@ -218,6 +218,32 @@ pub enum TimelineConfig {
     },
 }
 
+/// Provenance of the exact texts that are about to leave Core for a provider.
+/// The persistent Timeline authorizes these against its live canonical projection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum KnowledgeDispatchSource {
+    Memory(domain::MemoryId, String),
+    History(EventId, String),
+}
+
+/// RAII token proving a pinned Timeline view cannot be invalidated by any
+/// SQLite writer until the outgoing provider invocation finishes or is cancelled.
+#[must_use]
+pub(crate) struct KnowledgeDispatchLease {
+    #[cfg(feature = "sqlite-system")]
+    _sqlite: Option<storage::SqliteKnowledgeDispatchLease>,
+}
+
+impl KnowledgeDispatchLease {
+    #[cfg(test)]
+    pub(crate) fn transient_for_test() -> Self {
+        Self {
+            #[cfg(feature = "sqlite-system")]
+            _sqlite: None,
+        }
+    }
+}
+
 pub(crate) struct SessionTimeline {
     branch: BranchId,
     store: Box<dyn TimelineRepository + Send>,
@@ -360,6 +386,27 @@ impl SessionTimeline {
             return Err(domain::TimelineError::ConcurrentWrite);
         }
         Ok(())
+    }
+
+    /// Acquire one provider-dispatch permit. The SQLite reservation remains
+    /// alive outside the SessionTimeline mutex for the duration of the await.
+    pub(crate) fn admit_knowledge_dispatch(
+        &self,
+        turn: TimelineTurn,
+        sources: &[KnowledgeDispatchSource],
+    ) -> Result<KnowledgeDispatchLease, domain::TimelineError> {
+        self.assert_knowledge_turn(turn, false)?;
+        #[cfg(feature = "sqlite-system")]
+        if let Some(repository) = &self.selection_repository {
+            return Ok(KnowledgeDispatchLease {
+                _sqlite: Some(repository.admit_knowledge_dispatch(turn, sources)?),
+            });
+        }
+        let _ = sources;
+        Ok(KnowledgeDispatchLease {
+            #[cfg(feature = "sqlite-system")]
+            _sqlite: None,
+        })
     }
 
     pub(crate) fn assert_knowledge_turn(

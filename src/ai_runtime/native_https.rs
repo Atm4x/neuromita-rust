@@ -701,6 +701,8 @@ mod tests {
                         },
                     },
                 ],
+                speech_contract_version: None,
+                speech_capabilities: Vec::new(),
             };
             let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
             let manifest_sha256 = sha(&manifest_bytes);

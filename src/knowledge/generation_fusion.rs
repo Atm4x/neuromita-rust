@@ -345,7 +345,9 @@ pub(crate) async fn select_semantic_generation(
             minimum_graph: 0,
         },
     )?;
-    retriever.rerank_fused(query, &mut combined).await?;
+    retriever
+        .rerank_fused(query, &mut combined, Some(turn))
+        .await?;
     combined.truncate(config.limit);
     render_generation_selection(
         character,

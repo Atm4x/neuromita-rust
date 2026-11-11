@@ -29,7 +29,7 @@ use std::{
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
-    sync::{Semaphore, mpsc},
+    sync::{Mutex as AsyncMutex, Semaphore, mpsc},
     task::JoinSet,
 };
 use tokio_util::sync::CancellationToken;
@@ -75,6 +75,7 @@ impl GameLinkHandle {
 
 struct Session {
     token: Uuid,
+    command_gate: Arc<AsyncMutex<()>>,
     connection: Option<(Uuid, mpsc::Sender<Value>, CancellationToken)>,
     disconnected_at: Option<Instant>,
     receipts: HashMap<Uuid, (Value, Receipt)>,
@@ -154,6 +155,7 @@ impl Sessions {
             id,
             Session {
                 token,
+                command_gate: Arc::new(AsyncMutex::new(())),
                 connection: Some((connection, outbound, disconnect)),
                 disconnected_at: None,
                 receipts: HashMap::new(),
@@ -165,7 +167,7 @@ impl Sessions {
         );
         Ok((id, token))
     }
-    fn resume(
+    async fn resume(
         &self,
         id: Uuid,
         token: Uuid,
@@ -174,6 +176,8 @@ impl Sessions {
         disconnect: CancellationToken,
         ttl: Duration,
     ) -> Result<Vec<RequestHandle>, &'static str> {
+        let gate = self.command_gate(id).ok_or("unknown session")?;
+        let _admission = gate.lock().await;
         let mut sessions = self.0.lock().expect("game sessions poisoned");
         let session = sessions.get_mut(&id).ok_or("unknown session")?;
         if session.token != token {
@@ -198,6 +202,13 @@ impl Sessions {
                 _ => None,
             })
             .collect())
+    }
+    fn command_gate(&self, id: Uuid) -> Option<Arc<AsyncMutex<()>>> {
+        self.0
+            .lock()
+            .expect("game sessions poisoned")
+            .get(&id)
+            .map(|session| Arc::clone(&session.command_gate))
     }
     fn is_active(&self, id: Uuid, connection: Uuid) -> bool {
         self.0
@@ -653,7 +664,7 @@ async fn client(
                 }
                 GameCommand::Resume {session_id: target, session_token} => {
                     if session_id.is_some() { tx.send(error(Some(id),"already_connected","session already established")).await.map_err(io::Error::other)?; continue; }
-                    match sessions.resume(target,session_token,connection,tx.clone(),connection_stop.clone(),config.disconnected_session_ttl) {
+                    match sessions.resume(target,session_token,connection,tx.clone(),connection_stop.clone(),config.disconnected_session_ttl).await {
                         Err(e) => tx.send(error(Some(id),"session_denied",e)).await.map_err(io::Error::other)?,
                         Ok(handles) => {
                             session_id=Some(target);
@@ -666,6 +677,10 @@ async fn client(
                 GameCommand::Ping {} => { tx.send(json!({"type":"pong","command_id":id})).await.map_err(io::Error::other)?; }
                 command => {
                     let Some(session) = session_id else { tx.send(error(Some(id),"hello_required","establish or resume game session first")).await.map_err(io::Error::other)?; continue; };
+                    // Core serializes ownership transfer and command side-effects for one session.
+                    // The gate spans owner validation, replay lookup, dispatch and receipt commit.
+                    let gate = sessions.command_gate(session).ok_or_else(|| io::Error::other("session not found"))?;
+                    let _admission = gate.lock().await;
                     if !sessions.is_active(session, connection) {
                         tx.send(error(Some(id),"session_replaced","another connection owns this session")).await.map_err(io::Error::other)?;
                         break;
@@ -955,5 +970,53 @@ async fn read_bounded_line<R: AsyncBufRead + Unpin>(
                 .map(Some)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
         }
+    }
+}
+
+#[cfg(test)]
+mod ownership_linearization_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn resume_waits_for_an_admitted_command_before_transferring_ownership() {
+        let sessions = Arc::new(Sessions::default());
+        let first = Uuid::new_v4();
+        let next = Uuid::new_v4();
+        let (old_tx, _old_rx) = mpsc::channel(4);
+        let (id, token) = sessions
+            .create(
+                first,
+                old_tx,
+                CancellationToken::new(),
+                2,
+                Duration::from_secs(60),
+            )
+            .unwrap();
+        let gate = sessions.command_gate(id).unwrap();
+        let admitted = gate.lock().await;
+        let (new_tx, _new_rx) = mpsc::channel(4);
+        let copy = Arc::clone(&sessions);
+        let mut handover = tokio::spawn(async move {
+            copy.resume(
+                id,
+                token,
+                next,
+                new_tx,
+                CancellationToken::new(),
+                Duration::from_secs(60),
+            )
+            .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut handover)
+                .await
+                .is_err()
+        );
+        assert!(sessions.is_active(id, first));
+        assert!(!sessions.is_active(id, next));
+        drop(admitted);
+        assert!(handover.await.unwrap().is_ok());
+        assert!(!sessions.is_active(id, first));
+        assert!(sessions.is_active(id, next));
     }
 }

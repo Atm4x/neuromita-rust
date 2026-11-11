@@ -48,6 +48,8 @@ impl Fixture {
             runtime_directory,
             backend: NativeBackend::Cpu,
             request_timeout: Duration::from_secs(3),
+            speech_contract_version: None,
+            speech_capabilities: Vec::new(),
         };
         Self { root, launch }
     }

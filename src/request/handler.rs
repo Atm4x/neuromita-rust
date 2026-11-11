@@ -325,15 +325,15 @@ impl MessageHandler {
                                 search_archived_history_fts(context.character_id, &context.view, &window, &history_query, config)
                             }
                             HistoryGenerationMode::Vector => {
-                                self.knowledge.search_archived_history_semantic(
+                                self.knowledge.search_archived_history_semantic_at(
                                     context.character_id, &context.view, &window, &history_query,
-                                    config, FusionMode::VectorOnly, None,
+                                    config, FusionMode::VectorOnly, None, context.turn,
                                 ).await
                             }
                             HistoryGenerationMode::Fusion => {
-                                self.knowledge.search_archived_history_semantic(
+                                self.knowledge.search_archived_history_semantic_at(
                                     context.character_id, &context.view, &window, &history_query,
-                                    config, FusionMode::Union, None,
+                                    config, FusionMode::Union, None, context.turn,
                                 ).await
                             }
                         }.map_err(|error| GenerationError::Response(format!(

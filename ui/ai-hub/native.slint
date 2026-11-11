@@ -13,6 +13,8 @@ export struct NativeRevisionRow {
     trusted: bool,
     trust-status: string,
     running: bool,
+    running-tts: bool,
+    running-asr: bool,
     observed-phase: string,
 }
 
@@ -29,6 +31,9 @@ export component NativeRevisionPanel inherits Rectangle {
     background: transparent;
     in property <[NativeRevisionRow]> revisions;
     in property <[NativeReleaseRow]> releases;
+    in property <string> model-filter-id: "";
+    in property <string> model-filter-revision: "";
+    in property <string> model-service: "";
     in property <bool> has-active: false;
     in property <string> status;
     in property <string> error;
@@ -41,8 +46,8 @@ export component NativeRevisionPanel inherits Rectangle {
     callback cancel-download-requested();
     callback refresh-requested();
     callback select-requested(string, string, string);
-    callback activate-requested(string);
-    callback stop-requested();
+    callback activate-requested(string, string, string);
+    callback stop-requested(string, string, string);
 
     VerticalLayout {
         spacing: 12px;
@@ -101,6 +106,7 @@ export component NativeRevisionPanel inherits Rectangle {
                     horizontal-stretch: 1; vertical-stretch: 1; content-width: self.visible-width;
                     VerticalLayout { spacing: 6px; padding-right: 7px;
                         for release in root.releases: Rectangle {
+                            visible: root.model-filter-id == "" || (release.model-id == root.model-filter-id && release.manifest-sha256 == root.model-filter-revision);
                             height: 57px; border-radius: 8px;
                             background: Theme.text.with-alpha(0.035);
                             HorizontalLayout { padding-left: 9px; padding-right: 9px; spacing: 9px;
@@ -146,6 +152,7 @@ export component NativeRevisionPanel inherits Rectangle {
             horizontal-stretch: 1; vertical-stretch: 1; content-width: self.visible-width;
             VerticalLayout { spacing: 9px; padding-right: 8px; padding-bottom: 6px;
                 for revision in root.revisions: Rectangle {
+                    visible: root.model-filter-id == "" || (revision.model-id == root.model-filter-id && revision.manifest-sha256 == root.model-filter-revision);
                     height: 116px; background: Theme.panel; border-width: 1px;
                     border-color: revision.running ? Theme.accent-border : Theme.border;
                     border-radius: 12px;
@@ -165,13 +172,14 @@ export component NativeRevisionPanel inherits Rectangle {
                             caption: "Выбрать"; compact: true;
                             activated => { root.select-requested(revision.model-id, revision.manifest-sha256, revision.backend); }
                         }
-                        if revision.selected && revision.trusted && !root.has-active: HubAction {
+                        if revision.selected && revision.trusted && (root.model-service == "tts" || root.model-service == "asr")
+                            && !(root.model-service == "tts" ? revision.running-tts : revision.running-asr): HubAction {
                             caption: "Запустить"; compact: true; primary: true;
-                            activated => { root.activate-requested(revision.model-id); }
+                            activated => { root.activate-requested(revision.model-id, root.model-service, revision.manifest-sha256); }
                         }
-                        if revision.running: HubAction {
+                        if root.model-service == "tts" ? revision.running-tts : root.model-service == "asr" ? revision.running-asr : false: HubAction {
                             caption: "Остановить"; compact: true;
-                            activated => { root.stop-requested(); }
+                            activated => { root.stop-requested(root.model-service, revision.model-id, revision.manifest-sha256); }
                         }
                     }
                 }

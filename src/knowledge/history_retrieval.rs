@@ -394,6 +394,31 @@ pub async fn search_archived_history_semantic(
     .await
 }
 
+pub(crate) async fn search_archived_history_semantic_at(
+    retriever: &SemanticMemoryRetriever,
+    character: CharacterId,
+    view: &MitaView,
+    window: &HistoryWindow,
+    query: &str,
+    config: HistorySearchConfig,
+    mode: FusionMode,
+    minimum_cosine: Option<f64>,
+    turn: crate::timeline::selection::TimelineTurn,
+) -> Result<HistorySearchResult, HistorySearchError> {
+    search_history_semantic_with_window_at(
+        retriever,
+        character,
+        view,
+        query,
+        config,
+        mode,
+        minimum_cosine,
+        Some(window),
+        Some(turn),
+    )
+    .await
+}
+
 async fn search_history_semantic_with_window(
     retriever: &SemanticMemoryRetriever,
     character: CharacterId,
@@ -403,6 +428,31 @@ async fn search_history_semantic_with_window(
     mode: FusionMode,
     minimum_cosine: Option<f64>,
     window: Option<&HistoryWindow>,
+) -> Result<HistorySearchResult, HistorySearchError> {
+    search_history_semantic_with_window_at(
+        retriever,
+        character,
+        view,
+        query,
+        config,
+        mode,
+        minimum_cosine,
+        window,
+        None,
+    )
+    .await
+}
+
+async fn search_history_semantic_with_window_at(
+    retriever: &SemanticMemoryRetriever,
+    character: CharacterId,
+    view: &MitaView,
+    query: &str,
+    config: HistorySearchConfig,
+    mode: FusionMode,
+    minimum_cosine: Option<f64>,
+    window: Option<&HistoryWindow>,
+    turn: Option<crate::timeline::selection::TimelineTurn>,
 ) -> Result<HistorySearchResult, HistorySearchError> {
     validate(character, view, query, config)?;
     if minimum_cosine.is_some_and(|value| !value.is_finite() || !(-1.0..=1.0).contains(&value)) {
@@ -424,7 +474,7 @@ async fn search_history_semantic_with_window(
         });
     }
     let (space, similarities, cost) = retriever
-        .score_history_messages(character, &messages, query)
+        .score_history_messages(character, &messages, query, turn)
         .await?;
     let mut ranked = messages.iter().zip(similarities).collect::<Vec<_>>();
     ranked.sort_by(|(left, left_score), (right, right_score)| {
@@ -446,7 +496,7 @@ async fn search_history_semantic_with_window(
         buckets.push(lexical_bucket(character, view, &messages, query));
     }
     let mut hits = fuse(character, &buckets, fusion)?;
-    retriever.rerank_fused(query, &mut hits).await?;
+    retriever.rerank_fused(query, &mut hits, turn).await?;
     hits.truncate(config.limit);
     Ok(finish(
         view,

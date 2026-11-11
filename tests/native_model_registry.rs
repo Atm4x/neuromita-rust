@@ -77,6 +77,8 @@ impl Fixture {
                 backends: vec![NativeBackend::Cpu],
                 file: file_ref(&runtime.join("runtime.bin"), "runtime.bin"),
             }],
+            speech_contract_version: None,
+            speech_capabilities: Vec::new(),
         };
         let fixture = Self {
             root,
@@ -362,4 +364,27 @@ fn cpu_does_not_require_files_only_needed_by_cuda_backend() {
         ),
         Err(NativeRegistryError::Io(_))
     ));
+}
+
+#[test]
+fn native_speech_requires_versioned_and_unique_manifest_capabilities() {
+    use neuromita::ai_runtime::native_speech::{NativeSpeechCapability, NativeSpeechKind};
+    let mut fixture = Fixture::new();
+    fixture.manifest.speech_capabilities = vec![NativeSpeechCapability {
+        kind: NativeSpeechKind::Tts,
+        sample_rate_hz: 16_000,
+        languages: vec!["ru".into()],
+    }];
+    fixture.write_manifest();
+    assert!(fixture.discover().is_err());
+    fixture.manifest.schema_version = 2;
+    fixture.manifest.speech_contract_version = Some(1);
+    fixture.write_manifest();
+    assert!(fixture.discover().is_ok());
+    fixture
+        .manifest
+        .speech_capabilities
+        .push(fixture.manifest.speech_capabilities[0].clone());
+    fixture.write_manifest();
+    assert!(fixture.discover().is_err());
 }

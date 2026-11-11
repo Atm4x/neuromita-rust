@@ -97,6 +97,8 @@ impl Fixture {
                     "shared/native-runtime.bin",
                 ),
             }],
+            speech_contract_version: None,
+            speech_capabilities: Vec::new(),
         };
         let fixture = Self {
             root,

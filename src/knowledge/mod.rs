@@ -177,6 +177,34 @@ impl KnowledgeRetrieval {
 
     /// Same live semantic owner, but only the older messages excluded by the
     /// admission-pinned conversation window may become retrieval evidence.
+    pub(crate) async fn search_archived_history_semantic_at(
+        &self,
+        character: CharacterId,
+        view: &crate::timeline::view::MitaView,
+        window: &history_window::HistoryWindow,
+        query: &str,
+        config: history_retrieval::HistorySearchConfig,
+        mode: FusionMode,
+        minimum_cosine: Option<f64>,
+        turn: crate::timeline::selection::TimelineTurn,
+    ) -> Result<history_retrieval::HistorySearchResult, history_retrieval::HistorySearchError> {
+        let KnowledgeMode::Semantic { retriever, .. } = &self.mode else {
+            return Err(history_retrieval::HistorySearchError::BackendUnavailable);
+        };
+        history_retrieval::search_archived_history_semantic_at(
+            retriever,
+            character,
+            view,
+            window,
+            query,
+            config,
+            mode,
+            minimum_cosine,
+            turn,
+        )
+        .await
+    }
+
     pub async fn search_archived_history_semantic(
         &self,
         character: CharacterId,
@@ -296,6 +324,24 @@ impl KnowledgeRetrieval {
         Ok(Self {
             mode: KnowledgeMode::Semantic { retriever, fusion },
         })
+    }
+
+    pub(crate) fn bind_dispatch_authority(
+        &self,
+        authority: Arc<
+            dyn Fn(
+                    crate::timeline::selection::TimelineTurn,
+                    Vec<crate::timeline::KnowledgeDispatchSource>,
+                )
+                    -> Result<crate::timeline::KnowledgeDispatchLease, EmbeddingError>
+                + Send
+                + Sync,
+        >,
+    ) -> Result<(), EmbeddingError> {
+        if let KnowledgeMode::Semantic { retriever, .. } = &self.mode {
+            retriever.bind_dispatch_authority(authority)?;
+        }
+        Ok(())
     }
 
     /// Reconcile a character's derived cache with a fresh Timeline projection.

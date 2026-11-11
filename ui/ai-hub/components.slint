@@ -23,11 +23,15 @@ export struct HubInstallOperation {
 export struct HubModelIdentity {
     category: string,
     id: string,
+    implementation: string,
+    revision: string,
 }
 
 export struct HubModel {
     id: string,
     category: string,
+    implementation: string,
+    revision: string,
     title: string,
     description: string,
     backend: string,

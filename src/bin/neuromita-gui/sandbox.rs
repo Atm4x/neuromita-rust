@@ -167,18 +167,21 @@ pub fn attach(
     let selection_revision = Arc::new(AtomicU64::new(0));
     let update_revision = selection_revision.clone();
     let pager = Arc::new(Mutex::new(HistoryPager::default()));
+    let hub_catalog = Arc::new(Mutex::new(super::ai_hub::HubCatalogState::default()));
     let update_pager = pager.clone();
     let runtime = DesktopRuntime::spawn(directory, model, move |update| {
+        let catalog = hub_catalog.clone();
         let editor = editor.clone();
         let update_revision = update_revision.clone();
         let update_pager = update_pager.clone();
         let _ = weak.upgrade_in_event_loop(move |window| {
-            apply_with_pager(
+            apply_with_catalog(
                 &window,
                 update,
                 &editor,
                 &update_revision,
                 Some(&update_pager),
+                &mut catalog.lock().expect("AI Hub catalog mutex poisoned"),
             );
         });
     })?;
@@ -531,6 +534,24 @@ pub(super) fn apply_with_pager(
     revision: &Arc<AtomicU64>,
     pager: Option<&Arc<Mutex<HistoryPager>>>,
 ) {
+    apply_with_catalog(
+        window,
+        update,
+        memory_editor,
+        revision,
+        pager,
+        &mut Default::default(),
+    );
+}
+
+fn apply_with_catalog(
+    window: &AppWindow,
+    update: Update,
+    memory_editor: &super::memory::EditorState,
+    revision: &Arc<AtomicU64>,
+    pager: Option<&Arc<Mutex<HistoryPager>>>,
+    hub: &mut super::ai_hub::HubCatalogState,
+) {
     match update {
         Update::RecognizedText {
             origin,
@@ -636,7 +657,7 @@ pub(super) fn apply_with_pager(
         }
         Update::NativeModels(snapshot) => super::ai_hub::native_models(window, *snapshot),
         Update::NativeReleaseCatalog(releases, overview) => {
-            super::ai_hub::native_release_catalog(window, releases, overview)
+            super::ai_hub::native_release_catalog(window, hub, releases, overview)
         }
         Update::NativeError(error) => super::ai_hub::native_error(window, error),
         Update::NativeDownloadStatus {
@@ -647,7 +668,7 @@ pub(super) fn apply_with_pager(
         Update::SpeechInventory(catalog, devices) => {
             super::voice::inventory(window, &catalog);
             super::asr::inventory(window, &catalog, &devices);
-            super::ai_hub::inventory(window, &catalog);
+            super::ai_hub::inventory(window, hub, &catalog);
         }
         Update::Releases(snapshot) => super::releases::render(window, &snapshot),
         Update::ReleaseError(error) => window.set_release_error(error.into()),

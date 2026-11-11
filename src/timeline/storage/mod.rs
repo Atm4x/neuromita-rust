@@ -10,3 +10,6 @@ pub use sqlite::{
 };
 
 pub mod python_archive;
+
+#[cfg(feature = "sqlite-system")]
+pub(crate) use sqlite::SqliteKnowledgeDispatchLease;

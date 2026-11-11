@@ -149,6 +149,129 @@ fn entry(category: SpeechHubCategory, option: &SpeechModelOption) -> SpeechHubEn
     }
 }
 
+/// Service-scoped, implementation-aware read model. The display name and the
+/// model id are never sufficient to resolve a user operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnifiedHubEntry {
+    pub service: String,
+    pub identity: crate::ai_runtime::model_identity::AiModelIdentity,
+    pub title: String,
+    pub description: String,
+    pub state: SpeechHubResourceState,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct UnifiedHubCatalog {
+    pub entries: Vec<UnifiedHubEntry>,
+    pub category_counts: [i32; 5],
+    pub discovery_error_count: usize,
+}
+
+impl UnifiedHubCatalog {
+    /// A signed release with no installed manifest has no trusted service
+    /// metadata; keep it in Else until an installed manifest can be read.
+    pub fn project(
+        speech: &SpeechInventory,
+        releases: &[crate::presentation::native_release_catalog::NativeReleaseRow],
+    ) -> Self {
+        use crate::ai_runtime::{
+            model_identity::{AiModelIdentity, WorkerImplementation},
+            native_speech::NativeSpeechKind,
+        };
+        let speech_catalog = SpeechHubCatalog::from_inventory(speech);
+        let mut entries = speech_catalog
+            .entries
+            .into_iter()
+            .map(|entry| UnifiedHubEntry {
+                service: entry.category.as_str().to_string(),
+                identity: AiModelIdentity {
+                    model_id: entry.id,
+                    implementation: WorkerImplementation::Python,
+                    revision: None,
+                },
+                title: entry.title,
+                description: entry.description.to_string(),
+                state: entry.state,
+            })
+            .collect::<Vec<_>>();
+        for release in releases {
+            let services = if release.speech_services.is_empty() {
+                vec!["else"]
+            } else {
+                release
+                    .speech_services
+                    .iter()
+                    .map(|service| match service {
+                        NativeSpeechKind::Tts => "tts",
+                        NativeSpeechKind::Asr => "asr",
+                    })
+                    .collect::<Vec<_>>()
+            };
+            for service in services {
+                entries.push(UnifiedHubEntry {
+                    service: service.into(),
+                    identity: AiModelIdentity {
+                        model_id: release.model_id.clone(),
+                        implementation: WorkerImplementation::Rust,
+                        revision: Some(release.manifest_sha256.clone()),
+                    },
+                    title: release
+                        .display_name
+                        .clone()
+                        .unwrap_or_else(|| release.model_id.clone()),
+                    description: if release.installed {
+                        format!(
+                            "Manifest обнаружен, файлы не проверены · издатель {} · {}",
+                            release.publisher_id,
+                            release
+                                .package_version
+                                .as_deref()
+                                .unwrap_or("версия не указана")
+                        )
+                    } else {
+                        format!(
+                            "Подписанный релиз · издатель {} · пакет не установлен",
+                            release.publisher_id
+                        )
+                    },
+                    state: if release.installed {
+                        SpeechHubResourceState::PackageOnly
+                    } else {
+                        SpeechHubResourceState::Discovered
+                    },
+                });
+            }
+        }
+        entries.sort_by(|a, b| {
+            a.service
+                .cmp(&b.service)
+                .then(a.title.cmp(&b.title))
+                .then(a.identity.model_id.cmp(&b.identity.model_id))
+                .then(a.identity.implementation.cmp(&b.identity.implementation))
+                .then(a.identity.revision.cmp(&b.identity.revision))
+        });
+        // Duplicate immutable identities are rejected, not silently mapped to
+        // the first matching row (which could install a different revision).
+        let mut seen = std::collections::HashSet::new();
+        let original_len = entries.len();
+        entries.retain(|entry| seen.insert((entry.service.clone(), entry.identity.clone())));
+        let counts = ["tts", "asr", "core", "rag", "else"].map(|service| {
+            i32::try_from(
+                entries
+                    .iter()
+                    .filter(|entry| entry.service == service)
+                    .count(),
+            )
+            .unwrap_or(i32::MAX)
+        });
+        Self {
+            entries,
+            category_counts: counts,
+            discovery_error_count: speech_catalog.discovery_error_count + original_len - seen.len(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,5 +517,101 @@ mod tests {
         assert_eq!(catalog.entries[0].id, catalog.entries[1].id);
         assert_ne!(catalog.entries[0].category, catalog.entries[1].category);
         assert_ne!(catalog.entries[0].state, catalog.entries[1].state);
+    }
+}
+
+#[cfg(test)]
+mod unified_tests {
+    use super::*;
+    use crate::ai_runtime::{
+        model_identity::WorkerImplementation, native_speech::NativeSpeechKind,
+    };
+    use crate::presentation::native_release_catalog::NativeReleaseRow;
+
+    fn python_voice(id: &str) -> SpeechModelOption {
+        SpeechModelOption {
+            id: id.into(),
+            name: "Shared Voice".into(),
+            package_detected: true,
+            verified_assets: true,
+            installed_revisions: vec!["python-assets-v1".into()],
+        }
+    }
+
+    fn native_voice(digest: &str, installed: bool) -> NativeReleaseRow {
+        NativeReleaseRow {
+            model_id: "shared".into(),
+            publisher_id: "publisher".into(),
+            manifest_sha256: digest.into(),
+            installed,
+            display_name: installed.then(|| "Shared Voice".into()),
+            package_version: installed.then(|| "1.0.0".into()),
+            speech_services: if installed {
+                vec![NativeSpeechKind::Tts]
+            } else {
+                vec![]
+            },
+        }
+    }
+
+    #[test]
+    fn same_service_name_and_id_are_distinct_by_worker_implementation_and_revision() {
+        let speech = SpeechInventory {
+            tts: vec![python_voice("shared")],
+            ..Default::default()
+        };
+        let approved = vec![
+            native_voice(&"a".repeat(64), true),
+            native_voice(&"b".repeat(64), true),
+        ];
+        let catalog = UnifiedHubCatalog::project(&speech, &approved);
+        assert_eq!(catalog.category_counts, [3, 0, 0, 0, 0]);
+        assert_eq!(catalog.entries.len(), 3);
+        assert!(
+            catalog
+                .entries
+                .iter()
+                .all(|entry| entry.title == "Shared Voice")
+        );
+        assert!(
+            catalog
+                .entries
+                .iter()
+                .any(
+                    |entry| entry.identity.implementation == WorkerImplementation::Python
+                        && entry.identity.revision.is_none()
+                )
+        );
+        assert_eq!(
+            catalog
+                .entries
+                .iter()
+                .filter(
+                    |entry| entry.identity.implementation == WorkerImplementation::Rust
+                        && entry.identity.revision.is_some()
+                )
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn uninstalled_release_cannot_claim_a_service_without_installed_manifest() {
+        let catalog = UnifiedHubCatalog::project(
+            &SpeechInventory::default(),
+            &[native_voice(&"a".repeat(64), false)],
+        );
+        assert_eq!(catalog.category_counts, [0, 0, 0, 0, 1]);
+        assert_eq!(catalog.entries[0].service, "else");
+        assert_eq!(catalog.entries[0].state, SpeechHubResourceState::Discovered);
+    }
+
+    #[test]
+    fn two_services_may_share_one_manifest_without_collapsing_catalog_rows() {
+        let mut native = native_voice(&"a".repeat(64), true);
+        native.speech_services = vec![NativeSpeechKind::Tts, NativeSpeechKind::Asr];
+        let catalog = UnifiedHubCatalog::project(&SpeechInventory::default(), &[native]);
+        assert_eq!(catalog.category_counts, [1, 1, 0, 0, 0]);
+        assert_ne!(catalog.entries[0].service, catalog.entries[1].service);
     }
 }

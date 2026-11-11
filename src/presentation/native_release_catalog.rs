@@ -13,6 +13,7 @@ pub struct NativeReleaseRow {
     pub installed: bool,
     pub display_name: Option<String>,
     pub package_version: Option<String>,
+    pub speech_services: Vec<crate::ai_runtime::native_speech::NativeSpeechKind>,
 }
 
 pub struct NativeReleaseCatalogPresenter;
@@ -40,6 +41,8 @@ impl NativeReleaseCatalogPresenter {
                     installed: revision.is_some(),
                     display_name: revision.map(|revision| revision.display_name.clone()),
                     package_version: revision.map(|revision| revision.package_version.clone()),
+                    speech_services: revision
+                        .map_or_else(Vec::new, |revision| revision.speech_services.clone()),
                 }
             })
             .collect()
@@ -77,6 +80,7 @@ mod tests {
                 package_version: "1".into(),
                 manifest_sha256: [1; 32],
                 backends: vec![],
+                speech_services: vec![],
             }],
             selections: vec![],
         };
