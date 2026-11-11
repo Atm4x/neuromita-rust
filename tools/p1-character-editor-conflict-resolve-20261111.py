@@ -52,3 +52,28 @@ after = "                    .set_settings_error(error.into());\n            }\n
 if content.count(before) != 1:
     raise RuntimeError("unexpected dedup handler closure")
 path.write_text(content.replace(before, after))
+
+gui = root / "src/bin/neuromita-gui/settings.rs"
+content = gui.read_text()
+previous = "api.settings\\n                .request_save()\\n                .map_err(|error| error.to_string())?;"
+updated = "api.settings\\n                .retry_failed_save()\\n                .map_err(|error| error.to_string())?;"
+if content.count(previous) != 1:
+    raise RuntimeError("old editor retry call path changed")
+gui.write_text(content.replace(previous, updated))
+presenter = root / "src/presentation/settings.rs"
+content = presenter.read_text()
+anchor = "    pub fn snapshot(&self) -> Result<Arc<SettingsSnapshot>, SettingsError> {\\n        self.owner.snapshot_all()\\n    }\\n"
+method = """    pub fn retry_failed_save(&self) -> Result<(), SettingsError> {
+        let snapshot = self.owner.snapshot_all()?;
+        if !matches!(snapshot.persistence, PersistenceState::Failed { .. }) {
+            return Err(SettingsError::Validation(
+                "there is no failed settings write to retry".into(),
+            ));
+        }
+        self.owner.request_save()
+    }
+
+"""
+if content.count(anchor) != 1:
+    raise RuntimeError("settings presenter method insertion site changed")
+presenter.write_text(content.replace(anchor, method + anchor))
