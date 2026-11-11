@@ -1,0 +1,28 @@
+name: Q2 onboarding Windows native Rust GUI check
+on:
+  push:
+    branches: [codex/q2-onboarding-wiki-acceptance-20261111]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows-gui:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        shell: pwsh
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+      - name: Windows GUI compile and onboarding persistence tests
+        shell: pwsh
+        env:
+          CARGO_BUILD_JOBS: "2"
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: |
+          cargo +1.98.1 fmt --all -- --check
+          cargo +1.98.1 check --locked --features gui --bin neuromita-gui
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.98.1 test --locked --lib onboarding::tests -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

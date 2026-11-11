@@ -84,9 +84,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     window.set_onboarding_eula_text(neuromita::onboarding::eula_text("ru").into());
     window.set_onboarding_required(true);
     window.show()?;
-    window
-        .window()
-        .set_size(slint::PhysicalSize::new(1180, 680));
+    let ui_scale = std::env::var("Q2_UI_SCALE_FACTOR")
+        .ok()
+        .and_then(|value| value.parse::<f32>().ok())
+        .unwrap_or(1.0);
+    if !(1.0..=2.0).contains(&ui_scale) {
+        return Err("Q2_UI_SCALE_FACTOR must be between 1.0 and 2.0".into());
+    }
+    window.window().set_size(slint::PhysicalSize::new(
+        (1180.0 * ui_scale).round() as u32,
+        (680.0 * ui_scale).round() as u32,
+    ));
+    eprintln!("Q2 GUI physical scale factor: {ui_scale}");
 
     let clicked_link = Rc::new(RefCell::new(None::<String>));
     let clicked_for_callback = clicked_link.clone();
