@@ -36,11 +36,17 @@ jobs:
           old = """                    Ok(snapshot) => publish(Update::Snapshot(Box::new(snapshot))),
                     Err(error) => publish(Update::Error(error.to_string())),"""
           new = """                    Ok(snapshot) => publish(Update::Snapshot(
-                        ChatOrigin { character, selection_revision },
+                        ChatOrigin {
+                            character,
+                            selection_revision,
+                        },
                         Box::new(snapshot),
                     )),
                     Err(error) => publish(Update::ChatError(
-                        ChatOrigin { character, selection_revision },
+                        ChatOrigin {
+                            character,
+                            selection_revision,
+                        },
                         error.to_string(),
                     )),"""
           assert s.count(old) == 1, "runtime request snapshot owner contract changed"
