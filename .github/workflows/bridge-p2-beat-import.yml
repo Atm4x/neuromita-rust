@@ -45,10 +45,11 @@ jobs:
           git config user.name 'P2 CI Integrator'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git merge --squash --no-commit "$SOURCE_SHA"
+          git restore --staged .github/workflows/beat-sync-cache.yml
+          rm -f .github/workflows/beat-sync-cache.yml
           git diff --cached --check
           git diff --cached --name-only | sort > /tmp/actual-beat-paths
           cat > /tmp/expected-beat-paths <<'EOF'
-          .github/workflows/beat-sync-cache.yml
           docs/01-functional/beat-sync-cache-slice.md
           src/app.rs
           src/bin/beat_sync.rs
