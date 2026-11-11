@@ -1,0 +1,33 @@
+name: Issue417 incremental bundle export
+on:
+  push:
+    branches:
+      - bridge/issue417-incremental-export-20261111
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Create verified increment
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin +refs/heads/codex/abcd-integration-20261110:refs/heads/issue417-head
+          test "$(git rev-parse refs/heads/issue417-head)" = "7e055da3eadca750dbe835d98fbceb20433c7d57"
+          git cat-file -e f0f2199ea017c3115e56885973f6923e7fd3c794^{commit}
+          git merge-base --is-ancestor f0f2199ea017c3115e56885973f6923e7fd3c794 refs/heads/issue417-head
+          git bundle create "$RUNNER_TEMP/issue417.bundle" refs/heads/issue417-head ^f0f2199ea017c3115e56885973f6923e7fd3c794
+          git bundle verify "$RUNNER_TEMP/issue417.bundle"
+          (cd "$RUNNER_TEMP"; sha256sum issue417.bundle > issue417.bundle.sha256)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: issue417-incremental-bundle
+          path: |
+            ${{ runner.temp }}/issue417.bundle
+            ${{ runner.temp }}/issue417.bundle.sha256
+          retention-days: 1
+          compression-level: 0
