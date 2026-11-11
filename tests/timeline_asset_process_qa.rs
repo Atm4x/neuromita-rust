@@ -1,6 +1,6 @@
 use std::{
     env, fs,
-    io::Cursor,
+    io::{Cursor, Read},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -247,4 +247,86 @@ fn crash_after_asset_publish_before_sqlite_receipt_is_recoverable() {
     let retained = assets.inventory(&[reference]).unwrap();
     assert_eq!(retained.retained.len(), 1);
     assert!(retained.orphan_candidates.is_empty());
+}
+
+struct PausedUpload {
+    marker: PathBuf,
+    stage: usize,
+}
+
+impl Read for PausedUpload {
+    fn read(&mut self, target: &mut [u8]) -> std::io::Result<usize> {
+        if self.stage == 0 {
+            self.stage = 1;
+            let count = target.len().min(1024);
+            target[..count].fill(0xa7);
+            return Ok(count);
+        }
+        if self.stage == 1 {
+            fs::write(&self.marker, b"staging-written")?;
+            self.stage = 2;
+        }
+        loop {
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+#[test]
+fn q1_asset_stalled_upload_worker() {
+    let Some(root) = env::var_os("NEUROMITA_Q1_ASSET_STALL_ROOT") else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    let store = TimelineAssetStore::new(root.join("assets"), 8192).unwrap();
+    let reader = PausedUpload {
+        marker: root.join("staging-written"),
+        stage: 0,
+    };
+    store.import("image/png", reader).unwrap();
+}
+
+#[test]
+fn kill_during_upload_never_publishes_an_unverified_blob() {
+    let temp = TempRoot::new();
+    let binary = env::current_exe().unwrap();
+    let mut worker = Command::new(&binary)
+        .arg("--exact")
+        .arg("q1_asset_stalled_upload_worker")
+        .env("NEUROMITA_Q1_ASSET_STALL_ROOT", &temp.0)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let marker = temp.0.join("staging-written");
+    let mut ready = false;
+    for _ in 0..500 {
+        if marker.exists() {
+            ready = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    if !ready {
+        worker.kill().ok();
+        let _ = worker.wait();
+        panic!("upload worker never wrote the partial staging object");
+    }
+    let staging = temp.0.join("assets/staging");
+    let partial: Vec<_> = fs::read_dir(&staging)
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(partial.len(), 1);
+    assert_eq!(partial[0].metadata().unwrap().len(), 1024);
+    worker.kill().unwrap();
+    assert!(!worker.wait().unwrap().success());
+
+    let store = TimelineAssetStore::new(temp.0.join("assets"), 8192).unwrap();
+    assert!(store.inventory(&[]).unwrap().orphan_candidates.is_empty());
+    assert!(!temp.0.join("assets/objects").exists());
+    let reference = upload(&store);
+    store.verify(&reference).unwrap();
+    assert_eq!(store.inventory(&[]).unwrap().orphan_candidates.len(), 1);
+    assert_eq!(fs::read_dir(staging).unwrap().count(), 1);
 }
