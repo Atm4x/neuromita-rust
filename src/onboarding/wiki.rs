@@ -83,6 +83,7 @@ pub enum WikiLink<'a> {
         id: &'static str,
         anchor: Option<&'a str>,
     },
+    SamePageAnchor(&'a str),
     AppHome,
     AppSandbox,
     AppSettings,
@@ -144,6 +145,13 @@ pub fn resolve_link(link: &str) -> Result<WikiLink<'_>, WikiLinkError> {
             return Ok(WikiLink::AppSettingsSection(WikiSettingsSection::Screen));
         }
         _ => {}
+    }
+    if let Some(anchor) = link.strip_prefix('#') {
+        return if anchor.is_empty() || anchor.contains('#') {
+            Err(WikiLinkError::InvalidUrl)
+        } else {
+            Ok(WikiLink::SamePageAnchor(anchor))
+        };
     }
     if link.starts_with("app:") {
         return Err(WikiLinkError::UnsupportedDeepLink);
@@ -216,6 +224,11 @@ mod tests {
             );
         }
         assert_eq!(resolve_link("./index.md#"), Err(WikiLinkError::InvalidUrl));
+        assert_eq!(
+            resolve_link("#быстрый-старт"),
+            Ok(WikiLink::SamePageAnchor("быстрый-старт"))
+        );
+        assert_eq!(resolve_link("#"), Err(WikiLinkError::InvalidUrl));
         assert_eq!(resolve_link("\0"), Err(WikiLinkError::InvalidUrl));
     }
 

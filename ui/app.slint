@@ -15,14 +15,14 @@ import { SettingsPage, SettingsUi, PresetItem, PresetTemplateItem, CharacterPres
 import { VoiceUi } from "pages/voice.slint";
 import { AsrUi } from "pages/asr.slint";
 import { PlaceholderPage } from "pages/placeholder.slint";
-import { WikiReader, WikiArticleEntry } from "pages/wiki.slint";
+import { WikiReader, WikiArticleEntry, WikiSection } from "pages/wiki.slint";
 import { LauncherMenuAction } from "components/launcher-menu.slint";
 import { I18n, LocaleOption } from "i18n.slint";
 import { SandboxPage, ChatRow, ChatStatus } from "pages/sandbox.slint";
 import { ReleasesPage, ReleaseEntry } from "pages/releases.slint";
 import { AboutPage } from "pages/about.slint";
 
-export { NativeRevisionRow, NativeReleaseRow, HubModel, AiEngineUi, AiHardwareDevice, VoiceUi, AsrUi, CharacterCatalog, MemoryUi, MemoryItem, ConversationUi, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, PageId, ComponentCard, ReleaseItem, ReleaseEntry, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus, GuideFocusTarget, GuideContentsEntry, WikiArticleEntry }
+export { NativeRevisionRow, NativeReleaseRow, HubModel, AiEngineUi, AiHardwareDevice, VoiceUi, AsrUi, CharacterCatalog, MemoryUi, MemoryItem, ConversationUi, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, PageId, ComponentCard, ReleaseItem, ReleaseEntry, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus, GuideFocusTarget, GuideContentsEntry, WikiArticleEntry, WikiSection }
 
 export struct GuideSectionEntry { first: int, last: int, title: string }
 export { HubImplementation }
@@ -56,6 +56,9 @@ export component AppWindow inherits Window {
     in property <string> wiki-current-article;
     in property <string> wiki-current-title;
     in property <styled-text> wiki-article-text;
+    in property <[WikiSection]> wiki-sections;
+    in-out property <int> wiki-scroll-target: 0;
+    in-out property <int> wiki-scroll-revision: 0;
     in property <string> wiki-language: "ru";
     in property <bool> wiki-can-back: false;
     in property <bool> wiki-can-forward: false;
@@ -285,6 +288,9 @@ export component AppWindow inherits Window {
             if !root.ai-hub-open && root.page == PageId.wiki: WikiReader {
                 width: parent.width; height: parent.height;
                 articles: root.wiki-articles;
+                sections: root.wiki-sections;
+                scroll-target: root.wiki-scroll-target;
+                scroll-revision: root.wiki-scroll-revision;
                 current-article: root.wiki-current-article;
                 current-title: root.wiki-current-title;
                 article-text: root.wiki-article-text;
@@ -542,7 +548,7 @@ export component AppWindow inherits Window {
         background: #080d19ef;
         TouchArea { width: parent.width; height: parent.height; }
         Rectangle {
-            width: 900px; height: 630px; x: (parent.width - self.width) / 2;
+            width: min(900px, parent.width - 32px); height: min(630px, parent.height - 32px); x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             background: Theme.panel; border-width: 1px; border-color: Theme.border;
             border-radius: 18px;
@@ -570,13 +576,41 @@ export component AppWindow inherits Window {
                 Rectangle {
                     background: Theme.background; border-radius: 12px;
                     vertical-stretch: 1;
-                    ScrollView {
+                    eula-scroll := ScrollView {
+                        width: parent.width; height: parent.height;
                         content-width: self.visible-width;
-                        Text {
-                            x: 14px; y: 14px; width: parent.width - 28px;
+                        content-height: max(self.visible-height, eula-body.preferred-height + 28px);
+                        vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
+                        eula-body := Text {
+                            x: 14px; y: 14px; width: max(1px, eula-scroll.visible-width - 42px);
                             height: self.preferred-height;
                             text: root.onboarding-eula-text;
                             color: Theme.text; font-size: 13px; wrap: word-wrap;
+                        }
+                    }
+                    eula-keys := FocusScope {
+                        width: 0px; height: 0px;
+                        private property <bool> consent-active: root.onboarding-required;
+                        changed consent-active => {
+                            if root.onboarding-required { self.focus(); }
+                        }
+                        key-pressed(event) => {
+                            if event.text == Key.PageDown || event.text == Key.DownArrow {
+                                eula-scroll.content-y = max(eula-scroll.visible-height - eula-scroll.content-height,
+                                    eula-scroll.content-y - (event.text == Key.PageDown ? eula-scroll.visible-height * 0.85 : 40px));
+                                return accept;
+                            }
+                            if event.text == Key.PageUp || event.text == Key.UpArrow {
+                                eula-scroll.content-y = min(0px,
+                                    eula-scroll.content-y + (event.text == Key.PageUp ? eula-scroll.visible-height * 0.85 : 40px));
+                                return accept;
+                            }
+                            if event.text == Key.Home { eula-scroll.content-y = 0px; return accept; }
+                            if event.text == Key.End {
+                                eula-scroll.content-y = min(0px, eula-scroll.visible-height - eula-scroll.content-height);
+                                return accept;
+                            }
+                            return reject;
                         }
                     }
                 }

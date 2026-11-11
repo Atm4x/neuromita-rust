@@ -7,11 +7,21 @@ export struct WikiArticleEntry {
     title: string,
 }
 
+export struct WikiSection {
+    id: string,
+    title: string,
+    level: int,
+    text: styled-text,
+}
+
 export component WikiReader inherits Rectangle {
     in property <[WikiArticleEntry]> articles;
     in property <string> current-article;
     in property <string> current-title;
     in property <styled-text> article-text;
+    in property <[WikiSection]> sections;
+    in property <int> scroll-target: 0;
+    in property <int> scroll-revision: 0;
     in property <string> language: "ru";
     in property <bool> can-back;
     in property <bool> can-forward;
@@ -112,19 +122,41 @@ export component WikiReader inherits Rectangle {
                     }
                 }
                 Rectangle { height: 1px; background: Theme.divider; }
-                ScrollView {
+                article-scroll := ScrollView {
                     vertical-stretch: 1;
                     content-width: self.visible-width;
-                    StyledText {
-                        x: 10px;
-                        y: 10px;
-                        width: parent.width - 20px;
-                        height: self.preferred-height;
-                        text: root.article-text;
-                        default-color: Theme.text;
-                        default-font-size: 14px;
-                        link-color: Theme.accent-hover;
-                        link-clicked(url) => { root.open-link(url); }
+                    content-height: max(self.visible-height, article-layout.preferred-height + 28px);
+                    private property <string> observed-article: root.current-article;
+                    changed observed-article => { article-scroll.content-y = 0px; }
+                    article-layout := VerticalLayout {
+                        x: 10px; y: 10px;
+                        width: max(1px, article-scroll.visible-width - 36px);
+                        spacing: 15px;
+                        for section[index] in root.sections: VerticalLayout {
+                            spacing: 7px;
+                            private property <int> observed-revision: root.scroll-revision;
+                            changed observed-revision => {
+                                if index == root.scroll-target {
+                                    article-scroll.content-y = max(article-scroll.visible-height - article-scroll.content-height, -self.y - 10px);
+                                }
+                            }
+                            Text {
+                                text: section.title;
+                                color: Theme.text;
+                                font-size: section.level == 1 ? 25px : 18px;
+                                font-weight: 700;
+                                wrap: word-wrap;
+                            }
+                            StyledText {
+                                width: parent.width;
+                                height: self.preferred-height;
+                                text: section.text;
+                                default-color: Theme.text;
+                                default-font-size: 14px;
+                                link-color: Theme.accent-hover;
+                                link-clicked(url) => { root.open-link(url); }
+                            }
+                        }
                     }
                 }
             }

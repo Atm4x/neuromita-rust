@@ -245,10 +245,19 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
         match wiki::resolve_link(&url) {
             Ok(WikiLink::Article { id, anchor }) => {
                 let mut history = wiki_controller.borrow_mut();
-                history.open(id);
-                super::wiki::render(&window, &history);
-                if anchor.is_some() {
-                    window.set_notice("Wiki anchors are not yet supported".into());
+                history.open_with_anchor(id, anchor);
+                if !super::wiki::render_to_anchor(&window, &history, anchor) {
+                    window.set_notice(
+                        format!("Unknown Wiki anchor: {}", anchor.unwrap_or_default()).into(),
+                    );
+                }
+            }
+            Ok(WikiLink::SamePageAnchor(anchor)) => {
+                let mut history = wiki_controller.borrow_mut();
+                let article = history.current();
+                history.open_with_anchor(article, Some(anchor));
+                if !super::wiki::render_to_anchor(&window, &history, Some(anchor)) {
+                    window.set_notice(format!("Unknown Wiki anchor: {anchor}").into());
                 }
             }
             Ok(WikiLink::AppHome) => window.invoke_navigate(PageId::Home),
