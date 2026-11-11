@@ -41,6 +41,13 @@ jobs:
           test "$(git rev-parse HEAD)" = "8230fa2592c6ab1b0a4fc2b805a58ae4b1132417"
           git apply --check /tmp/p1-pr307-accepted-only.patch
           git apply --index /tmp/p1-pr307-accepted-only.patch
+          git fetch --no-tags origin refs/pull/307/head:refs/remotes/origin/p1-307
+          test "$(git rev-parse refs/remotes/origin/p1-307)" = "995fe2fcc4cb50be570a7bd2e0bf4215d49a7a7d"
+          git diff e38ee3975cee12d2a3b06535df1f2537fdef05ad refs/remotes/origin/p1-307 -- \
+            src/bin/neuromita-gui/runtime.rs src/presentation/characters.rs src/prompts/post_dsl.rs \
+            > /tmp/p1-pr307-postdsl-debug.patch
+          git apply --check /tmp/p1-pr307-postdsl-debug.patch
+          git apply --index /tmp/p1-pr307-postdsl-debug.patch
           git diff --cached --check
           git diff --cached --stat
       - name: Native Linux packages
@@ -61,6 +68,11 @@ jobs:
       - name: Actual accepted-rejected-accepted LLM vertical slice
         working-directory: rust
         run: cargo +1.98.1 test --locked --offline --test vertical_slice prompt_nonlocal_set_is_persisted_only_after_accepted_reply -- --test-threads=2
+      - name: PostDSL preview rejection and debug credential redaction tests
+        working-directory: rust
+        run: |
+          cargo +1.98.1 test --locked --offline --lib preview_replay_and_invalid_custom_fields_never_mutate_input_state -- --test-threads=2
+          cargo +1.98.1 test --locked --offline --lib debug_display_redacts_credentials_but_not_character_secrets -- --test-threads=2
       - name: Prompt and PostDSL tests
         working-directory: rust
         run: |
