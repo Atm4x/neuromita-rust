@@ -1,0 +1,53 @@
+name: ABCD exact common ServiceWorker import and GUI acceptance
+on:
+  push:
+    branches:
+      - bridge/abcd-common-worker-import-20261111
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify exact service worker Git bundle and fast-forward target
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f transfer/abcd-common-worker.b64 || exit 0
+          git fetch origin +refs/heads/codex/abcd-core-boundary-fixes-20261110:refs/heads/abcd-base
+          BASE=$(git rev-parse refs/heads/abcd-base)
+          test "$BASE" = "97d39e8b5578d1678f56eb693146ca8466c08201"
+          base64 -d transfer/abcd-common-worker.b64 > "$RUNNER_TEMP/abcd-common-worker.bundle"
+          echo "c6fbd9e959d245282ae13a69a6afaf01f66c51a0acf38a95874a9b1f89089b67  $RUNNER_TEMP/abcd-common-worker.bundle" | sha256sum -c -
+          git bundle verify "$RUNNER_TEMP/abcd-common-worker.bundle"
+          git fetch "$RUNNER_TEMP/abcd-common-worker.bundle" refs/heads/codex/abcd-integration-20261110:refs/heads/abcd-candidate
+          HEAD=$(git rev-parse refs/heads/abcd-candidate)
+          test "$HEAD" = "f0f2199ea017c3115e56885973f6923e7fd3c794"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git push origin refs/heads/abcd-candidate:refs/heads/codex/abcd-core-boundary-fixes-20261110
+  gui-check:
+    if: github.event.head_commit.message == 'bridge-transfer-ready'
+    needs: import
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: f0f2199ea017c3115e56885973f6923e7fd3c794
+          fetch-depth: 1
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libasound2-dev libudev-dev libxkbcommon-dev libfontconfig1-dev
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - name: Compile Slint GUI and Presenter
+        env:
+          CARGO_BUILD_JOBS: 1
+          CARGO_INCREMENTAL: 0
+          CARGO_PROFILE_DEV_DEBUG: 0
+        run: cargo check --features gui --bin neuromita-gui --offline -j1
