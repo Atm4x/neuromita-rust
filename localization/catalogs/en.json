@@ -1,4 +1,5 @@
 {
+  "ai-hub.use-model": {"source":"Использовать выбранную модель","translation":"Use selected model"},
   "memory.graph.preview": {"source":"Проверить связи","translation":"Review links"},
   "memory.graph.reindex.confirm": {"source":"Подтвердить reindex","translation":"Confirm reindex"},
   "memory.graph.reindex.preview": {"source":"Проверить reindex","translation":"Review reindex"},

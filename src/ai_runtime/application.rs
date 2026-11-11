@@ -322,6 +322,60 @@ impl AiApplicationConfig {
 }
 
 impl RunningAiApplication {
+    pub(crate) fn take_services(&mut self, services: &[AiService]) -> Self {
+        let active = self
+            .active
+            .iter()
+            .copied()
+            .filter(|service| services.contains(service))
+            .collect();
+        let selected = self
+            .selected
+            .iter()
+            .copied()
+            .filter(|service| services.contains(service))
+            .collect();
+        let worker_services = self
+            .worker_services
+            .iter()
+            .filter(|(service, _)| services.contains(service))
+            .map(|(service, members)| (*service, members.clone()))
+            .collect();
+        let prepared_workers = self
+            .prepared_workers
+            .iter()
+            .filter(|worker| services.contains(&worker.service))
+            .cloned()
+            .collect::<Vec<_>>()
+            .into();
+        self.active.retain(|service| !services.contains(service));
+        self.selected.retain(|service| !services.contains(service));
+        self.worker_services
+            .retain(|service, _| !services.contains(service));
+        self.prepared_workers = self
+            .prepared_workers
+            .iter()
+            .filter(|worker| !services.contains(&worker.service))
+            .cloned()
+            .collect::<Vec<_>>()
+            .into();
+        let hardware_service = self
+            .hardware_service
+            .filter(|service| services.contains(service));
+        if hardware_service.is_some() {
+            self.hardware_service = None;
+        }
+        Self {
+            supervisor: Arc::clone(&self.supervisor),
+            active,
+            selected,
+            worker_services,
+            prepared_workers,
+            hardware_service,
+            voice_profiles: self.voice_profiles.clone(),
+        }
+    }
+
     pub fn observe_status(
         &self,
     ) -> tokio::sync::watch::Receiver<super::runtime_status::RuntimeSnapshot> {
@@ -329,11 +383,16 @@ impl RunningAiApplication {
     }
 
     pub fn status_snapshot(&self) -> super::runtime_status::RuntimeSnapshot {
-        self.supervisor.status_snapshot()
+        let mut snapshot = self.supervisor.status_snapshot();
+        snapshot
+            .services
+            .retain(|service, _| self.worker_services.contains_key(service));
+        snapshot
     }
 
     pub async fn refresh_status(&self) -> super::runtime_status::RuntimeSnapshot {
-        self.supervisor.refresh_status().await
+        self.supervisor.refresh_status().await;
+        self.status_snapshot()
     }
 
     pub(crate) fn worker_services(&self, service: AiService) -> Option<&[AiService]> {

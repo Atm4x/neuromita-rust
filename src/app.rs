@@ -1049,12 +1049,33 @@ impl ApplicationLifecycle {
         };
         knowledge.bind_dispatch_authority({
             let timeline = Arc::clone(&timeline);
+            #[cfg(feature = "sqlite-system")]
+            let repository = timeline
+                .lock()
+                .map_err(|_| EmbeddingError::StaleKnowledge)?
+                .dispatch_repository();
             Arc::new(move |turn, sources| {
-                timeline
-                    .lock()
-                    .map_err(|_| EmbeddingError::StaleKnowledge)?
-                    .admit_knowledge_dispatch(turn, &sources)
-                    .map_err(|_| EmbeddingError::StaleKnowledge)
+                let timeline = Arc::clone(&timeline);
+                #[cfg(feature = "sqlite-system")]
+                let repository = repository.clone();
+                Box::pin(async move {
+                    tokio::task::spawn_blocking(move || {
+                        #[cfg(feature = "sqlite-system")]
+                        if let Some(repository) = repository {
+                            return repository
+                                .admit_knowledge_dispatch(turn, &sources)
+                                .map(crate::timeline::KnowledgeDispatchLease::from_sqlite)
+                                .map_err(|_| EmbeddingError::StaleKnowledge);
+                        }
+                        timeline
+                            .lock()
+                            .map_err(|_| EmbeddingError::StaleKnowledge)?
+                            .admit_knowledge_dispatch(turn, &sources)
+                            .map_err(|_| EmbeddingError::StaleKnowledge)
+                    })
+                    .await
+                    .map_err(|error| EmbeddingError::Transport(error.to_string()))?
+                })
             })
         })?;
         // A stable speech boundary is needed even if no worker was installed at
@@ -1064,12 +1085,15 @@ impl ApplicationLifecycle {
             Arc::new(
                 LiveSpeechRuntime::new_with_registry(
                     environment,
-                    ai_runtime.take(),
+                    ai_runtime
+                        .as_mut()
+                        .map(|runtime| runtime.take_services(&[AiService::Tts, AiService::Asr])),
                     &initial_speech,
                     speech_startup_warning.as_deref(),
                     Arc::clone(&service_workers),
                 )
-                .expect("no native worker can be active before application startup finishes"),
+                .expect("no native worker can be active before application startup finishes")
+                .with_native(ai_hub_native.clone()),
             )
         });
         if live_speech.is_none()
@@ -1100,13 +1124,9 @@ impl ApplicationLifecycle {
                 }
             }
         }
-        let ai_recovery = if live_speech.is_none() {
-            ai_runtime
-                .as_ref()
-                .map(RunningAiApplication::recovery_handle)
-        } else {
-            None
-        };
+        let ai_recovery = ai_runtime
+            .as_ref()
+            .map(RunningAiApplication::recovery_handle);
         let speech: Option<Arc<dyn crate::audio::session::SpeechTranscriber>> =
             if let Some(live) = &live_speech {
                 Some(Arc::new(LiveSpeechTranscriber(Arc::clone(live))))
@@ -1271,7 +1291,42 @@ impl ApplicationLifecycle {
             reminders,
         });
         let mut ai_runtime_status = if let Some(live) = &live_speech {
-            crate::presentation::RuntimeStatePresenter::new(Some(live.observe()))
+            let mut speech = live.observe();
+            let updates = if let Some(runtime) = &ai_runtime {
+                let mut other = runtime.observe_status();
+                let merge = |speech: &crate::ai_runtime::runtime_status::RuntimeSnapshot, other: &crate::ai_runtime::runtime_status::RuntimeSnapshot| {
+                    let mut combined = other.clone();
+                    combined.services.retain(|service, _| !matches!(service, AiService::Tts | AiService::Asr));
+                    combined.services.extend(speech.services.clone());
+                    combined
+                };
+                let (send, receive) =
+                    tokio::sync::watch::channel(merge(&speech.borrow(), &other.borrow()));
+                let stop = owners_stop.clone();
+                owners.push(tokio::spawn(async move {
+                    loop {
+                        tokio::select! {
+                            _ = stop.cancelled() => break,
+                            changed = speech.changed() => if changed.is_err() { break; },
+                            changed = other.changed() => if changed.is_err() { break; },
+                        }
+                        let combined =
+                            merge(&speech.borrow_and_update(), &other.borrow_and_update());
+                        send.send_if_modified(|current| {
+                            if *current == combined {
+                                false
+                            } else {
+                                *current = combined;
+                                true
+                            }
+                        });
+                    }
+                }));
+                receive
+            } else {
+                speech
+            };
+            crate::presentation::RuntimeStatePresenter::new(Some(updates))
                 .with_live_speech(Arc::downgrade(live))
         } else {
             crate::presentation::RuntimeStatePresenter::new(

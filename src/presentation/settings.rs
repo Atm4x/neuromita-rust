@@ -9,8 +9,8 @@ use crate::{
         AppSettings, AsrPreferences, CharactersSettings, GuideLevel, InterfaceSettings, Language,
         MemorySettings, OnboardingSettings, OperationPresets, PresetId, PresetSelection,
         PresetSettings, SettingsArea, SettingsError, SettingsOwner, SettingsSnapshot,
-        SettingsTransfer, SpeechSettings, StructuredDisplayMode, TtsPreferences, VoiceSettings,
-        Volume,
+        SettingsTransfer, SpeechModelReference, SpeechSettings, StructuredDisplayMode,
+        TtsPreferences, VoiceSettings, Volume,
     },
 };
 
@@ -99,13 +99,32 @@ pub struct VoiceSettingsPresenter {
 }
 
 pub struct TtsSettingsPresenter {
+    owner: Arc<SettingsOwner>,
+    pub model: BoundProperty<Option<SpeechModelReference>>,
     pub preferences: BoundProperty<TtsPreferences>,
     pub model_options: BoundProperty<BTreeMap<String, serde_json::Value>>,
 }
 
 pub struct AsrSettingsPresenter {
+    pub model: BoundProperty<Option<SpeechModelReference>>,
     pub preferences: BoundProperty<AsrPreferences>,
     pub model_options: BoundProperty<BTreeMap<String, serde_json::Value>>,
+}
+
+impl TtsSettingsPresenter {
+    pub fn save_python_preferences(&self, value: TtsPreferences) -> Result<(), SettingsError> {
+        self.owner
+            .edit_checked::<SpeechSettings>(|settings| {
+                if settings.tts.local_model_id != value.local_model_id {
+                    let model = (!value.local_model_id.is_empty())
+                        .then(|| SpeechModelReference::python(value.local_model_id.clone()));
+                    settings.select_model(crate::ai_runtime::AiService::Tts, model)?;
+                }
+                settings.tts = value;
+                Ok(())
+            })
+            .map(|_| ())
+    }
 }
 
 pub struct PresetsSettingsPresenter {
@@ -368,6 +387,18 @@ impl SettingsPresenter {
             },
             characters: CharactersSettingsPresenter::new(Arc::clone(&owner)),
             tts: TtsSettingsPresenter {
+                owner: Arc::clone(&owner),
+                model: BoundProperty::new(
+                    Arc::clone(&owner),
+                    |settings| settings.speech.model_for(crate::ai_runtime::AiService::Tts),
+                    |owner, model| {
+                        owner
+                            .edit_checked::<SpeechSettings>(|settings| {
+                                settings.select_model(crate::ai_runtime::AiService::Tts, model)
+                            })
+                            .map(|_| ())
+                    },
+                ),
                 preferences: BoundProperty::new(
                     Arc::clone(&owner),
                     |settings| settings.speech.tts.clone(),
@@ -388,6 +419,17 @@ impl SettingsPresenter {
                 ),
             },
             asr: AsrSettingsPresenter {
+                model: BoundProperty::new(
+                    Arc::clone(&owner),
+                    |settings| settings.speech.model_for(crate::ai_runtime::AiService::Asr),
+                    |owner, model| {
+                        owner
+                            .edit_checked::<SpeechSettings>(|settings| {
+                                settings.select_model(crate::ai_runtime::AiService::Asr, model)
+                            })
+                            .map(|_| ())
+                    },
+                ),
                 preferences: BoundProperty::new(
                     Arc::clone(&owner),
                     |settings| settings.speech.asr.clone(),

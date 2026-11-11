@@ -1,5 +1,5 @@
 //! Application-owned, read-only reconfiguration of already installed speech workers.
-//! A candidate must initialize before it can replace an active runtime.
+//! Each service replaces only its own worker after confirmed shutdown.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -39,32 +39,29 @@ use super::{
 struct SelectionKey {
     tts: Option<(String, String, String)>,
     asr: Option<(String, String, String)>,
+    models: [Option<crate::settings::SpeechModelReference>; 2],
 }
 
 impl SelectionKey {
+    fn for_service(settings: &SpeechSettings, service: AiService) -> Self {
+        Self::from_settings(&service_settings(settings, service))
+    }
     fn from_settings(settings: &SpeechSettings) -> Self {
         let tts = (settings.tts.enabled
             && settings.tts.backend == TtsBackend::Local
-            && settings.tts.local_auto_load
-            && settings
-                .model_for(AiService::Tts)
-                .is_some_and(|model| model.implementation == WorkerImplementation::Python))
-        .then(|| {
-            let id = &settings.tts.local_model_id;
-            (
-                id.clone(),
-                settings.tts.local_language.clone(),
-                settings
-                    .tts_model_options
-                    .get(id)
-                    .map_or_else(|| "{}".to_owned(), serde_json::Value::to_string),
-            )
-        });
-        let asr = (!settings.asr.recognizer_id.is_empty()
-            && settings
-                .model_for(AiService::Asr)
-                .is_some_and(|model| model.implementation == WorkerImplementation::Python))
-        .then(|| {
+            && settings.tts.local_auto_load)
+            .then(|| {
+                let id = &settings.tts.local_model_id;
+                (
+                    id.clone(),
+                    settings.tts.local_language.clone(),
+                    settings
+                        .tts_model_options
+                        .get(id)
+                        .map_or_else(|| "{}".to_owned(), serde_json::Value::to_string),
+                )
+            });
+        let asr = (!settings.asr.recognizer_id.is_empty()).then(|| {
             let id = &settings.asr.recognizer_id;
             (
                 id.clone(),
@@ -80,7 +77,13 @@ impl SelectionKey {
                     .map_or_else(|| "{}".to_owned(), serde_json::Value::to_string),
             )
         });
-        Self { tts, asr }
+        let models = [
+            tts.as_ref()
+                .and_then(|_| settings.model_for(AiService::Tts)),
+            asr.as_ref()
+                .and_then(|_| settings.model_for(AiService::Asr)),
+        ];
+        Self { tts, asr, models }
     }
 
     fn services(&self) -> Vec<AiService> {
@@ -111,6 +114,8 @@ pub enum SpeechReconfigurationError {
     Runtime(#[from] AiApplicationError),
     #[error(transparent)]
     Ownership(#[from] WorkerOwnershipError),
+    #[error("native speech worker: {0}")]
+    Native(String),
 }
 
 const RECOVERY_POLL_INTERVAL: Duration = Duration::from_secs(3);
@@ -216,19 +221,38 @@ impl RecoveryBudget {
     }
 }
 
+fn service_settings(settings: &SpeechSettings, service: AiService) -> SpeechSettings {
+    let mut selected = settings.clone();
+    match service {
+        AiService::Tts => {
+            selected.asr = Default::default();
+            selected.asr_model = None;
+        }
+        AiService::Asr => {
+            selected.tts = Default::default();
+            selected.tts_model = None;
+        }
+        _ => unreachable!("speech owner only accepts TTS or ASR"),
+    }
+    selected
+}
+
 pub struct LiveSpeechRuntime {
-    installed: InstalledSpeechEnvironment,
-    registry: Arc<ServiceWorkerRegistry>,
-    claims: Mutex<Vec<WorkerClaim>>,
-    current: RwLock<Option<RunningAiApplication>>,
-    transition: Mutex<()>,
-    applied_selection: Mutex<SelectionKey>,
+    tts: SpeechServiceRuntime,
+    asr: SpeechServiceRuntime,
     status: watch::Sender<RuntimeSnapshot>,
-    shutting_down: AtomicBool,
     recovery_policy: RecoveryPolicy,
 }
 
 impl LiveSpeechRuntime {
+    pub(crate) fn with_native(
+        mut self,
+        native: Option<Arc<super::native_service::AiHubNativeService>>,
+    ) -> Self {
+        self.tts.native = native.clone();
+        self.asr.native = native;
+        self
+    }
     pub fn new(
         installed: InstalledSpeechEnvironment,
         initial: Option<RunningAiApplication>,
@@ -242,10 +266,274 @@ impl LiveSpeechRuntime {
             startup_error,
             ServiceWorkerRegistry::new(),
         )
-        .expect("a fresh service worker registry cannot have a conflicting owner")
+        .expect("fresh service slots")
     }
 
     pub fn new_with_registry(
+        installed: InstalledSpeechEnvironment,
+        mut initial: Option<RunningAiApplication>,
+        settings: &SpeechSettings,
+        startup_error: Option<&str>,
+        registry: Arc<ServiceWorkerRegistry>,
+    ) -> Result<Self, WorkerOwnershipError> {
+        let mut take = |service| {
+            initial
+                .as_mut()
+                .filter(|running| running.has_service(service))
+                .map(|running| running.take_services(&[service]))
+        };
+        let tts = SpeechServiceRuntime::new_with_registry(
+            AiService::Tts,
+            installed.clone(),
+            take(AiService::Tts),
+            settings,
+            startup_error,
+            Arc::clone(&registry),
+        )?;
+        let asr = SpeechServiceRuntime::new_with_registry(
+            AiService::Asr,
+            installed,
+            take(AiService::Asr),
+            settings,
+            startup_error,
+            registry,
+        )?;
+        let mut snapshot = tts.snapshot();
+        snapshot.services.extend(asr.snapshot().services);
+        Ok(Self {
+            tts,
+            asr,
+            status: watch::channel(snapshot).0,
+            recovery_policy: RecoveryPolicy::default(),
+        })
+    }
+
+    pub fn new_with_recovery_policy(
+        installed: InstalledSpeechEnvironment,
+        initial: Option<RunningAiApplication>,
+        settings: &SpeechSettings,
+        startup_error: Option<&str>,
+        policy: RecoveryPolicy,
+    ) -> Self {
+        let mut owner = Self::new(installed, initial, settings, startup_error);
+        owner.recovery_policy = policy;
+        owner
+    }
+
+    pub fn observe(&self) -> watch::Receiver<RuntimeSnapshot> {
+        self.status.subscribe()
+    }
+    pub fn snapshot(&self) -> RuntimeSnapshot {
+        self.status.borrow().clone()
+    }
+
+    fn publish(&self) -> RuntimeSnapshot {
+        let mut snapshot = self.tts.snapshot();
+        snapshot.services.extend(self.asr.snapshot().services);
+        self.status.send_if_modified(|current| {
+            if *current == snapshot {
+                false
+            } else {
+                *current = snapshot.clone();
+                true
+            }
+        });
+        snapshot
+    }
+
+    pub async fn refresh(&self) -> RuntimeSnapshot {
+        tokio::join!(self.tts.refresh(), self.asr.refresh());
+        self.publish()
+    }
+
+    pub(crate) async fn reconcile(
+        &self,
+        desired: &SpeechSettings,
+        settings: &SettingsOwner,
+        capture: &Mutex<SpeechSessionController>,
+        stopping: &CancellationToken,
+    ) -> Result<(), SpeechReconfigurationError> {
+        let (tts, asr) = tokio::join!(
+            self.tts.reconcile(desired, settings, capture, stopping),
+            self.asr.reconcile(desired, settings, capture, stopping)
+        );
+        self.publish();
+        tts.and(asr)
+    }
+
+    async fn recover_failed_worker(
+        &self,
+        service: AiService,
+        generation: Uuid,
+        settings: &SettingsOwner,
+        stopping: &CancellationToken,
+    ) -> Result<(), SpeechReconfigurationError> {
+        let owner = match service {
+            AiService::Tts => &self.tts,
+            AiService::Asr => &self.asr,
+            _ => return Err(AiApplicationError::Invalid("not a speech service".into()).into()),
+        };
+        let result = owner
+            .recover_failed_worker(service, generation, settings, stopping)
+            .await;
+        self.publish();
+        result
+    }
+
+    fn report_recovery_attempt(&self, attempt: &RecoveryAttempts) {
+        self.tts.report_recovery_attempt(attempt);
+        self.asr.report_recovery_attempt(attempt);
+        self.status.send_if_modified(|snapshot| {
+            let mut changed = false;
+            for state in snapshot.services.values_mut() {
+                if state.phase == RuntimePhase::Failed
+                    && state.generation == Some(attempt.generation)
+                    && state.recovery.as_ref() != Some(attempt)
+                {
+                    state.recovery = Some(attempt.clone());
+                    changed = true;
+                }
+            }
+            changed
+        });
+    }
+
+    pub async fn shutdown(&self) -> Result<(), AiApplicationError> {
+        let (tts, asr) = tokio::join!(self.tts.shutdown(), self.asr.shutdown());
+        self.publish();
+        tts.and(asr)
+    }
+}
+
+struct SpeechServiceRuntime {
+    service: AiService,
+    native: Option<Arc<super::native_service::AiHubNativeService>>,
+    installed: InstalledSpeechEnvironment,
+    registry: Arc<ServiceWorkerRegistry>,
+    claims: Mutex<Vec<WorkerClaim>>,
+    current: RwLock<Option<RunningAiApplication>>,
+    transition: Mutex<()>,
+    applied_selection: Mutex<SelectionKey>,
+    status: watch::Sender<RuntimeSnapshot>,
+    shutting_down: AtomicBool,
+}
+
+impl SpeechServiceRuntime {
+    fn native_kind(&self) -> super::native_speech::NativeSpeechKind {
+        match self.service {
+            AiService::Tts => super::native_speech::NativeSpeechKind::Tts,
+            AiService::Asr => super::native_speech::NativeSpeechKind::Asr,
+            _ => unreachable!("speech service"),
+        }
+    }
+
+    fn publish_native(&self, worker: &super::native_model::NativeModelSnapshot) {
+        use super::{
+            native_model::NativePhase,
+            runtime_status::{LoadedModel, ServiceRuntimeStatus},
+        };
+        self.status.send_modify(|snapshot| {
+            snapshot.services.insert(
+                self.service,
+                ServiceRuntimeStatus {
+                    phase: match worker.phase {
+                        NativePhase::Ready => RuntimePhase::ModelReady,
+                        NativePhase::Failed => RuntimePhase::Failed,
+                        NativePhase::Stopped => RuntimePhase::Stopped,
+                        _ => RuntimePhase::WorkerRunning,
+                    },
+                    generation: Some(worker.session_id),
+                    active_model: (worker.phase == NativePhase::Ready).then(|| LoadedModel {
+                        plugin_id: worker.model_id.clone(),
+                        asset_revision: None,
+                    }),
+                    last_error: worker
+                        .last_failure
+                        .as_ref()
+                        .map(|failure| format!("native worker: {failure:?}")),
+                    ..Default::default()
+                },
+            );
+        });
+    }
+
+    async fn retire_native(&self) -> Result<(), SpeechReconfigurationError> {
+        if let Some(active) = self
+            .registry
+            .active(self.service)?
+            .filter(|active| active.model.implementation == WorkerImplementation::Rust)
+        {
+            let native = self.native.as_ref().ok_or_else(|| {
+                SpeechReconfigurationError::Native("native owner is unavailable".into())
+            })?;
+            let revision = active.model.revision.as_deref().ok_or_else(|| {
+                SpeechReconfigurationError::Native("native revision missing".into())
+            })?;
+            native
+                .deactivate_exact_for_service(self.native_kind(), &active.model.model_id, revision)
+                .await
+                .map_err(SpeechReconfigurationError::Native)?;
+        }
+        Ok(())
+    }
+
+    async fn reconcile_native(
+        &self,
+        model: &crate::settings::SpeechModelReference,
+    ) -> Result<super::native_model::NativeModelSnapshot, SpeechReconfigurationError> {
+        let native = self.native.as_ref().ok_or_else(|| {
+            SpeechReconfigurationError::Native("native owner is unavailable".into())
+        })?;
+        native
+            .refresh()
+            .await
+            .map_err(SpeechReconfigurationError::Native)?;
+        let revision = model
+            .revision
+            .as_deref()
+            .ok_or_else(|| SpeechReconfigurationError::Native("native revision missing".into()))?;
+        native
+            .validate_service_selection(self.native_kind(), &model.model_id, revision)
+            .await
+            .map_err(SpeechReconfigurationError::Native)?;
+        {
+            let _gate = self.registry.transition_gate(self.service).await;
+            if let Some(previous) = self.current.write().await.take() {
+                previous.shutdown().await?;
+            }
+            self.claims.lock().await.clear();
+        }
+        let expected = ServiceModel {
+            service: self.service,
+            model: model.clone().into(),
+        };
+        if self.registry.active(self.service)?.as_ref() == Some(&expected) {
+            let snapshot = native
+                .snapshot()
+                .await
+                .map_err(SpeechReconfigurationError::Native)?;
+            return snapshot
+                .service_workers
+                .into_iter()
+                .find(|session| session.service == self.native_kind())
+                .and_then(|session| session.worker)
+                .ok_or_else(|| {
+                    SpeechReconfigurationError::Native("active native session is missing".into())
+                });
+        }
+        self.retire_native().await?;
+        let revision = model
+            .revision
+            .as_deref()
+            .ok_or_else(|| SpeechReconfigurationError::Native("native revision missing".into()))?;
+        native
+            .activate_exact_for_service(self.native_kind(), &model.model_id, revision)
+            .await
+            .map_err(SpeechReconfigurationError::Native)
+    }
+
+    pub fn new_with_registry(
+        service: AiService,
         installed: InstalledSpeechEnvironment,
         initial: Option<RunningAiApplication>,
         settings: &SpeechSettings,
@@ -253,7 +541,7 @@ impl LiveSpeechRuntime {
         registry: Arc<ServiceWorkerRegistry>,
     ) -> Result<Self, WorkerOwnershipError> {
         let applied_selection = if initial.is_some() {
-            SelectionKey::from_settings(settings)
+            SelectionKey::for_service(settings, service)
         } else {
             SelectionKey::default()
         };
@@ -262,7 +550,11 @@ impl LiveSpeechRuntime {
             RunningAiApplication::status_snapshot,
         );
         if let Some(error) = startup_error {
-            mark_failure(&mut snapshot, &SelectionKey::from_settings(settings), error);
+            mark_failure(
+                &mut snapshot,
+                &SelectionKey::for_service(settings, service),
+                error,
+            );
         }
         let mut claims = Vec::new();
         if let Some(runtime) = initial.as_ref() {
@@ -278,6 +570,8 @@ impl LiveSpeechRuntime {
             }
         }
         Ok(Self {
+            service,
+            native: None,
             installed,
             registry,
             claims: Mutex::new(claims),
@@ -286,24 +580,7 @@ impl LiveSpeechRuntime {
             applied_selection: Mutex::new(applied_selection),
             status: watch::channel(snapshot).0,
             shutting_down: AtomicBool::new(false),
-            recovery_policy: RecoveryPolicy::default(),
         })
-    }
-
-    pub fn new_with_recovery_policy(
-        installed: InstalledSpeechEnvironment,
-        initial: Option<RunningAiApplication>,
-        settings: &SpeechSettings,
-        startup_error: Option<&str>,
-        policy: RecoveryPolicy,
-    ) -> Self {
-        let mut runtime = Self::new(installed, initial, settings, startup_error);
-        runtime.recovery_policy = policy;
-        runtime
-    }
-
-    pub fn observe(&self) -> watch::Receiver<RuntimeSnapshot> {
-        self.status.subscribe()
     }
 
     pub fn snapshot(&self) -> RuntimeSnapshot {
@@ -342,6 +619,28 @@ impl LiveSpeechRuntime {
                         true
                     }
                 });
+            } else if let Some(native) = &self.native
+                && let Ok(snapshot) = native.snapshot().await
+            {
+                if let Some(session) = snapshot
+                    .service_workers
+                    .iter()
+                    .find(|session| session.service == self.native_kind())
+                {
+                    if let Some(worker) = &session.worker {
+                        self.publish_native(worker);
+                    }
+                } else if self
+                    .applied_selection
+                    .lock()
+                    .await
+                    .models
+                    .iter()
+                    .flatten()
+                    .any(|model| model.implementation == WorkerImplementation::Rust)
+                {
+                    self.status.send_replace(RuntimeSnapshot::default());
+                }
             }
         }
         self.snapshot()
@@ -358,12 +657,13 @@ impl LiveSpeechRuntime {
         stopping: &CancellationToken,
     ) -> Result<(), SpeechReconfigurationError> {
         let _transition = self.transition.lock().await;
-        let _tts_gate = self.registry.transition_gate(AiService::Tts).await;
-        let _asr_gate = self.registry.transition_gate(AiService::Asr).await;
         if self.shutting_down.load(Ordering::Acquire) || stopping.is_cancelled() {
             return Ok(());
         }
-        let key = SelectionKey::from_settings(desired);
+        let key = SelectionKey::for_service(desired, self.service);
+        if *self.applied_selection.lock().await == key {
+            return Ok(());
+        }
         self.status.send_modify(|snapshot| {
             for service in key.services() {
                 let status = snapshot.services.entry(service).or_default();
@@ -374,7 +674,36 @@ impl LiveSpeechRuntime {
                 }
             }
         });
-        let mut effective = desired.clone();
+        if let Some(model) = desired.model_for(self.service).filter(|model| {
+            model.implementation == WorkerImplementation::Rust
+                && key.services().contains(&self.service)
+        }) {
+            if self.service == AiService::Asr {
+                capture.lock().await.stop().await;
+            }
+            let result = self.reconcile_native(&model).await;
+            match result {
+                Ok(worker) => {
+                    let selected = settings.snapshot_all().is_ok_and(|current| {
+                        SelectionKey::for_service(&current.values.speech, self.service) == key
+                    });
+                    if stopping.is_cancelled() || !selected {
+                        self.retire_native().await?;
+                        self.status.send_replace(RuntimeSnapshot::default());
+                        *self.applied_selection.lock().await = SelectionKey::default();
+                        return Ok(());
+                    }
+                    self.publish_native(&worker);
+                    *self.applied_selection.lock().await = key;
+                    return Ok(());
+                }
+                Err(error) => {
+                    self.failed(&key, &error.to_string());
+                    return Err(error);
+                }
+            }
+        }
+        let mut effective = service_settings(desired, self.service);
         if !effective.tts.local_auto_load {
             effective.tts.enabled = false;
         }
@@ -389,20 +718,28 @@ impl LiveSpeechRuntime {
             !stopping.is_cancelled()
                 && !self.shutting_down.load(Ordering::Acquire)
                 && settings.snapshot_all().is_ok_and(|snapshot| {
-                    SelectionKey::from_settings(&snapshot.values.speech) == key
+                    SelectionKey::for_service(&snapshot.values.speech, self.service) == key
                 })
         };
         if !still_selected() {
             self.restore_current().await;
             return Ok(());
         }
-        let mut capture = capture.lock().await;
+        self.retire_native().await?;
+        let _service_gate = self.registry.transition_gate(self.service).await;
+        let mut capture = if self.service == AiService::Asr {
+            Some(capture.lock().await)
+        } else {
+            None
+        };
         if !still_selected() {
             self.restore_current().await;
             return Ok(());
         }
         let mut applied = self.applied_selection.lock().await;
-        if applied.asr != key.asr {
+        if applied.asr != key.asr
+            && let Some(capture) = capture.as_mut()
+        {
             capture.stop().await;
         }
         let previous = self.current.write().await.take();
@@ -486,7 +823,7 @@ impl LiveSpeechRuntime {
             InstalledSpeechError::Environment(format!("cannot read speech settings: {error}"))
         })?;
         let speech = snapshot.values.speech.clone();
-        let key = SelectionKey::from_settings(&speech);
+        let key = SelectionKey::for_service(&speech, self.service);
         if *self.applied_selection.lock().await != key || key.plugin_id(service).is_none() {
             return Ok(());
         }
@@ -495,7 +832,7 @@ impl LiveSpeechRuntime {
             return Ok(());
         };
         let selected_services: HashSet<_> = key.services().into_iter().collect();
-        let mut effective = speech;
+        let mut effective = service_settings(&speech, self.service);
         if !effective.tts.local_auto_load {
             effective.tts.enabled = false;
         }
@@ -521,7 +858,7 @@ impl LiveSpeechRuntime {
             let current = settings.snapshot_all().map_err(|error| {
                 AiRuntimeError::ActivationGuard(format!("cannot recheck speech selection: {error}"))
             })?;
-            if SelectionKey::from_settings(&current.values.speech) != key {
+            if SelectionKey::for_service(&current.values.speech, self.service) != key {
                 return Err(AiRuntimeError::ActivationSuperseded);
             }
             Ok(())
@@ -566,8 +903,7 @@ impl LiveSpeechRuntime {
     pub async fn shutdown(&self) -> Result<(), AiApplicationError> {
         self.shutting_down.store(true, Ordering::Release);
         let _transition = self.transition.lock().await;
-        let _tts_gate = self.registry.transition_gate(AiService::Tts).await;
-        let _asr_gate = self.registry.transition_gate(AiService::Asr).await;
+        let _service_gate = self.registry.transition_gate(self.service).await;
         let previous = self.current.write().await.take();
         self.status.send_replace(RuntimeSnapshot::default());
         if let Some(previous) = previous {
@@ -593,7 +929,7 @@ pub struct LiveSpeechVoice(pub Arc<LiveSpeechRuntime>);
 impl VoiceProvider for LiveSpeechVoice {
     fn synthesize(&self, text: Arc<str>, options: VoiceOptions) -> VoiceFuture<'_> {
         Box::pin(async move {
-            let current = self.0.current.read().await;
+            let current = self.0.tts.current.read().await;
             let running = current
                 .as_ref()
                 .filter(|runtime| runtime.has_service(AiService::Tts))
@@ -607,7 +943,7 @@ pub struct LiveSpeechTranscriber(pub Arc<LiveSpeechRuntime>);
 impl SpeechTranscriber for LiveSpeechTranscriber {
     fn transcribe<'a>(&'a self, wav: &'a [u8]) -> SpeechFuture<'a, Transcript> {
         Box::pin(async move {
-            let current = self.0.current.read().await;
+            let current = self.0.asr.current.read().await;
             let running = current
                 .as_ref()
                 .ok_or_else(|| SpeechSessionError::Asr("ASR runtime is inactive".into()))?;
@@ -657,7 +993,8 @@ pub(crate) async fn watch_speech_settings(
     initial: SpeechSettings,
     stop: CancellationToken,
 ) {
-    let mut previous = SelectionKey::from_settings(&initial);
+    let mut previous = SelectionKey::default();
+    let _ = initial;
     let mut budget = RecoveryBudget::with_policy(runtime.recovery_policy);
     let mut poll = tokio::time::interval(runtime.recovery_policy.poll_interval);
     poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -686,6 +1023,7 @@ pub(crate) async fn watch_speech_settings(
                     if state.phase != RuntimePhase::Failed || !previous.services().contains(&service) {
                         continue;
                     }
+                    if speech.model_for(service).is_some_and(|model| model.implementation == WorkerImplementation::Rust) { continue; }
                     let Some(generation) = state.generation else { continue; };
                     if !handled.insert(generation) {
                         continue;
@@ -715,6 +1053,50 @@ pub(crate) async fn watch_speech_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn asr_reconfiguration_does_not_wait_for_an_unchanged_tts_invocation() {
+        use crate::settings::{
+            AppSettings, MemorySettingsRepository, SettingsConfig, SettingsLifecycle,
+            SettingsSource, SpeechModelReference,
+        };
+        let registry = ServiceWorkerRegistry::new();
+        let model = ServiceModel {
+            service: AiService::Tts,
+            model: SpeechModelReference::python("independent").into(),
+        };
+        let _claim = registry.claim(model.clone()).unwrap();
+        let _inference = registry.inference_gate(AiService::Tts).await;
+        let saved = AppSettings::initial_profile();
+        let owner = SettingsLifecycle::prepare(SettingsConfig {
+            source: SettingsSource::initial(saved.clone()),
+            repository: Arc::new(MemorySettingsRepository::new()),
+        })
+        .await
+        .unwrap()
+        .owner();
+        let runtime = LiveSpeechRuntime::new_with_registry(
+            InstalledSpeechEnvironment::for_desktop(
+                std::env::temp_dir().join(format!("nm-independent-{}", Uuid::new_v4())),
+            ),
+            None,
+            &saved.speech,
+            None,
+            Arc::clone(&registry),
+        )
+        .unwrap();
+        let mut desired = saved.speech.clone();
+        desired.asr.recognizer_id = "not_installed".into();
+        let capture = Mutex::new(SpeechSessionController::default());
+        let stop = CancellationToken::new();
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            runtime.reconcile(&desired, &owner, &capture, &stop),
+        )
+        .await
+        .expect("ASR must not wait for the TTS service gate");
+        assert!(result.is_err());
+        assert_eq!(registry.active(AiService::Tts).unwrap(), Some(model));
+    }
     #[test]
     fn recovery_budget_is_bounded_per_failed_generation_and_resets_on_reselection() {
         let mut budget = RecoveryBudget::default();
@@ -1166,7 +1548,7 @@ mod tests {
             &saved.speech,
             None,
         ));
-        let current = runtime.current.read().await;
+        let current = runtime.tts.current.read().await;
         let active = current.as_ref().unwrap();
         assert!(
             active

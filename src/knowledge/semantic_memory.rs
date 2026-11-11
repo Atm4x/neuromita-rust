@@ -50,6 +50,7 @@ struct EmbeddingCache {
 struct AuthoritativeSnapshot {
     turn: TimelineTurn,
     active_ids: HashSet<CachedSourceId>,
+    memory_projection_known: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -73,7 +74,10 @@ impl EmbeddingCache {
     }
     fn purge_character(&mut self, character: CharacterId, keep: Option<&HashSet<CacheKey>>) {
         self.entries.retain(|key, _| {
-            key.character != character || keep.is_some_and(|allowed| allowed.contains(key))
+            key.character != character
+                || keep.is_some_and(|allowed| {
+                    matches!(key.id, CachedSourceId::History(_)) || allowed.contains(key)
+                })
         });
         self.order.retain(|key| self.entries.contains_key(key));
     }
@@ -105,28 +109,44 @@ impl EmbeddingCache {
                         || (turn.context_head == previous.turn.context_head
                             && turn.context_epoch != previous.turn.context_epoch)
                         || (turn.context_head == previous.turn.context_head
+                            && previous.memory_projection_known
                             && !active_ids.is_subset(&previous.active_ids)))
                 {
                     return Err(EmbeddingError::StaleKnowledge);
                 }
             }
-            let identical = previous
-                .is_some_and(|previous| previous.turn == turn && previous.active_ids == active_ids)
-                && self
-                    .entries
-                    .keys()
-                    .filter(|key| key.character == character)
-                    .all(|key| active.contains(key));
+            let identical = previous.is_some_and(|previous| {
+                previous.memory_projection_known
+                    && same_context(previous.turn, turn)
+                    && previous.active_ids == active_ids
+            }) && self
+                .entries
+                .keys()
+                .filter(|key| {
+                    key.character == character && matches!(key.id, CachedSourceId::Memory(_))
+                })
+                .all(|key| active.contains(key));
             if !identical {
+                let projection_only = previous.is_some_and(|previous| {
+                    !previous.memory_projection_known && same_context(previous.turn, turn)
+                });
                 let purge_all = previous.is_some_and(|previous| {
                     previous.turn.selection != turn.selection
                         || previous.turn.context_epoch != turn.context_epoch
                 });
                 self.purge_character(character, (!purge_all).then_some(&active));
                 self.revision = self.revision.wrapping_add(1);
-                *self.revisions.entry(character).or_default() += 1;
-                self.snapshots
-                    .insert(character, AuthoritativeSnapshot { turn, active_ids });
+                if !projection_only {
+                    *self.revisions.entry(character).or_default() += 1;
+                }
+                self.snapshots.insert(
+                    character,
+                    AuthoritativeSnapshot {
+                        turn,
+                        active_ids,
+                        memory_projection_known: true,
+                    },
+                );
             }
         }
         Ok(RetrievalBarrier {
@@ -139,6 +159,31 @@ impl EmbeddingCache {
     fn unchanged(&self, character: CharacterId, barrier: RetrievalBarrier) -> bool {
         self.clear_revision == barrier.clear_revision
             && *self.revisions.get(&character).unwrap_or(&0) == barrier.revision
+    }
+
+    fn track_history(
+        &mut self,
+        character: CharacterId,
+        turn: Option<TimelineTurn>,
+    ) -> Result<RetrievalBarrier, EmbeddingError> {
+        if let Some(turn) = turn {
+            if turn.character != character {
+                return Err(EmbeddingError::StaleKnowledge);
+            }
+            if !self
+                .snapshots
+                .get(&character)
+                .is_some_and(|snapshot| same_context(snapshot.turn, turn))
+            {
+                let barrier = self.track(character, Some(turn), &[])?;
+                self.snapshots
+                    .get_mut(&character)
+                    .expect("tracked context")
+                    .memory_projection_known = false;
+                return Ok(barrier);
+            }
+        }
+        self.track(character, None, &[])
     }
 
     fn insert(&mut self, key: CacheKey, embedding: Embedding, max: usize) {
@@ -154,6 +199,13 @@ impl EmbeddingCache {
             }
         }
     }
+}
+
+fn same_context(left: TimelineTurn, right: TimelineTurn) -> bool {
+    left.selection == right.selection
+        && left.character == right.character
+        && left.context_head == right.context_head
+        && left.context_epoch == right.context_epoch
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -267,7 +319,8 @@ pub struct SemanticMemoryRetriever {
             dyn Fn(
                     TimelineTurn,
                     Vec<KnowledgeDispatchSource>,
-                ) -> Result<KnowledgeDispatchLease, EmbeddingError>
+                )
+                    -> super::embedding::EmbeddingFuture<'static, KnowledgeDispatchLease>
                 + Send
                 + Sync,
         >,
@@ -302,7 +355,8 @@ impl SemanticMemoryRetriever {
             dyn Fn(
                     TimelineTurn,
                     Vec<KnowledgeDispatchSource>,
-                ) -> Result<KnowledgeDispatchLease, EmbeddingError>
+                )
+                    -> super::embedding::EmbeddingFuture<'static, KnowledgeDispatchLease>
                 + Send
                 + Sync,
         >,
@@ -312,23 +366,23 @@ impl SemanticMemoryRetriever {
         })
     }
 
-    pub(crate) fn admit_dispatch(
+    pub(crate) async fn admit_dispatch(
         &self,
         turn: Option<TimelineTurn>,
         sources: &[KnowledgeDispatchSource],
     ) -> Result<Option<KnowledgeDispatchLease>, EmbeddingError> {
         if let (Some(turn), Some(authority)) = (turn, self.dispatch_authority.get()) {
-            return authority(turn, sources.to_vec()).map(Some);
+            return authority(turn, sources.to_vec()).await.map(Some);
         }
         Ok(None)
     }
 
-    pub(crate) fn authorize_dispatch(
+    pub(crate) async fn authorize_dispatch(
         &self,
         turn: Option<TimelineTurn>,
         sources: &[KnowledgeDispatchSource],
     ) -> Result<(), EmbeddingError> {
-        drop(self.admit_dispatch(turn, sources)?);
+        drop(self.admit_dispatch(turn, sources).await?);
         Ok(())
     }
 
@@ -376,10 +430,10 @@ impl SemanticMemoryRetriever {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             {
-                let _dispatch = self.admit_dispatch(turn, &evidence)?;
+                let _dispatch = self.admit_dispatch(turn, &evidence).await?;
                 rerank_prefix(provider.as_ref(), query, hits, *policy).await?;
             }
-            self.authorize_dispatch(turn, &evidence)?;
+            self.authorize_dispatch(turn, &evidence).await?;
         }
         Ok(())
     }
@@ -436,7 +490,9 @@ impl SemanticMemoryRetriever {
             .unwrap_or_else(|poison| poison.into_inner());
 
         match cache.snapshots.get(&character) {
-            Some(snapshot) => snapshot.turn != turn,
+            Some(snapshot) => {
+                !snapshot.memory_projection_known || !same_context(snapshot.turn, turn)
+            }
             None => cache.entries.keys().any(|key| key.character == character),
         }
     }
@@ -714,11 +770,21 @@ impl SemanticMemoryRetriever {
                 }
             })
             .collect::<Vec<_>>();
-        let barrier = self
-            .cache
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .track(character, turn, &keys)?;
+        let barrier = {
+            let mut cache = self
+                .cache
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if !sources.is_empty()
+                && sources
+                    .iter()
+                    .all(|(id, _)| matches!(id, CachedSourceId::History(_)))
+            {
+                cache.track_history(character, turn)?
+            } else {
+                cache.track(character, turn, &keys)?
+            }
+        };
         if sources.is_empty() {
             return Ok((space, Vec::new(), cost, barrier));
         }
@@ -743,12 +809,12 @@ impl SemanticMemoryRetriever {
             }
         }
         let query_vector = {
-            let _dispatch = self.admit_dispatch(turn, &evidence)?;
+            let _dispatch = self.admit_dispatch(turn, &evidence).await?;
             self.provider
                 .embed(EmbeddingPurpose::Query, query.clone())
                 .await?
         };
-        self.authorize_dispatch(turn, &evidence)?;
+        self.authorize_dispatch(turn, &evidence).await?;
         cost.embedded_characters += query.chars().count();
         cost.embedding_requests += 1;
         cost.embedded_texts += 1;
@@ -774,10 +840,10 @@ impl SemanticMemoryRetriever {
             cost.embedded_characters +=
                 texts.iter().map(|text| text.chars().count()).sum::<usize>();
             let fresh = {
-                let _dispatch = self.admit_dispatch(turn, &evidence)?;
+                let _dispatch = self.admit_dispatch(turn, &evidence).await?;
                 self.provider.embed_documents(texts).await?
             };
-            self.authorize_dispatch(turn, &evidence)?;
+            self.authorize_dispatch(turn, &evidence).await?;
             cost.embedding_requests += self.provider.document_request_count(missing.len());
             cost.embedded_texts += missing.len();
             if fresh.len() != missing.len() {
@@ -1013,6 +1079,130 @@ impl SemanticMemoryRetriever {
 #[cfg(test)]
 mod b84_tests {
     use super::*;
+    #[tokio::test]
+    async fn history_only_scoring_never_replaces_canonical_memory_membership() {
+        use crate::timeline::{domain::BranchId, selection::TimelineSelection};
+        let character = CharacterId::Crazy;
+        let turn = TimelineTurn {
+            selection: TimelineSelection {
+                branch_id: BranchId(uuid::Uuid::new_v4()),
+                generation: 1,
+            },
+            character,
+            context_head: 4,
+            context_epoch: 0,
+            trigger: None,
+        };
+        let provider = Arc::new(CountedEmbeddingProvider {
+            space: EmbeddingSpace::new("test", "projection", "v1", 2).unwrap(),
+            calls: AtomicUsize::new(0),
+        });
+        let retriever = SemanticMemoryRetriever::new(provider, 8).unwrap();
+        let memory = MemoryRecord::fact(
+            MemoryId(uuid::Uuid::new_v4()),
+            crate::memory::MemoryPriority::Normal,
+            "canonical memory",
+        );
+        retriever
+            .refresh_authoritative(character, turn, std::slice::from_ref(&memory))
+            .unwrap();
+        retriever
+            .score_canonical_documents(
+                character,
+                &[(
+                    CachedSourceId::History(EventId(uuid::Uuid::new_v4())),
+                    "canonical history",
+                )],
+                "query",
+                Some(turn),
+            )
+            .await
+            .unwrap();
+        assert!(
+            retriever.cache.lock().unwrap().snapshots[&character]
+                .active_ids
+                .contains(&CachedSourceId::Memory(memory.id))
+        );
+        retriever
+            .score_canonical_documents(
+                character,
+                &[(CachedSourceId::Memory(memory.id), memory.content.as_str())],
+                "query",
+                Some(turn),
+            )
+            .await
+            .unwrap();
+    }
+    #[test]
+    fn memory_reconciliation_preserves_inflight_joint_context_and_history_cache() {
+        use crate::timeline::{domain::BranchId, selection::TimelineSelection};
+        let character = CharacterId::Crazy;
+        let turn = TimelineTurn {
+            selection: TimelineSelection {
+                branch_id: BranchId(uuid::Uuid::new_v4()),
+                generation: 1,
+            },
+            character,
+            context_head: 4,
+            context_epoch: 0,
+            trigger: None,
+        };
+        let mut pinned = turn;
+        pinned.trigger = Some(EventId(uuid::Uuid::new_v4()));
+        let space = EmbeddingSpace::new("test", "context", "v1", 2).unwrap();
+        let memory = CacheKey {
+            character,
+            space: space.clone(),
+            id: CachedSourceId::Memory(MemoryId(uuid::Uuid::new_v4())),
+            content: "canonical memory".into(),
+        };
+        let history = CacheKey {
+            character,
+            space: space.clone(),
+            id: CachedSourceId::History(EventId(uuid::Uuid::new_v4())),
+            content: "canonical history".into(),
+        };
+        let mut cache = EmbeddingCache::new();
+        let initial = cache
+            .track(character, Some(turn), std::slice::from_ref(&memory))
+            .unwrap();
+        let joint = cache
+            .track(character, Some(pinned), &[memory.clone(), history.clone()])
+            .unwrap();
+        assert_eq!(initial.revision, joint.revision);
+        cache.insert(
+            history.clone(),
+            Embedding::new(vec![1.0, 0.0], &space).unwrap(),
+            8,
+        );
+        let reconciled = cache.track(character, Some(turn), &[memory]).unwrap();
+        assert_eq!(joint.revision, reconciled.revision);
+        assert!(cache.unchanged(character, joint));
+        assert!(cache.entries.contains_key(&history));
+        let mut reset = turn;
+        reset.context_head += 1;
+        reset.context_epoch += 1;
+        cache.track(character, Some(reset), &[]).unwrap();
+        assert!(!cache.unchanged(character, joint));
+        assert!(!cache.entries.contains_key(&history));
+        let mut fresh = EmbeddingCache::new();
+        let reading = fresh.track_history(character, Some(turn)).unwrap();
+        fresh.insert(
+            history.clone(),
+            Embedding::new(vec![1.0, 0.0], &space).unwrap(),
+            8,
+        );
+        let projection = CacheKey {
+            id: CachedSourceId::Memory(MemoryId(uuid::Uuid::new_v4())),
+            content: "canonical memory".into(),
+            ..history.clone()
+        };
+        let known = fresh.track(character, Some(turn), &[projection]).unwrap();
+        assert_eq!(reading.revision, known.revision);
+        assert!(fresh.unchanged(character, reading));
+        assert!(fresh.entries.contains_key(&history));
+        assert!(fresh.snapshots[&character].memory_projection_known);
+    }
     use crate::timeline::domain::{MemoryId, MemoryPriority};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1051,11 +1241,14 @@ mod b84_tests {
         let observed = Arc::clone(&checks);
         retriever
             .bind_dispatch_authority(Arc::new(move |_, _| {
-                if observed.fetch_add(1, Ordering::SeqCst) >= 2 {
-                    Err(EmbeddingError::StaleKnowledge)
-                } else {
-                    Ok(KnowledgeDispatchLease::transient_for_test())
-                }
+                let observed = Arc::clone(&observed);
+                Box::pin(async move {
+                    if observed.fetch_add(1, Ordering::SeqCst) >= 2 {
+                        Err(EmbeddingError::StaleKnowledge)
+                    } else {
+                        Ok(KnowledgeDispatchLease::transient_for_test())
+                    }
+                })
             }))
             .unwrap();
         let turn = TimelineTurn {

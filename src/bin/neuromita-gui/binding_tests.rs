@@ -2166,14 +2166,24 @@ fn ai_hub_preserves_model_identity_when_inventory_updates_arrive_in_either_order
         let revision = "11".repeat(32);
         window.invoke_native_activate("shared".into(), "tts".into(), revision.clone().into());
         window.invoke_native_stop("tts".into(), "shared".into(), revision.clone().into());
-        let commands = commands.borrow();
+        let observed_commands = commands.borrow();
         assert!(
-            matches!(&commands[0], Command::ActivateNativeModel { model_id, service, revision: actual }
+            matches!(&observed_commands[0], Command::ActivateNativeModel { model_id, service, revision: actual }
             if model_id == "shared" && service == "tts" && actual == &revision)
         );
         assert!(
-            matches!(&commands[1], Command::StopNativeModel { model_id, service, revision: actual }
+            matches!(&observed_commands[1], Command::StopNativeModel { model_id, service, revision: actual }
             if model_id == "shared" && service == "tts" && actual == &revision)
+        );
+        drop(observed_commands);
+        window.invoke_ai_hub_use_model(HubModelIdentity {
+            category: "tts".into(),
+            id: "shared".into(),
+            implementation: crate::view::HubImplementation::Rust,
+            revision: revision.clone().into(),
+        });
+        assert!(
+            matches!(commands.borrow_mut().pop(), Some(Command::SelectSpeechModel(neuromita::ai_runtime::AiService::Tts, model)) if model == neuromita::settings::SpeechModelReference::rust("shared", revision))
         );
     }
 }

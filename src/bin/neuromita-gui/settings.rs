@@ -113,8 +113,7 @@ pub fn execute(api: &GuiPresenter, command: Command) -> Result<(), String> {
             value.default_voice_id = current.default_voice_id;
             api.settings
                 .tts
-                .preferences
-                .set(value)
+                .save_python_preferences(value)
                 .map_err(|e| e.to_string())?;
         }
         Command::SaveCharacterVoice(character, voice_id) => {
@@ -134,12 +133,12 @@ pub fn execute(api: &GuiPresenter, command: Command) -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
         }
         Command::SelectAsrRecognizer(model_id) => {
-            let mut value = api.settings.asr.preferences.get();
-            value.recognizer_id = model_id;
+            let model = (!model_id.is_empty())
+                .then(|| neuromita::settings::SpeechModelReference::python(model_id));
             api.settings
                 .asr
-                .preferences
-                .set(value)
+                .model
+                .set(model)
                 .map_err(|e| e.to_string())?;
         }
         Command::SaveAsr(mut value, language) => {

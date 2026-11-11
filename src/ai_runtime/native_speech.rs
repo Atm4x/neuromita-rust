@@ -593,3 +593,101 @@ impl SpeechTranscriber for RoutedSpeechTranscriber {
         })
     }
 }
+
+#[cfg(test)]
+mod routing_tests {
+    use super::*;
+    use crate::{
+        ai_runtime::AiService,
+        presentation::SettingsPresenter,
+        settings::{
+            AppSettings, MemorySettingsRepository, SettingsConfig, SettingsLifecycle,
+            SettingsSource,
+        },
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountedTts(Arc<AtomicUsize>);
+    impl TtsWorker for CountedTts {
+        fn synthesize<'a>(
+            &'a self,
+            model: &'a SpeechModelReference,
+            _speech: &'a SpeechSettings,
+            _permit: &'a ServiceInferencePermit<'_>,
+            text: Arc<str>,
+            _options: VoiceOptions,
+        ) -> VoiceFuture<'a> {
+            Box::pin(async move {
+                assert_eq!(model.implementation, WorkerImplementation::Rust);
+                assert_eq!(&*text, "hello");
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(AudioArtifact {
+                    format: AudioFormat::Wave,
+                    bytes: Arc::from(&b"fixture"[..]),
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn native_selection_uses_typed_tts_port_and_rejects_same_named_python_substitution() {
+        let mut saved = AppSettings::initial_profile();
+        saved.speech.tts.enabled = true;
+        saved.speech.tts.backend = TtsBackend::Local;
+        saved.speech.tts.local_auto_load = true;
+        let model = SpeechModelReference::rust("shared", "a".repeat(64));
+        saved
+            .speech
+            .select_model(AiService::Tts, Some(model.clone()))
+            .unwrap();
+        let lifecycle = SettingsLifecycle::prepare(SettingsConfig {
+            source: SettingsSource::initial(saved),
+            repository: Arc::new(MemorySettingsRepository::new()),
+        })
+        .await
+        .unwrap();
+        let owner = lifecycle.owner();
+        let registry = ServiceWorkerRegistry::new();
+        let _claim = registry
+            .claim(ServiceModel {
+                service: AiService::Tts,
+                model: model.into(),
+            })
+            .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut routed = RoutedSpeechVoice::new(
+            Arc::clone(&owner),
+            Arc::new(crate::voice::UnavailableVoiceProvider),
+            None,
+            registry,
+        );
+        routed.implementations.insert(
+            WorkerImplementation::Rust,
+            Arc::new(CountedTts(Arc::clone(&calls))),
+        );
+        let options = VoiceOptions {
+            voice: "speaker".into(),
+            volume: crate::settings::Volume::new(50).unwrap(),
+        };
+        assert_eq!(
+            &*routed
+                .synthesize(Arc::from("hello"), options.clone())
+                .await
+                .unwrap()
+                .bytes,
+            b"fixture"
+        );
+        SettingsPresenter::new(owner)
+            .tts
+            .model
+            .set(Some(SpeechModelReference::python("shared")))
+            .unwrap();
+        assert!(
+            routed
+                .synthesize(Arc::from("hello"), options)
+                .await
+                .is_err()
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+}

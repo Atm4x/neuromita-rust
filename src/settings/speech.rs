@@ -141,7 +141,10 @@ impl SpeechModelReference {
     /// Distinguishes same-named model implementations without changing the model name.
     pub fn variant_key(&self) -> String {
         match self.implementation {
-            WorkerImplementation::Python => format!("python:{}", self.model_id),
+            WorkerImplementation::Python => match &self.revision {
+                Some(revision) => format!("python:{}@{revision}", self.model_id),
+                None => format!("python:{}", self.model_id),
+            },
             WorkerImplementation::Rust => format!(
                 "rust:{}@{}",
                 self.model_id,
@@ -161,13 +164,14 @@ impl SpeechModelReference {
             return Err(SettingsError::Validation("invalid model identity".into()));
         }
         if self.implementation == WorkerImplementation::Rust
-            && !self
-                .revision
-                .as_ref()
-                .is_some_and(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+            && !self.revision.as_ref().is_some_and(|s| {
+                s.len() == 64
+                    && s.bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
         {
             return Err(SettingsError::Validation(
-                "Rust model requires a pinned manifest revision".into(),
+                "Rust model requires a canonical lowercase manifest SHA-256".into(),
             ));
         }
         Ok(())
@@ -188,6 +192,32 @@ pub struct SpeechSettings {
 }
 
 impl SpeechSettings {
+    pub fn select_model(
+        &mut self,
+        service: crate::ai_runtime::AiService,
+        model: Option<SpeechModelReference>,
+    ) -> Result<(), SettingsError> {
+        if let Some(model) = &model {
+            model.validate()?;
+        }
+        let id = model
+            .as_ref()
+            .map(|model| model.model_id.clone())
+            .unwrap_or_default();
+        match service {
+            crate::ai_runtime::AiService::Tts => {
+                self.tts.local_model_id = id;
+                self.tts_model = model;
+            }
+            crate::ai_runtime::AiService::Asr => {
+                self.asr.recognizer_id = id;
+                self.asr_model = model;
+            }
+            _ => return Err(SettingsError::Validation("not a speech service".into())),
+        }
+        Ok(())
+    }
+
     /// A model card supplies this identity; implementation is the card's metadata.
     pub fn model_for(&self, service: crate::ai_runtime::AiService) -> Option<SpeechModelReference> {
         let (selected, id) = match service {
@@ -203,6 +233,16 @@ impl SpeechSettings {
 
 impl SpeechSettings {
     pub fn validate(&self) -> Result<(), SettingsError> {
+        for (model, id) in [
+            (&self.tts_model, &self.tts.local_model_id),
+            (&self.asr_model, &self.asr.recognizer_id),
+        ] {
+            if model.as_ref().is_some_and(|model| &model.model_id != id) {
+                return Err(SettingsError::Validation(
+                    "speech model identity conflicts with its preference ID".into(),
+                ));
+            }
+        }
         for service in [
             crate::ai_runtime::AiService::Tts,
             crate::ai_runtime::AiService::Asr,
@@ -317,6 +357,40 @@ impl SpeechSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn typed_selection_updates_preferences_atomically_and_rejects_divergent_edits() {
+        use crate::settings::{
+            AppSettings, MemorySettingsRepository, SettingsConfig, SettingsLifecycle,
+            SettingsSource,
+        };
+        use crate::{ai_runtime::AiService, presentation::SettingsPresenter};
+        use std::sync::Arc;
+        let lifecycle = SettingsLifecycle::prepare(SettingsConfig {
+            source: SettingsSource::initial(AppSettings::initial_profile()),
+            repository: Arc::new(MemorySettingsRepository::new()),
+        })
+        .await
+        .unwrap();
+        let owner = lifecycle.owner();
+        let presenter = SettingsPresenter::new(Arc::clone(&owner));
+        let model = SpeechModelReference::rust("shared", "a".repeat(64));
+        presenter.asr.model.set(Some(model.clone())).unwrap();
+        let before = owner.snapshot_all().unwrap();
+        assert_eq!(before.values.speech.asr.recognizer_id, "shared");
+        assert_eq!(
+            before.values.speech.model_for(AiService::Asr),
+            Some(model.clone())
+        );
+        let mut invalid = presenter.asr.preferences.get();
+        invalid.recognizer_id = "different".into();
+        assert!(presenter.asr.preferences.set(invalid).is_err());
+        assert_eq!(owner.snapshot_all().unwrap().revision, before.revision);
+        assert_eq!(presenter.asr.model.get(), Some(model));
+        presenter.asr.model.set(None).unwrap();
+        assert!(presenter.asr.preferences.get().recognizer_id.is_empty());
+        assert_eq!(presenter.asr.model.get(), None);
+        assert_eq!(presenter.tts.model.get(), None);
+    }
     #[test]
     fn same_named_implementations_are_distinct_models() {
         let mut saved = SpeechSettings::default();

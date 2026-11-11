@@ -244,6 +244,21 @@ impl SettingsOwner {
             value: T::read(&snapshot.values),
         })
     }
+    pub(crate) fn edit_checked<T: SettingsSection>(
+        &self,
+        edit: impl FnOnce(&mut T) -> Result<(), SettingsError>,
+    ) -> Result<SectionSnapshot<T>, SettingsError> {
+        let snapshot = self.try_change(None, move |settings| {
+            let mut value = T::read(settings);
+            edit(&mut value)?;
+            value.replace(settings);
+            Ok(())
+        })?;
+        Ok(SectionSnapshot {
+            revision: snapshot.revision,
+            value: T::read(&snapshot.values),
+        })
+    }
     pub(crate) async fn flush(&self) -> Result<(), SettingsError> {
         let mut updates = self.observe()?;
         let target = updates.borrow().revision;
@@ -297,6 +312,16 @@ impl SettingsOwner {
         expected: Option<u64>,
         change: impl FnOnce(&mut AppSettings),
     ) -> Result<Arc<SettingsSnapshot>, SettingsError> {
+        self.try_change(expected, |settings| {
+            change(settings);
+            Ok(())
+        })
+    }
+    fn try_change(
+        &self,
+        expected: Option<u64>,
+        change: impl FnOnce(&mut AppSettings) -> Result<(), SettingsError>,
+    ) -> Result<Arc<SettingsSnapshot>, SettingsError> {
         let mut state = self.state.lock().expect("settings mutex poisoned");
         if state.closed {
             return Err(SettingsError::Stopped);
@@ -313,7 +338,7 @@ impl SettingsOwner {
             });
         }
         let mut values = state.snapshot.values.clone();
-        change(&mut values);
+        change(&mut values)?;
         values.validate()?;
         if values == state.snapshot.values {
             return Ok(Arc::clone(&state.snapshot));

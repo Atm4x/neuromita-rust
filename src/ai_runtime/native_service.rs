@@ -293,6 +293,30 @@ impl AiHubNativeService {
             .await
     }
 
+    pub(crate) async fn validate_service_selection(
+        &self,
+        service: NativeSpeechKind,
+        model_id: &str,
+        revision: &str,
+    ) -> Result<(), String> {
+        let digest =
+            super::native_registry::parse_sha256(revision).map_err(|error| error.to_string())?;
+        let state = self.state.lock().await;
+        if self.stop.is_cancelled() {
+            return Err("Приложение завершает работу".into());
+        }
+        let prepared = state
+            .workflow
+            .as_ref()
+            .ok_or("Нативная ревизия недоступна")?
+            .prepare_for_service(service, model_id, Duration::from_secs(30))
+            .map_err(|error| error.to_string())?;
+        if prepared.choice().manifest_sha256 != digest {
+            return Err("Выбранная ревизия изменилась".into());
+        }
+        Ok(())
+    }
+
     async fn activate_for_service_pinned(
         &self,
         service: NativeSpeechKind,

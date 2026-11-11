@@ -1,14 +1,15 @@
 import { Theme, Icons } from "../theme.slint";
 import { Label, Icon, ActionSurface } from "../components/controls.slint";
-import { HubModelIdentity, HubInstallPreview, HubInstallOperation, HubModel, HubPill, HubAction, HubModelCard, HubStat } from "../ai-hub/components.slint";
+import { HubImplementation, HubModelIdentity, HubInstallPreview, HubInstallOperation, HubModel, HubPill, HubAction, HubModelCard, HubStat } from "../ai-hub/components.slint";
 import { ScrollView } from "std-widgets.slint";
+import { I18n } from "../i18n.slint";
 import { NativeRevisionPanel, NativeRevisionRow, NativeReleaseRow } from "../ai-hub/native.slint";
 
 export component AiHubPage inherits Rectangle {
     background: Theme.background;
     clip: true;
     private property <string> category: "tts";
-    private property <string> runtime-filter: "all";
+    private property <HubImplementation> runtime-filter: unknown;
     private property <string> search-text: "";
     private property <int> category-slot: root.category == "tts" ? 0 : root.category == "asr" ? 1 : root.category == "core" ? 2 : root.category == "rag" ? 3 : 4;
     private property <int> category-total: root.category-counts.length > root.category-slot ? root.category-counts[root.category-slot] : 0;
@@ -54,15 +55,16 @@ export component AiHubPage inherits Rectangle {
     in property <string> loaded-asr-id: "";
     callback refresh-requested();
     callback find-selection-index(HubModelIdentity) -> int;
+    callback use-model-requested(HubModelIdentity);
     pure function matches(item: HubModel) -> bool {
         return (item.category == root.category
                 || (root.category == "core" && item.category == "backend")
                 || (root.category == "else" && (item.category == "voices" || item.category == "extras"
                     || item.category == "beats" || item.category == "deps" || item.category == "dependency")))
-            && (root.runtime-filter == "all" || item.implementation == root.runtime-filter)
+            && (root.runtime-filter == HubImplementation.unknown || item.implementation == root.runtime-filter)
             && (root.search-text == "" || item.title.to-lowercase().replace-all(root.search-text.to-lowercase(), "") != item.title.to-lowercase()
                 || item.description.to-lowercase().replace-all(root.search-text.to-lowercase(), "") != item.description.to-lowercase()
-                || item.backend.to-lowercase().replace-all(root.search-text.to-lowercase(), "") != item.backend.to-lowercase());
+                || item.implementation-label.to-lowercase().replace-all(root.search-text.to-lowercase(), "") != item.implementation-label.to-lowercase());
     }
     function reconcile-selected() {
         if !root.settings-open || root.selected-key.id == "" { return; }
@@ -73,7 +75,7 @@ export component AiHubPage inherits Rectangle {
                 root.confirm-discard = true;
             } else {
                 root.settings-open = false;
-                root.selected-key = { category: "", id: "", implementation: "", revision: "" };
+                root.selected-key = { category: "", id: "", implementation: HubImplementation.unknown, revision: "" };
             }
             return;
         }
@@ -133,7 +135,7 @@ export component AiHubPage inherits Rectangle {
         root.install-submitted = false;
         root.pending-category = "";
         if root.dirty { root.confirm-discard = true; }
-        else { root.settings-open = false; root.selected-key = { category: "", id: "", implementation: "", revision: "" }; }
+        else { root.settings-open = false; root.selected-key = { category: "", id: "", implementation: HubImplementation.unknown, revision: "" }; }
     }
     function discard-and-leave() {
         root.review-token += 1;
@@ -143,7 +145,7 @@ export component AiHubPage inherits Rectangle {
         root.confirm-discard = false;
         root.dirty = false;
         root.settings-open = false;
-        root.selected-key = { category: "", id: "", implementation: "", revision: "" };
+        root.selected-key = { category: "", id: "", implementation: HubImplementation.unknown, revision: "" };
         root.selection-missing = false;
         root.selection-changed = false;
         if root.pending-category != "" { root.category = root.pending-category; }
@@ -314,15 +316,15 @@ export component AiHubPage inherits Rectangle {
                         VerticalLayout {
                             width: 17px; alignment: center;
                             Icon {
-                                source: root.runtime-filter == "all" ? Icons.ai-hub
-                                    : root.runtime-filter == "python" ? Icons.python : Icons.rust;
+                                source: root.runtime-filter == HubImplementation.unknown ? Icons.ai-hub
+                                    : root.runtime-filter == HubImplementation.python ? Icons.python : Icons.rust;
                                 colorize: Theme.accent-hover;
                                 width: 16px; height: 16px;
                             }
                         }
                         Label {
-                            text: root.runtime-filter == "all" ? "Все реализации"
-                                : root.runtime-filter == "python" ? "Python" : "Rust";
+                            text: root.runtime-filter == HubImplementation.unknown ? "Все реализации"
+                                : root.runtime-filter == HubImplementation.python ? "Python" : "Rust";
                             font-size: 12px; font-weight: 600;
                             horizontal-stretch: 1; min-width: 0px;
                         }
@@ -341,9 +343,9 @@ export component AiHubPage inherits Rectangle {
                             VerticalLayout {
                                 padding: 4px; spacing: 2px;
                                 for filter in [
-                                    { id: "all", label: "Все реализации", icon: Icons.ai-hub },
-                                    { id: "python", label: "Python", icon: Icons.python },
-                                    { id: "rust", label: "Rust", icon: Icons.rust }
+                                    { id: HubImplementation.unknown, label: "Все реализации", icon: Icons.ai-hub },
+                                    { id: HubImplementation.python, label: "Python", icon: Icons.python },
+                                    { id: HubImplementation.rust, label: "Rust", icon: Icons.rust }
                                 ]: ActionSurface {
                                     label: filter.label;
                                     height: 36px; border-radius: 7px;
@@ -467,8 +469,8 @@ export component AiHubPage inherits Rectangle {
                             if root.matches(model): HubModelCard {
                                 horizontal-stretch: 1;
                                 entry: model;
-                                inference-ready: (model.implementation == "python" && model.category == "tts" && root.loaded-tts-id != "" && model.id == root.loaded-tts-id)
-                                    || (model.implementation == "python" && model.category == "asr" && root.loaded-asr-id != "" && model.id == root.loaded-asr-id);
+                                inference-ready: (model.implementation == HubImplementation.python && model.category == "tts" && root.loaded-tts-id != "" && model.id == root.loaded-tts-id)
+                                    || (model.implementation == HubImplementation.python && model.category == "asr" && root.loaded-asr-id != "" && model.id == root.loaded-asr-id);
                                 open-settings => { root.open-details(index); }
                             }
                         }
@@ -502,14 +504,14 @@ export component AiHubPage inherits Rectangle {
                             }
                             VerticalLayout { spacing: 4px; alignment: center; horizontal-stretch: 1;
                                 Label { text: root.selected-model.title; font-size: 22px; font-weight: 700; }
-                                Label { text: "Компонент · " + root.selected-model.backend + " · " + root.selected-model.id; color: Theme.muted; font-size: 11px; }
+                                Label { text: "Компонент · " + root.selected-model.implementation-label + " · " + root.selected-model.id; color: Theme.muted; font-size: 11px; }
                             }
                         }
                         Text { text: root.selected-model.description; color: Theme.muted; font-size: 12px; wrap: word-wrap; }
                         HorizontalLayout { spacing: 8px; height: 28px;
-                            HubPill { caption: root.selected-model.backend; accent: true; }
-                            if (root.selected-model.implementation == "python" && root.selected-model.category == "tts" && root.loaded-tts-id != "" && root.selected-model.id == root.loaded-tts-id)
-                                || (root.selected-model.implementation == "python" && root.selected-model.category == "asr" && root.loaded-asr-id != "" && root.selected-model.id == root.loaded-asr-id): HubPill {
+                            HubPill { caption: root.selected-model.implementation-label; accent: true; }
+                            if (root.selected-model.implementation == HubImplementation.python && root.selected-model.category == "tts" && root.loaded-tts-id != "" && root.selected-model.id == root.loaded-tts-id)
+                                || (root.selected-model.implementation == HubImplementation.python && root.selected-model.category == "asr" && root.loaded-asr-id != "" && root.selected-model.id == root.loaded-asr-id): HubPill {
                                 caption: "Модель загружена"; accent: true;
                             }
                             if root.selected-model.language != "": HubPill { caption: root.selected-model.language; }
@@ -546,7 +548,11 @@ export component AiHubPage inherits Rectangle {
                                 }
                             }
                         }
-                        if root.selected-model.implementation == "rust": NativeRevisionPanel {
+                        if root.selected-model.category == "tts" || root.selected-model.category == "asr": HubAction {
+                            label: I18n.i18n("ai-hub.use-model", "Использовать выбранную модель");
+                            activated => { root.use-model-requested(root.selected-key); }
+                        }
+                        if root.selected-model.implementation == HubImplementation.rust: NativeRevisionPanel {
                             height: 540px;
                             model-filter-id: root.selected-model.id;
                             model-filter-revision: root.selected-model.revision;
@@ -567,7 +573,7 @@ export component AiHubPage inherits Rectangle {
                             activate-requested(id, service, revision) => { root.native-activate-requested(id, service, revision); }
                             stop-requested(service, id, revision) => { root.native-stop-requested(service, id, revision); }
                         }
-                        if root.selected-model.implementation == "python": Rectangle {
+                        if root.selected-model.implementation == HubImplementation.python: Rectangle {
                             height: root.review-requested && root.install-preview.token == root.review-token
                                 && root.install-preview.category == root.selected-key.category
                                 && root.install-preview.id == root.selected-key.id ? 260px : 82px;

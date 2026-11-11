@@ -58,6 +58,10 @@ pub struct ChatOrigin {
 }
 
 pub enum Command {
+    SelectSpeechModel(
+        neuromita::ai_runtime::AiService,
+        neuromita::settings::SpeechModelReference,
+    ),
     RefreshReleases,
     MemorySelect(CharacterId),
     MemoryEdit(
@@ -745,6 +749,14 @@ async fn observe(
                         Ok(()) => publish(Update::AdminSaved),
                         Err(error) => publish(Update::AdminError(error)),
                     }
+                },
+                Some(Command::SelectSpeechModel(service, model)) => {
+                    let result = match service {
+                        neuromita::ai_runtime::AiService::Tts => administration.settings.tts.model.set(Some(model)),
+                        neuromita::ai_runtime::AiService::Asr => administration.settings.asr.model.set(Some(model)),
+                        _ => Err(neuromita::settings::SettingsError::Validation("not a speech service".into())),
+                    };
+                    match result { Ok(()) => publish(Update::AdminSaved), Err(error) => publish(Update::AdminError(error.to_string())) }
                 },
                 Some(Command::NewPreset) => match administration.presets.create_unconfigured() {
                     Ok((id, record)) => publish(Update::PresetCreated(id, record)),

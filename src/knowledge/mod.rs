@@ -333,7 +333,7 @@ impl KnowledgeRetrieval {
                     crate::timeline::selection::TimelineTurn,
                     Vec<crate::timeline::KnowledgeDispatchSource>,
                 )
-                    -> Result<crate::timeline::KnowledgeDispatchLease, EmbeddingError>
+                    -> embedding::EmbeddingFuture<'static, crate::timeline::KnowledgeDispatchLease>
                 + Send
                 + Sync,
         >,

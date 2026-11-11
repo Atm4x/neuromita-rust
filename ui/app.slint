@@ -9,7 +9,7 @@ import { GuideNavigator, GuideContentsEntry } from "components/guide-navigator.s
 import { Sidebar, PageId } from "components/sidebar.slint";
 import { HomePage, ComponentCard, ReleaseItem } from "pages/home.slint";
 import { AiHubPage } from "pages/ai-hub.slint";
-import { HubModel, HubModelIdentity, HubInstallPreview, HubInstallOperation } from "ai-hub/components.slint";
+import { HubImplementation, HubModel, HubModelIdentity, HubInstallPreview, HubInstallOperation } from "ai-hub/components.slint";
 import { NativeRevisionRow, NativeReleaseRow } from "ai-hub/native.slint";
 import { SettingsPage, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, AiEngineUi, AiHardwareDevice } from "pages/settings.slint";
 import { VoiceUi } from "pages/voice.slint";
@@ -25,6 +25,7 @@ import { AboutPage } from "pages/about.slint";
 export { NativeRevisionRow, NativeReleaseRow, HubModel, AiEngineUi, AiHardwareDevice, VoiceUi, AsrUi, CharacterCatalog, MemoryUi, MemoryItem, ConversationUi, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, PageId, ComponentCard, ReleaseItem, ReleaseEntry, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus, GuideFocusTarget, GuideContentsEntry, WikiArticleEntry }
 
 export struct GuideSectionEntry { first: int, last: int, title: string }
+export { HubImplementation }
 
 export component AppWindow inherits Window {
     title: I18n.i18n("app.window.title", "Чат с NeuroMita");
@@ -151,6 +152,7 @@ export component AppWindow inherits Window {
     callback ai-hub-confirm-install(HubModelIdentity, int);
     callback ai-hub-refresh();
     callback ai-hub-find-selection-index(HubModelIdentity) -> int;
+    callback ai-hub-use-model(HubModelIdentity);
     in property <string> chat-attitude: "—";
     in property <string> chat-boredom: "—";
     in property <string> chat-stress: "—";
@@ -230,6 +232,7 @@ export component AppWindow inherits Window {
                 confirm-install-requested(identity, token) => { root.ai-hub-confirm-install(identity, token); }
                 refresh-requested => { root.ai-hub-refresh(); }
                 find-selection-index(identity) => { root.ai-hub-find-selection-index(identity) }
+                use-model-requested(identity) => { root.ai-hub-use-model(identity); }
             }
             if !root.ai-hub-open && root.page == PageId.home: HomePage {
                 width: parent.width; height: parent.height;

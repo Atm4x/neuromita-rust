@@ -165,6 +165,7 @@ fn encode<T: serde::Serialize>(value: &T) -> Result<String, TimelineError> {
 
 /// SQLite is a replaceable transaction owner, not a second implementation of timeline rules.
 /// SQLite sources are bundled through rusqlite when the sqlite-system feature is enabled.
+#[derive(Clone)]
 pub struct SqliteTimelineRepository {
     path: PathBuf,
 }

@@ -20,6 +20,7 @@ use std::rc::Rc;
 
 use neuromita::ai_runtime::model_identity::WorkerImplementation;
 
+use super::view::HubImplementation;
 use super::{
     runtime::Command,
     view::{
@@ -50,6 +51,32 @@ fn render_catalog(window: &AppWindow, state: &HubCatalogState) {
 }
 
 pub fn bind(window: &AppWindow, send: Rc<dyn Fn(Command)>) {
+    let weak = window.as_weak();
+    let choose = send.clone();
+    window.on_ai_hub_use_model(move |identity| {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        if window.invoke_ai_hub_find_selection_index(identity.clone()) < 0 {
+            return;
+        }
+        let service = match identity.category.as_str() {
+            "tts" => neuromita::ai_runtime::AiService::Tts,
+            "asr" => neuromita::ai_runtime::AiService::Asr,
+            _ => return,
+        };
+        let model = match identity.implementation {
+            HubImplementation::Python => {
+                neuromita::settings::SpeechModelReference::python(identity.id.as_str())
+            }
+            HubImplementation::Rust => neuromita::settings::SpeechModelReference::rust(
+                identity.id.as_str(),
+                identity.revision.as_str(),
+            ),
+            _ => return,
+        };
+        choose(Command::SelectSpeechModel(service, model));
+    });
     window.set_native_download_configured(super::runtime::native_download_configured());
     let native_install = send.clone();
     window.on_native_download(move |model_id, digest, backend| {
@@ -120,7 +147,7 @@ pub fn bind(window: &AppWindow, send: Rc<dyn Fn(Command)>) {
             })
             .count();
         if matches == 1
-            && identity.implementation.as_str() == "python"
+            && identity.implementation == HubImplementation::Python
             && (identity.category.as_str() == "tts" || identity.category.as_str() == "asr")
         {
             send_preview(Command::PreviewAiHubInstall {
@@ -160,7 +187,7 @@ pub fn bind(window: &AppWindow, send: Rc<dyn Fn(Command)>) {
             .count();
         if count == 1
             && preview.can_install
-            && identity.implementation.as_str() == "python"
+            && identity.implementation == HubImplementation::Python
             && (preview.stage == "review" || preview.stage == "wheel-review")
             && preview.token == token
             && preview.category == identity.category
@@ -220,11 +247,14 @@ fn model(entry: UnifiedHubEntry) -> HubModel {
     HubModel {
         id: entry.identity.model_id.into(),
         category: entry.service.into(),
-        implementation: implementation.into(),
+        implementation: match entry.identity.implementation {
+            WorkerImplementation::Python => HubImplementation::Python,
+            WorkerImplementation::Rust => HubImplementation::Rust,
+        },
         revision: entry.identity.revision.unwrap_or_default().into(),
         title: entry.title.into(),
         description: entry.description.into(),
-        backend: implementation.into(),
+        implementation_label: implementation.into(),
         language: "".into(),
         size: "".into(),
         state: entry.state.as_str().into(),

@@ -24,6 +24,8 @@ pub enum SpeechSelectionError {
     },
     #[error("selected plugin {0} has multiple verified revisions; select one explicitly")]
     AmbiguousRevision(String),
+    #[error("selected plugin {plugin_id} does not have the pinned revision {revision}")]
+    UnknownRevision { plugin_id: String, revision: String },
     #[error("selected plugin {plugin_id} is not ready: {reasons:?}")]
     NotReady {
         plugin_id: String,
@@ -112,10 +114,21 @@ pub fn select_speech_model(
     }
     .cloned()
     .unwrap_or_else(|| serde_json::json!({}));
-    let asset_revision = match option.installed_revisions.as_slice() {
-        [] => None,
-        [revision] => Some(revision.clone()),
-        _ => return Err(SpeechSelectionError::AmbiguousRevision(plugin_id.clone())),
+    let pinned = settings.model_for(service).and_then(|model| model.revision);
+    let asset_revision = if let Some(revision) = pinned {
+        if !option.installed_revisions.contains(&revision) {
+            return Err(SpeechSelectionError::UnknownRevision {
+                plugin_id: plugin_id.clone(),
+                revision,
+            });
+        }
+        Some(revision)
+    } else {
+        match option.installed_revisions.as_slice() {
+            [] => None,
+            [revision] => Some(revision.clone()),
+            _ => return Err(SpeechSelectionError::AmbiguousRevision(plugin_id.clone())),
+        }
     };
     Ok(Some(SpeechSelection {
         service,
@@ -185,6 +198,38 @@ pub async fn resolve_speech_activations(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn explicit_python_revision_is_used_and_missing_pin_never_selects_another() {
+        use crate::settings::SpeechModelReference;
+        let mut settings = SpeechSettings::default();
+        settings
+            .select_model(
+                AiService::Asr,
+                Some(SpeechModelReference {
+                    model_id: "whisper".into(),
+                    implementation: WorkerImplementation::Python,
+                    revision: Some("rev2".into()),
+                }),
+            )
+            .unwrap();
+        let inventory = SpeechInventory {
+            asr: vec![entry("whisper", &["rev1", "rev2"])],
+            ..Default::default()
+        };
+        assert_eq!(
+            select_speech_model(&settings, &inventory, AiService::Asr)
+                .unwrap()
+                .unwrap()
+                .asset_revision
+                .as_deref(),
+            Some("rev2")
+        );
+        settings.asr_model.as_mut().unwrap().revision = Some("missing".into());
+        assert!(matches!(
+            select_speech_model(&settings, &inventory, AiService::Asr),
+            Err(SpeechSelectionError::UnknownRevision { .. })
+        ));
+    }
 
     fn entry(id: &str, revisions: &[&str]) -> SpeechModelOption {
         SpeechModelOption {

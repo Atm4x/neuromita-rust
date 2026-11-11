@@ -235,6 +235,12 @@ pub(crate) struct KnowledgeDispatchLease {
 }
 
 impl KnowledgeDispatchLease {
+    #[cfg(feature = "sqlite-system")]
+    pub(crate) fn from_sqlite(lease: storage::SqliteKnowledgeDispatchLease) -> Self {
+        Self {
+            _sqlite: Some(lease),
+        }
+    }
     #[cfg(test)]
     pub(crate) fn transient_for_test() -> Self {
         Self {
@@ -256,6 +262,10 @@ pub(crate) struct SessionTimeline {
 }
 
 impl SessionTimeline {
+    #[cfg(feature = "sqlite-system")]
+    pub(crate) fn dispatch_repository(&self) -> Option<storage::SqliteTimelineRepository> {
+        self.selection_repository.clone()
+    }
     pub(crate) fn new() -> Self {
         let mut store = TimelineStore::new();
         let branch = BranchId::new();

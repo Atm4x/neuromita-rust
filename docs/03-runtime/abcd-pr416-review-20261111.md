@@ -2,6 +2,8 @@
 
 Reviewed head: `a6612788dcb4a087e0f98957fa66c98585ae22f8`, seven commits after integration `f9c432b1`. The attached iteration-7 report was treated as a set of claims to verify. The destination is `codex/abcd-integration-20261110`, not `main`.
 
+Update: PR #416 was subsequently merged through `f0f2199e` as `c0597ca4`. The three P1 findings below describe the reviewed earlier head. Their implementation follow-up, final validation and remaining limits are recorded in [service selection and ownership closure](abcd-service-selection-closure-20261111.md). The broader model-module/bootstrap redesign is separately tracked in [issue #417](https://github.com/Atm4x/neuromita-rust/issues/417).
+
 ## Accepted improvements
 
 | Boundary | Evidence in implementation | Limits |

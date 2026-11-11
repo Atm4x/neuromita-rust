@@ -20,21 +20,23 @@ export struct HubInstallOperation {
     summary: string,
 }
 
+export enum HubImplementation { unknown, python, rust }
+
 export struct HubModelIdentity {
     category: string,
     id: string,
-    implementation: string,
+    implementation: HubImplementation,
     revision: string,
 }
 
 export struct HubModel {
     id: string,
     category: string,
-    implementation: string,
+    implementation: HubImplementation,
     revision: string,
     title: string,
     description: string,
-    backend: string,
+    implementation-label: string,
     language: string,
     size: string,
     state: string,
@@ -127,7 +129,7 @@ export component HubModelCard inherits Rectangle {
                 height: 23px;
                 spacing: 6px;
                 alignment: end;
-                HubPill { caption: root.entry.backend; accent: root.entry.backend == "NVIDIA"; }
+                HubPill { caption: root.entry.implementation-label; accent: true; }
                 if root.entry.language != "": HubPill { caption: root.entry.language; }
                 if root.entry.size != "": HubPill { caption: root.entry.size; }
             }

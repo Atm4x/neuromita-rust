@@ -1103,7 +1103,10 @@ async fn joint_vector_generation_uses_one_embedding_query_and_one_cross_source_r
         RequestSource::Presenter,
     ))
     .unwrap();
-    let call = next_call(&mut calls).await;
+    let call = tokio::select! {
+        call = next_call(&mut calls) => call,
+        outcome = request.wait() => panic!("joint retrieval finished before reaching the provider: {outcome:?}"),
+    };
     let evidence = call.input.prepared_knowledge.as_deref().unwrap_or("");
     assert!(evidence.contains(&memory_id.0.to_string()), "{evidence}");
     assert!(evidence.contains(&archived.0.to_string()), "{evidence}");

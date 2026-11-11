@@ -2,15 +2,18 @@
 
 ## ABCD / PR #416: интеграционная проверка, 2026-11-11
 
-Актуальные результаты и границы: [аудит PR #416](../docs/03-runtime/abcd-pr416-review-20261111.md). Назначение — `codex/abcd-integration-20261110`; готовность к main не заявляется.
+Актуальные результаты и границы: [аудит PR #416](../docs/03-runtime/abcd-pr416-review-20261111.md) и [закрытие интеграционных разрывов](../docs/03-runtime/abcd-service-selection-closure-20261111.md). Назначение — `codex/abcd-integration-20261110`; готовность к main не заявляется.
 
 - [x] Проверены семь коммитов Core ownership / GameLink / semantic dispatch / unified AI Hub.
 - [x] Удалено добавленное чтение старых dev `tts_engine/asr_engine`; локальные настройки не переписывались.
 - [x] Неоднозначные записи общего каталога отклоняются целиком, без выбора первой.
 - [x] Дополнены недостающие английские переводы, исправлена зависимость GUI-теста от порядка UUID.
-- [ ] Один типизированный выбор модели от функционального presenter до runtime; согласованность ID, implementation, revision и модельных параметров.
-- [ ] Замена Python worker одного сервиса сохраняет поколения и работу остальных сервисов.
-- [ ] Timeline writer admission и отправка провайдеру имеют определённую атомарную границу, включая внешних SQLite writers.
+- [x] Типизированный выбор модели от функционального presenter до runtime; атомарная согласованность ID, implementation и revision.
+- [x] Владение Python workers разделено по сервисам; замена speech worker не останавливает соседние speech/semantic workers.
+- [x] Для memory/history dispatch определена SQLite-граница writer admission; RAII-резервирование сохраняется через provider IO, включая внешних SQLite writers.
+- [x] Исправлена инвалидация совместного memory/history retrieval при фоновом обновлении того же префикса.
+- [x] Целевой контракт Hardware / ModelModule / bootstrap / InstallPlan записан; реализация заведена в [issue #417](https://github.com/Atm4x/neuromita-rust/issues/417).
+- [ ] Полная модульная фабрика установки/запуска и implementation/revision-aware параметры моделей по #417; текущие Python preference-формы не объявляются универсальными.
 - [ ] Строгий all-target GUI Clippy без общих подавлений.
 - [ ] Реальный signed native inference и Unity acceptance.
 
