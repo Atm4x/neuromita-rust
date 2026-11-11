@@ -1,0 +1,27 @@
+name: Q2 onboarding persistence and offline restart
+on:
+  push:
+    branches: [codex/q2-onboarding-wiki-acceptance-20261111]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  persistence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust 1.98.1, system libraries
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libfontconfig1-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev libx11-dev libxcb1-dev
+      - name: Fresh, rejected, corrupted, restart, persisted Guide
+        env:
+          CARGO_BUILD_JOBS: "2"
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: |
+          cargo +1.98.1 test --locked --lib onboarding::tests -- --nocapture
+          cargo +1.98.1 test --locked --test onboarding_consent -- --nocapture
+          cargo +1.98.1 test --locked --lib onboarding::wiki::tests -- --nocapture
