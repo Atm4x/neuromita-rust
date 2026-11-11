@@ -1,0 +1,68 @@
+name: P1 character editor exact source port and executable GUI tests
+on:
+  push:
+    branches: [bridge/p1-character-editor-port-20261111]
+permissions:
+  contents: write
+jobs:
+  port:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      RUSTFLAGS: '-C debuginfo=0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/p1-character-editor-port-20261111
+          path: bridge
+      - uses: actions/checkout@v4
+        with:
+          ref: 3ada9636d2641529d81fbb2b7d73ef0200b484c1
+          fetch-depth: 0
+          path: rust
+      - name: Exact old-base PR310 diff and conservative reconciliation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd rust
+          git fetch --no-tags origin refs/pull/310/head:refs/remotes/origin/p1-310
+          test "$(git rev-parse refs/remotes/origin/p1-310)" = 5e4e29475b333b504a3b02177459ec6c9c3d9add
+          git diff 3433487564e41a2cce582d060e3329b91afb698e refs/remotes/origin/p1-310 -- \
+            ui/app.slint ui/pages/settings.slint ui/settings/presets-state.slint \
+            src/bin/neuromita-gui/binding_tests.rs src/bin/neuromita-gui/runtime.rs \
+            src/bin/neuromita-gui/sandbox.rs src/bin/neuromita-gui/settings.rs \
+            > /tmp/p1-editor.patch
+          git checkout -b codex/p1-character-editor-port-20261111
+          git apply --3way /tmp/p1-editor.patch || test "$(git diff --name-only --diff-filter=U | wc -l)" -eq 6
+          python ../bridge/tools/p1-character-editor-conflict-resolve-20261111.py
+          git add ui/app.slint ui/pages/settings.slint ui/settings/presets-state.slint \
+            src/bin/neuromita-gui/binding_tests.rs src/bin/neuromita-gui/runtime.rs \
+            src/bin/neuromita-gui/sandbox.rs src/bin/neuromita-gui/settings.rs
+          git diff --cached --check
+          git diff --cached --stat
+      - name: GUI Linux development libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y pkg-config libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev libxcb-shape0-dev libxcb-xfixes0-dev libfontconfig1-dev libfreetype6-dev
+      - name: Rust 1.98.1
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+      - name: Format check
+        working-directory: rust
+        run: cargo +1.98.1 fmt --all -- --check
+      - name: GUI all-target compile
+        working-directory: rust
+        run: cargo +1.98.1 check --locked --offline --features gui --all-targets
+      - name: Executable Slint software-render tests
+        working-directory: rust
+        run: cargo +1.98.1 test --locked --offline --features gui --bin neuromita-gui -- --test-threads=1
+      - name: Publish only clean and tested candidate to isolated branch
+        working-directory: rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "P1 GUI integrator"
+          git config user.email "p1-gui-integrator@users.noreply.github.com"
+          git commit -m "feat(characters): staged Save/Cancel GUI through atomic Settings Owner"
+          git push origin HEAD:refs/heads/codex/p1-character-editor-port-20261111
