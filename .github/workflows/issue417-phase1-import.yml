@@ -1,0 +1,28 @@
+name: Issue 417 verified module bootstrap increment
+on:
+  push:
+    branches:
+      - bridge/issue417-phase1-import-20261111
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify original Git commit and publish candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f transfer/issue417-phase1.b64 ]; then exit 0; fi
+          git fetch origin +refs/heads/codex/abcd-integration-20261110:refs/heads/issue417-base
+          test "$(git rev-parse refs/heads/issue417-base)" = "7e055da3eadca750dbe835d98fbceb20433c7d57"
+          base64 -d transfer/issue417-phase1.b64 > "$RUNNER_TEMP/issue417-phase1.bundle"
+          echo "ff810e28a877c77dc72a45a45c16ee228a3077556a1a4b63a8d168705bfdc53f  $RUNNER_TEMP/issue417-phase1.bundle" | sha256sum -c -
+          git bundle verify "$RUNNER_TEMP/issue417-phase1.bundle"
+          git fetch "$RUNNER_TEMP/issue417-phase1.bundle" refs/heads/issue417-base:refs/heads/issue417-candidate
+          test "$(git rev-parse refs/heads/issue417-candidate)" = "1994c5650d123c944f0fd62ce3985486fbd56a07"
+          git merge-base --is-ancestor "7e055da3eadca750dbe835d98fbceb20433c7d57" refs/heads/issue417-candidate
+          git push origin refs/heads/issue417-candidate:refs/heads/codex/issue417-module-bootstrap-20261111
