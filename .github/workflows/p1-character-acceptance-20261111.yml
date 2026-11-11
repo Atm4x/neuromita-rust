@@ -1,0 +1,64 @@
+name: P1 character atomic baseline and candidate acceptance
+on:
+  push:
+    branches:
+      - bridge/p1-pr-integrator-source-20261111
+permissions:
+  contents: read
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: baseline-main-421
+            sha: 74e505f48862b814628bbb598a63e23a6834427c
+          - label: candidate-pr422
+            sha: 671be1052caf5a14c9a9e1b46b7cf76d9278c44d
+    name: ${{ matrix.label }} Rust 1.98.1
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      RUSTFLAGS: '-C debuginfo=0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.sha }}
+          fetch-depth: 1
+      - name: Native Linux packages
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y pkg-config libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev libxcb-shape0-dev libxcb-xfixes0-dev
+      - name: Rust 1.98.1 pinned
+        shell: bash
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+          cargo +1.98.1 --version
+          rustc +1.98.1 --version
+      - name: Format
+        shell: bash
+        run: cargo +1.98.1 fmt --all -- --check
+      - name: Check all targets offline
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo +1.98.1 check --locked --offline --all-targets 2>&1 | tee p1-check.log
+      - name: Full library tests offline
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo +1.98.1 test --locked --offline --lib -- --test-threads=2 2>&1 | tee p1-tests.log
+      - name: GUI all-target compile offline
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo +1.98.1 check --locked --offline --features gui --all-targets 2>&1 | tee p1-gui.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: p1-${{ matrix.label }}-logs
+          path: p1-*.log
+          retention-days: 3
