@@ -1,0 +1,38 @@
+name: Q2 QA exact main source export
+on:
+  push:
+    branches: [bridge/q2-qa-source-20261111]
+permissions:
+  contents: read
+jobs:
+  source-bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export pinned current main and Python reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin +refs/heads/main:refs/remotes/origin/main
+          git branch main refs/remotes/origin/main
+          test "$(git rev-parse main)" = "74e505f48862b814628bbb598a63e23a6834427c"
+          git bundle create "$RUNNER_TEMP/neuromita-rust-main.bundle" refs/heads/main
+          git clone --no-checkout https://github.com/Atm4x/NeuroMita.git "$RUNNER_TEMP/python-src"
+          git -C "$RUNNER_TEMP/python-src" bundle create "$RUNNER_TEMP/neuromita-python-main.bundle" refs/heads/main
+          cd "$RUNNER_TEMP"
+          sha256sum neuromita-rust-main.bundle neuromita-python-main.bundle > bundle.sha256
+          printf "RUST_MAIN=%s\nPYTHON_MAIN=%s\n" "$(git -C "$GITHUB_WORKSPACE" rev-parse main)" "$(git -C python-src rev-parse main)" > source-shas.env
+      - uses: actions/upload-artifact@v4
+        with:
+          name: q2-main-source-bundles
+          path: |
+            ${{ runner.temp }}/neuromita-rust-main.bundle
+            ${{ runner.temp }}/neuromita-python-main.bundle
+            ${{ runner.temp }}/bundle.sha256
+            ${{ runner.temp }}/source-shas.env
+          retention-days: 1
+          compression-level: 0
