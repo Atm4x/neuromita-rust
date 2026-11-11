@@ -435,59 +435,73 @@ impl RoutedSpeechVoice {
             implementations,
         }
     }
+
+    fn ensure_selection_unchanged(&self, speech: &SpeechSettings) -> Result<(), VoiceError> {
+        let current = self
+            .settings
+            .snapshot_all()
+            .map_err(|error| VoiceError::Generation(error.to_string()))?;
+        if current.values.speech.model_for(super::AiService::Tts)
+            != speech.model_for(super::AiService::Tts)
+            || current.values.speech.tts != speech.tts
+            || current.values.speech.tts_model_options != speech.tts_model_options
+        {
+            return Err(VoiceError::Unavailable);
+        }
+        Ok(())
+    }
 }
 
 impl VoiceProvider for RoutedSpeechVoice {
     fn synthesize(&self, text: Arc<str>, options: VoiceOptions) -> VoiceFuture<'_> {
         Box::pin(async move {
-            let permit = self.registry.inference_permit(super::AiService::Tts).await;
             let saved = self
                 .settings
                 .snapshot_all()
-                .map_err(|e| VoiceError::Generation(e.to_string()))?;
+                .map_err(|error| VoiceError::Generation(error.to_string()))?;
             let speech = &saved.values.speech;
             let selected = speech
                 .model_for(super::AiService::Tts)
                 .unwrap_or_else(|| SpeechModelReference::python(speech.tts.local_model_id.clone()));
-            if speech.tts.backend == TtsBackend::Local
-                && self
-                    .registry
-                    .active(super::AiService::Tts)
-                    .map_err(|error| VoiceError::Generation(error.to_string()))?
-                    != Some(ServiceModel {
-                        service: super::AiService::Tts,
-                        model: selected.clone().into(),
-                    })
-            {
-                return Err(VoiceError::Unavailable);
-            }
             let worker = self
                 .implementations
                 .get(&selected.implementation)
                 .ok_or(VoiceError::Unavailable)?;
-            let audio = worker
-                .synthesize(&selected, speech, &permit, text, options)
-                .await?;
-            let current = self
-                .settings
-                .snapshot_all()
-                .map_err(|e| VoiceError::Generation(e.to_string()))?;
-            if current.values.speech.model_for(super::AiService::Tts)
-                != speech.model_for(super::AiService::Tts)
-                || current.values.speech.tts != speech.tts
-                || current.values.speech.tts_model_options != speech.tts_model_options
-                || (speech.tts.backend == TtsBackend::Local
-                    && self
-                        .registry
-                        .active(super::AiService::Tts)
-                        .map_err(|error| VoiceError::Generation(error.to_string()))?
-                        != Some(ServiceModel {
+
+            let audio = if speech.tts.backend == TtsBackend::Local {
+                let binding = self
+                    .registry
+                    .connect(
+                        ServiceModel {
                             service: super::AiService::Tts,
-                            model: selected.into(),
-                        }))
-            {
-                return Err(VoiceError::Unavailable);
-            }
+                            model: selected.clone().into(),
+                        },
+                        Arc::clone(worker),
+                    )
+                    .map_err(|_| VoiceError::Unavailable)?;
+                let call = binding.begin().await.map_err(|_| VoiceError::Unavailable)?;
+                let audio = call
+                    .dispatch(call.backend().synthesize(
+                        &selected,
+                        speech,
+                        call.permit(),
+                        text,
+                        options,
+                    ))
+                    .await
+                    .map_err(|_| VoiceError::Unavailable)??;
+                self.ensure_selection_unchanged(speech)?;
+                audio
+            } else {
+                // Telegram/API are existing non-local voice transports, not
+                // active model-backed service workers. Preserve their behavior.
+                let permit = self.registry.inference_permit(super::AiService::Tts).await;
+                let audio = worker
+                    .synthesize(&selected, speech, &permit, text, options)
+                    .await?;
+                self.ensure_selection_unchanged(speech)?;
+                audio
+            };
             Ok(audio)
         })
     }
@@ -527,51 +541,49 @@ impl RoutedSpeechTranscriber {
 impl SpeechTranscriber for RoutedSpeechTranscriber {
     fn transcribe<'a>(&'a self, wav: &'a [u8]) -> SpeechFuture<'a, Transcript> {
         Box::pin(async move {
-            let permit = self.registry.inference_permit(super::AiService::Asr).await;
             let saved = self
                 .settings
                 .snapshot_all()
-                .map_err(|e| SpeechSessionError::Asr(e.to_string()))?;
+                .map_err(|error| SpeechSessionError::Asr(error.to_string()))?;
             let speech = &saved.values.speech;
             let selected = speech
                 .model_for(super::AiService::Asr)
                 .ok_or_else(|| SpeechSessionError::Asr("no ASR model selected".into()))?;
-            if self
-                .registry
-                .active(super::AiService::Asr)
-                .map_err(|error| SpeechSessionError::Asr(error.to_string()))?
-                != Some(ServiceModel {
-                    service: super::AiService::Asr,
-                    model: selected.clone().into(),
-                })
-            {
-                return Err(SpeechSessionError::Asr(
-                    "selected ASR worker is not active".into(),
-                ));
-            }
             let worker = self
                 .implementations
                 .get(&selected.implementation)
                 .ok_or_else(|| {
                     SpeechSessionError::Asr("selected ASR model worker is not installed".into())
                 })?;
-            let transcript = worker.transcribe(&selected, speech, &permit, wav).await?;
+            let binding = self
+                .registry
+                .connect(
+                    ServiceModel {
+                        service: super::AiService::Asr,
+                        model: selected.clone().into(),
+                    },
+                    Arc::clone(worker),
+                )
+                .map_err(|error| SpeechSessionError::Asr(error.to_string()))?;
+            let call = binding
+                .begin()
+                .await
+                .map_err(|error| SpeechSessionError::Asr(error.to_string()))?;
+            let transcript = call
+                .dispatch(
+                    call.backend()
+                        .transcribe(&selected, speech, call.permit(), wav),
+                )
+                .await
+                .map_err(|error| SpeechSessionError::Asr(error.to_string()))??;
             let current = self
                 .settings
                 .snapshot_all()
-                .map_err(|e| SpeechSessionError::Asr(e.to_string()))?;
+                .map_err(|error| SpeechSessionError::Asr(error.to_string()))?;
             if current.values.speech.model_for(super::AiService::Asr)
                 != speech.model_for(super::AiService::Asr)
                 || current.values.speech.asr != speech.asr
                 || current.values.speech.asr_model_options != speech.asr_model_options
-                || self
-                    .registry
-                    .active(super::AiService::Asr)
-                    .map_err(|error| SpeechSessionError::Asr(error.to_string()))?
-                    != Some(ServiceModel {
-                        service: super::AiService::Asr,
-                        model: selected.into(),
-                    })
             {
                 return Err(SpeechSessionError::Asr(
                     "ASR model selection changed during inference".into(),

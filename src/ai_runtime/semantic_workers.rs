@@ -13,30 +13,11 @@ use crate::knowledge::{
 
 use super::{
     AiService,
-    service_workers::{ServiceModel, ServiceWorkerRegistry},
+    service_workers::{ServiceModel, ServiceWorker, ServiceWorkerRegistry},
 };
 
-fn assert_selected(
-    registry: &ServiceWorkerRegistry,
-    expected: &ServiceModel,
-) -> Result<(), EmbeddingError> {
-    if registry
-        .active(expected.service)
-        .map_err(|error| EmbeddingError::Transport(error.to_string()))?
-        .as_ref()
-        != Some(expected)
-    {
-        return Err(EmbeddingError::Transport(
-            "selected semantic worker no longer owns its service".into(),
-        ));
-    }
-    Ok(())
-}
-
 pub struct ServiceEmbeddingProvider {
-    registry: Arc<ServiceWorkerRegistry>,
-    expected: ServiceModel,
-    provider: Arc<dyn EmbeddingProvider>,
+    worker: ServiceWorker<dyn EmbeddingProvider>,
 }
 
 impl ServiceEmbeddingProvider {
@@ -50,48 +31,47 @@ impl ServiceEmbeddingProvider {
                 "embedding provider requires the Embedding service".into(),
             ));
         }
-        assert_selected(&registry, &expected)?;
-        Ok(Self {
-            registry,
-            expected,
-            provider,
-        })
+        let worker = registry
+            .connect(expected, provider)
+            .map_err(|error| EmbeddingError::Transport(error.to_string()))?;
+        Ok(Self { worker })
     }
 
     async fn execute<T, F>(&self, operation: impl FnOnce() -> F) -> Result<T, EmbeddingError>
     where
         F: std::future::Future<Output = Result<T, EmbeddingError>> + Send,
     {
-        let _permit = self.registry.inference_permit(AiService::Embedding).await;
-        assert_selected(&self.registry, &self.expected)?;
-        let result = operation().await?;
-        assert_selected(&self.registry, &self.expected)?;
-        Ok(result)
+        let call = self
+            .worker
+            .begin()
+            .await
+            .map_err(|error| EmbeddingError::Transport(error.to_string()))?;
+        call.dispatch(operation())
+            .await
+            .map_err(|error| EmbeddingError::Transport(error.to_string()))?
     }
 }
 
 impl EmbeddingProvider for ServiceEmbeddingProvider {
     fn space(&self) -> &EmbeddingSpace {
-        self.provider.space()
+        self.worker.backend().space()
     }
 
     fn document_request_count(&self, document_count: usize) -> usize {
-        self.provider.document_request_count(document_count)
+        self.worker.backend().document_request_count(document_count)
     }
 
     fn embed(&self, purpose: EmbeddingPurpose, text: String) -> EmbeddingFuture<'_, Embedding> {
-        Box::pin(self.execute(move || self.provider.embed(purpose, text)))
+        Box::pin(self.execute(move || self.worker.backend().embed(purpose, text)))
     }
 
     fn embed_documents(&self, texts: Vec<String>) -> EmbeddingFuture<'_, Vec<Embedding>> {
-        Box::pin(self.execute(move || self.provider.embed_documents(texts)))
+        Box::pin(self.execute(move || self.worker.backend().embed_documents(texts)))
     }
 }
 
 pub struct ServiceRerankProvider {
-    registry: Arc<ServiceWorkerRegistry>,
-    expected: ServiceModel,
-    provider: Arc<dyn RerankProvider>,
+    worker: ServiceWorker<dyn RerankProvider>,
 }
 
 impl ServiceRerankProvider {
@@ -105,23 +85,24 @@ impl ServiceRerankProvider {
                 "reranker provider requires the Reranker service".into(),
             ));
         }
-        assert_selected(&registry, &expected)?;
-        Ok(Self {
-            registry,
-            expected,
-            provider,
-        })
+        let worker = registry
+            .connect(expected, provider)
+            .map_err(|error| EmbeddingError::Transport(error.to_string()))?;
+        Ok(Self { worker })
     }
 }
 
 impl RerankProvider for ServiceRerankProvider {
     fn score<'a>(&'a self, query: &'a str, candidates: &'a [String]) -> RerankFuture<'a> {
         Box::pin(async move {
-            let _permit = self.registry.inference_permit(AiService::Reranker).await;
-            assert_selected(&self.registry, &self.expected)?;
-            let result = self.provider.score(query, candidates).await?;
-            assert_selected(&self.registry, &self.expected)?;
-            Ok(result)
+            let call = self
+                .worker
+                .begin()
+                .await
+                .map_err(|error| EmbeddingError::Transport(error.to_string()))?;
+            call.dispatch(call.backend().score(query, candidates))
+                .await
+                .map_err(|error| EmbeddingError::Transport(error.to_string()))?
         })
     }
 }
