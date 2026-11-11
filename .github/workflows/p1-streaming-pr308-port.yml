@@ -1,0 +1,57 @@
+name: P1 PR308 streaming retry presets exact-port
+on:
+  push:
+    branches: [bridge/p1-streaming-pr308-port-20261111]
+permissions:
+  contents: write
+jobs:
+  validate-and-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      RUSTFLAGS: '-C debuginfo=0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 4efce2c67b69772ec7a3acb354b41853bca7abee
+          fetch-depth: 0
+      - name: Exact scoped PR308 port and provenance check
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin refs/pull/308/head:refs/remotes/origin/p1-pr308
+          test "$(git rev-parse refs/remotes/origin/p1-pr308)" = 78cbac105f7539da2440dbbbc115b6f4ed6b655c
+          git diff 3a0a9323e8632bfdc392ff34771dac8a18b1a7dd refs/remotes/origin/p1-pr308 -- \
+            examples/gui_snapshot.rs src/bin/neuromita-gui/binding_tests.rs \
+            src/bin/neuromita-gui/runtime.rs src/bin/neuromita-gui/settings.rs \
+            src/generation/presets.rs src/presentation/presets.rs \
+            ui/settings/api-presets.slint ui/settings/presets-state.slint > /tmp/p1-308.patch
+          git apply --3way /tmp/p1-308.patch
+          git diff --cached --check
+          git diff --cached --stat
+      - name: Linux GUI dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y pkg-config libasound2-dev libudev-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb-shape0-dev libxcb-xfixes0-dev libfontconfig1-dev libfreetype6-dev xvfb xauth
+      - name: Pinned Rust 1.98.1
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+      - name: Formatter
+        run: cargo +1.98.1 fmt --all -- --check
+      - name: Offline all-target compile
+        run: cargo +1.98.1 check --locked --offline --all-targets
+      - name: Catalog persisted/retry settings acceptance
+        run: cargo +1.98.1 test --locked --offline --lib generation::presets::tests -- --test-threads=2
+      - name: Slint GUI all-target compile
+        run: cargo +1.98.1 check --locked --offline --features gui --all-targets
+      - name: Executable Slint GUI binding acceptance
+        run: xvfb-run -a cargo +1.98.1 test --locked --offline --features gui --bin neuromita-gui -- --test-threads=1
+      - name: Publish verified scoped source branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "P1 PR308 Integrator"
+          git config user.email "p1-integrator@users.noreply.github.com"
+          git commit -m "feat(gui): persist stream and retry options through Core presets"
+          git push origin HEAD:refs/heads/codex/p1-streaming-pr308-port-20261111
