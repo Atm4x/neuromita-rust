@@ -11,7 +11,8 @@ use neuromita::{
     presentation::CharacterDebugField,
     presentation::{GuiPresenter, PresetSlot, PresetsPresenter, PresetsView},
     settings::{
-        PersistenceState, PresetSelection, SettingsArea, SettingsSnapshot, StructuredDisplayMode,
+        CharacterSettings, OperationPresets, PersistenceState, PresetSelection, SettingsArea,
+        SettingsSnapshot, StructuredDisplayMode,
     },
 };
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
@@ -46,6 +47,53 @@ pub struct AdministrationSnapshot {
 
 pub fn execute(api: &GuiPresenter, command: Command) -> Result<(), String> {
     match command {
+        Command::SaveCharacterProfile(character, revision, edited) => {
+            if let Some(name) = edited.prompt_set.as_deref() {
+                api.prompts
+                    .as_ref()
+                    .ok_or("Prompt catalog is not configured")?
+                    .resolve_set(character, Some(name))
+                    .map_err(|error| error.to_string())?;
+            }
+            for selection in [
+                edited.presets.reply,
+                edited.presets.react,
+                edited.presets.initiate,
+            ] {
+                if let PresetSelection::Specific(id) = selection {
+                    api.presets.require(id).map_err(|error| error.to_string())?;
+                }
+            }
+            let expected = api
+                .settings
+                .characters
+                .profile(character)
+                .map_err(|error| error.to_string())?;
+            if expected.revision() != revision {
+                return Err(format!(
+                    "Character profile changed: expected revision {revision}, current {}",
+                    expected.revision()
+                ));
+            }
+            api.settings
+                .characters
+                .save_profile(&expected, edited)
+                .map_err(|error| error.to_string())?;
+        }
+        Command::RetryCharacterProfileSave(_character) => {
+            if !matches!(
+                api.settings
+                    .snapshot()
+                    .map_err(|error| error.to_string())?
+                    .persistence,
+                PersistenceState::Failed { .. }
+            ) {
+                return Err("There is no failed settings write to retry".into());
+            }
+            api.settings
+                .retry_failed_save()
+                .map_err(|error| error.to_string())?;
+        }
         Command::SelectPromptSet(character, name) => {
             let catalog = api
                 .prompts
@@ -723,6 +771,46 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
         }
     });
     let send = dispatch.clone();
+    let weak = window.as_weak();
+    settings.on_character_profile_save(move |index, revision, prompt, reply, react, initiate| {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        let ui = window.global::<SettingsUi>();
+        let parsed = (|| -> Result<Command, String> {
+            let character = CharacterId::from_index(index).ok_or("Unknown character")?;
+            if ui.get_character_draft_id() != index {
+                return Err("Character selection changed during edit".into());
+            }
+            let revision = revision
+                .parse::<u64>()
+                .map_err(|_| "Invalid character profile revision")?;
+            let parse_selection = |value: &str| -> Result<PresetSelection, String> {
+                if value == "active" {
+                    Ok(PresetSelection::Active)
+                } else {
+                    id(value).map(PresetSelection::Specific)
+                }
+            };
+            let edited = CharacterSettings {
+                prompt_set: (!prompt.is_empty()).then(|| prompt.to_string()),
+                presets: OperationPresets {
+                    reply: parse_selection(&reply)?,
+                    react: parse_selection(&react)?,
+                    initiate: parse_selection(&initiate)?,
+                },
+            };
+            Ok(Command::SaveCharacterProfile(character, revision, edited))
+        })();
+        match parsed {
+            Ok(command) => send(command),
+            Err(error) => {
+                ui.set_character_profile_pending(false);
+                ui.set_character_profile_error(error.into());
+            }
+        }
+    });
+    let send = dispatch.clone();
     settings.on_memory_dedup_toggle(move |enabled| send(Command::SetMemoryDedupEnabled(enabled)));
     let send = dispatch.clone();
     let weak = window.as_weak();
@@ -734,6 +822,21 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
                     .global::<SettingsUi>()
                     .set_settings_error(error.into());
             }
+        }
+    });
+    let send = dispatch.clone();
+    let weak = window.as_weak();
+    settings.on_character_profile_retry(move || {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        let ui = window.global::<SettingsUi>();
+        if let Some(character) = CharacterId::from_index(ui.get_character_draft_id()) {
+            ui.set_character_profile_error("".into());
+            send(Command::RetryCharacterProfileSave(character));
+        } else {
+            ui.set_character_profile_pending(false);
+            ui.set_character_profile_error("Unknown character".into());
         }
     });
     let send = dispatch.clone();
@@ -892,6 +995,49 @@ pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {
         })
         .collect::<Vec<_>>();
     window.set_character_prompt_sets(ModelRc::new(VecModel::from(prompt_selections)));
+    // Preserve a dirty or in-flight draft across unrelated settings refreshes.
+    // Initial selection and clean drafts always come from the same Core snapshot.
+    let mut selected = window.get_selected_character();
+    if window.get_character_draft_id() != selected {
+        if window.get_character_draft_id() >= 0
+            && (window.get_character_draft_dirty() || window.get_character_profile_pending())
+        {
+            // Navigation from another GUI page must not silently drop a pending draft.
+            selected = window.get_character_draft_id();
+            window.set_selected_character(selected);
+            window.set_character_profile_error(
+                "Save or discard this character's changes before changing selection".into(),
+            );
+        } else {
+            window.invoke_character_load(selected);
+        }
+    } else if !window.get_character_draft_dirty()
+        && !window.get_character_profile_pending()
+        && window.get_character_draft_revision() != settings.revision.to_string()
+    {
+        window.invoke_character_load(selected);
+    }
+    if window.get_character_profile_pending()
+        && let Some(character) = CharacterId::from_index(window.get_character_draft_id())
+    {
+        let profile = settings.values.characters.for_character(character);
+        let matches_draft = profile.prompt_set.as_deref().unwrap_or_default()
+            == window.get_character_draft_prompt().as_str()
+            && encode(profile.presets.reply) == window.get_character_draft_reply()
+            && encode(profile.presets.react) == window.get_character_draft_react()
+            && encode(profile.presets.initiate) == window.get_character_draft_initiate();
+        if matches_draft
+            && matches!(
+                settings.persistence,
+                PersistenceState::Saved(revision) if revision >= settings.revision
+            )
+        {
+            window.set_character_profile_pending(false);
+            window.invoke_character_load(selected);
+        } else if let PersistenceState::Failed { error, .. } = &settings.persistence {
+            window.set_character_profile_error(error.to_string().into());
+        }
+    }
     let templates = provider_templates(&model.presets.providers);
     window.set_preset_templates(ModelRc::new(VecModel::from(templates)));
     let parameters = model

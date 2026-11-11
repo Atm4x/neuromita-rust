@@ -557,6 +557,19 @@ impl SettingsPresenter {
             },
         }
     }
+    pub fn retry_failed_save(&self) -> Result<(), SettingsError> {
+        let snapshot = self.owner.snapshot_all()?;
+        if !matches!(
+            snapshot.persistence,
+            crate::settings::PersistenceState::Failed { .. }
+        ) {
+            return Err(SettingsError::Validation(
+                "there is no failed settings write to retry".into(),
+            ));
+        }
+        self.owner.request_save()
+    }
+
     pub fn snapshot(&self) -> Result<Arc<SettingsSnapshot>, SettingsError> {
         self.owner.snapshot_all()
     }
