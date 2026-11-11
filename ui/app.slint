@@ -276,7 +276,7 @@ export component AppWindow inherits Window {
                 open-memory(id) => { SettingsUi.section = 2; SettingsUi.selected-character = id; MemoryUi.open = true; MemoryUi.select(id); SettingsUi.character-debug-select(id); root.navigate(PageId.settings); }
             }
             if !root.ai-hub-open && root.page == PageId.settings: SettingsPage {
-                width: parent.width; height: parent.height; connected: root.core-connected; connecting: root.core-connecting;
+                width: parent.width; height: parent.height; connected: root.core-connected; connecting: root.core-connecting; active-character: root.chat-character;
                 home => { root.navigate(PageId.home); }
                 wiki => { root.wiki-open-article("index.md"); root.navigate(PageId.wiki); }
                 guide => { root.onboarding-guide-reopen(); }

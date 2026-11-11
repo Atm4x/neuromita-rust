@@ -98,6 +98,7 @@ component PromptSetChoice inherits Rectangle {
 
 component CharacterWorkspace inherits HorizontalLayout {
     in property <bool> connected;
+    in property <int> active-character: -1;
     in-out property <int> character;
     in-out property <string> search;
     in-out property <bool> prompt-expanded: true;
@@ -106,7 +107,12 @@ component CharacterWorkspace inherits HorizontalLayout {
     in-out property <bool> maintenance-expanded;
     in-out property <bool> danger-expanded;
     spacing: 9px;
-    property <CharacterPresets> presets: SettingsUi.character-presets[root.character];
+    property <CharacterPresets> presets: {
+        reply: SettingsUi.character-draft-reply,
+        react: SettingsUi.character-draft-react,
+        initiate: SettingsUi.character-draft-initiate,
+        split: SettingsUi.character-draft-split
+    };
     Rectangle {
         width: max(240px, (parent.width - 9px) / 4);
         background: SettingsTheme.panel; border-width: 1px; border-color: SettingsTheme.border; border-radius: 12px;
@@ -138,10 +144,19 @@ component CharacterWorkspace inherits HorizontalLayout {
                             VerticalLayout {
                                 padding: 0px; spacing: 2px; alignment: center;
                                 SettingsLabel { text: CharacterCatalog.name(entry); font-weight: 700; }
-                                SettingsLabel { text: "id: " + entry.id; color: SettingsTheme.muted; font-size: 11px; }
+                                SettingsLabel { text: root.connected && root.active-character == entry.index ? I18n.i18n("settings.characters.active-chat", "Активна в чате") : "id: " + entry.id; color: SettingsTheme.muted; font-size: 11px; }
                             }
                         }
-                        activated => { root.character = entry.index; SettingsUi.character-debug-select(entry.index); if (root.connected) { MemoryUi.select(entry.index); } }
+                        activated => {
+                            if (SettingsUi.character-profile-pending || SettingsUi.character-draft-dirty) {
+                                SettingsUi.character-profile-error = I18n.i18n("settings.characters.discard-first", "Сохраните или отмените изменения перед выбором другой Миты.");
+                            } else {
+                                root.character = entry.index;
+                                SettingsUi.character-load(entry.index);
+                                SettingsUi.character-debug-select(entry.index);
+                                if (root.connected) { MemoryUi.select(entry.index); }
+                            }
+                        }
                     }
                     if CharacterCatalog.matches(entry, root.search): Rectangle { height: 6px; }
                     }
@@ -170,6 +185,45 @@ component CharacterWorkspace inherits HorizontalLayout {
                         font-size: 20px; font-weight: 700;
                     }
                     SettingsLabel { text: "id: " + CharacterCatalog.entries[root.character].id; color: SettingsTheme.muted; }
+                    SettingsLabel { text: root.connected && root.active-character == root.character ? I18n.i18n("settings.characters.chat-identity", "Активный собеседник") : I18n.i18n("settings.characters.config-only", "Выбрана для настройки"); color: SettingsTheme.muted; font-size: 11px; }
+                }
+            }
+            HorizontalLayout {
+                height: 40px; spacing: 8px;
+                SettingsLabel {
+                    text: SettingsUi.character-profile-error != "" ? SettingsUi.character-profile-error :
+                        SettingsUi.character-profile-pending && SettingsUi.settings-persistence == 2 ?
+                            I18n.i18n("settings.characters.save-failed", "Ошибка записи настроек. Повторите сохранение.") :
+                        SettingsUi.character-profile-pending ?
+                            I18n.i18n("settings.characters.saving", "Сохранение настроек на диск…") :
+                        SettingsUi.character-draft-dirty ?
+                            I18n.i18n("settings.characters.unsaved", "Есть несохранённые изменения") :
+                            I18n.i18n("settings.characters.no-changes", "Изменений нет");
+                    color: SettingsUi.character-profile-error != "" || SettingsUi.settings-persistence == 2 ? SettingsTheme.danger-text : SettingsTheme.muted;
+                    horizontal-stretch: 1; wrap: word-wrap;
+                }
+                SettingsButton {
+                    text: I18n.i18n("settings.characters.discard", "Отменить");
+                    height: 34px;
+                    enabled: SettingsUi.character-draft-dirty && !SettingsUi.character-profile-pending;
+                    activated => { SettingsUi.character-load(root.character); }
+                }
+                SettingsButton {
+                    text: SettingsUi.character-profile-pending ? I18n.i18n("settings.characters.retry-save", "Повторить") : I18n.i18n("settings.characters.save", "Сохранить");
+                    height: 34px;
+                    enabled: root.connected && ((SettingsUi.character-draft-dirty && !SettingsUi.character-profile-pending) ||
+                        (SettingsUi.character-profile-pending && SettingsUi.settings-persistence == 2));
+                    activated => {
+                        if (SettingsUi.character-profile-pending) {
+                            SettingsUi.character-profile-retry();
+                        } else {
+                            SettingsUi.character-profile-pending = true;
+                            SettingsUi.character-profile-error = "";
+                            SettingsUi.character-profile-save(root.character, SettingsUi.character-draft-revision,
+                                SettingsUi.character-draft-prompt, SettingsUi.character-draft-reply,
+                                SettingsUi.character-draft-react, SettingsUi.character-draft-initiate);
+                        }
+                    }
                 }
             }
             character-scroll := SettingsScrollView {
@@ -183,11 +237,13 @@ VerticalLayout {
                             padding: 0px; spacing: 12px;
                             PromptSetChoice {
                                 character: root.character;
-                                value: SettingsUi.character-prompt-sets[root.character];
-                                selected(value) => { if (root.connected) { SettingsUi.character-prompt-set(root.character, value); } }
+                                value: SettingsUi.character-draft-prompt;
+                                selected(value) => {
+                                    if (root.connected && !SettingsUi.character-profile-pending) { SettingsUi.character-draft-prompt = value; }
+                                }
                             }
                             for item in SettingsUi.prompt-set-options: VerticalLayout {
-                                visible: item.character == root.character && item.name == SettingsUi.character-prompt-sets[root.character];
+                                visible: item.character == root.character && item.name == SettingsUi.character-draft-prompt;
                                 padding: 0px; spacing: 4px;
                                 HorizontalLayout { height: 20px; spacing: 8px;
                                     SettingsLabel { text: I18n.i18n("settings.characters.author", "Автор:"); font-weight: 600; }
@@ -203,7 +259,7 @@ VerticalLayout {
                             HorizontalLayout { spacing: 6px;
                                 SettingsButton {
                                     text: I18n.i18n("settings.characters.open-prompt-folder", "Открыть папку набора");
-                                    glyph: "\u{f07c}"; enabled: root.connected && SettingsUi.character-prompt-sets[root.character] != "";
+                                    glyph: "\u{f07c}"; enabled: root.connected && SettingsUi.character-draft-prompt != "" && !SettingsUi.character-draft-dirty;
                                     horizontal-stretch: 1; height: 34px; border-radius: 10px;
                                     activated => { SettingsUi.prompt-open-folder(root.character); }
                                 }
@@ -252,10 +308,12 @@ VerticalLayout {
                                 checked: root.presets.split;
                                 enabled: root.connected;
                                 toggled(value) => {
-                                    if (value) { SettingsUi.character-presets[root.character].split = true; }
-                                    else {
-                                        if root.presets.reply == root.presets.react && root.presets.reply == root.presets.initiate { SettingsUi.character-presets[root.character].split = false; }
-                                        SettingsUi.character-common(root.character, root.presets.reply);
+                                    if (!SettingsUi.character-profile-pending) {
+                                        SettingsUi.character-draft-split = value;
+                                        if (!value) {
+                                            SettingsUi.character-draft-react = SettingsUi.character-draft-reply;
+                                            SettingsUi.character-draft-initiate = SettingsUi.character-draft-reply;
+                                        }
                                     }
                                 }
                             }
@@ -266,7 +324,7 @@ VerticalLayout {
                                     value: root.presets.reply;
                                     selected(value) => {
                                         if (root.connected) {
-                                            SettingsUi.character-common(root.character, value);
+                                            if (!SettingsUi.character-profile-pending) { SettingsUi.character-draft-reply = value; SettingsUi.character-draft-react = value; SettingsUi.character-draft-initiate = value; }
                                         }
                                     }
                                 }
@@ -278,7 +336,13 @@ VerticalLayout {
                                     SettingsLabel { text: title; color: SettingsTheme.muted; }
                                     PresetChoice {
                                         value: index == 0 ? root.presets.reply : index == 1 ? root.presets.react : root.presets.initiate;
-                                        selected(value) => { if (root.connected) { SettingsUi.character-preset(root.character, index, value); } }
+                                        selected(value) => {
+                                            if (root.connected && !SettingsUi.character-profile-pending) {
+                                                if (index == 0) { SettingsUi.character-draft-reply = value; }
+                                                else if (index == 1) { SettingsUi.character-draft-react = value; }
+                                                else { SettingsUi.character-draft-initiate = value; }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -311,6 +375,7 @@ VerticalLayout {
 
 export component SettingsPage inherits Rectangle {
     in property <bool> connected;
+    in property <int> active-character: -1;
     in property <bool> connecting;
     callback home();
     callback wiki();
@@ -469,7 +534,7 @@ export component SettingsPage inherits Rectangle {
                 }
                 if SettingsUi.section == 2: VerticalLayout {
                     padding: 2px; spacing: 12px;
-                    CharacterWorkspace { character <=> SettingsUi.selected-character; prompt-expanded <=> SettingsUi.character-prompt-expanded; debug-expanded <=> SettingsUi.character-debug-expanded; connected: root.connected; }
+                    CharacterWorkspace { character <=> SettingsUi.selected-character; prompt-expanded <=> SettingsUi.character-prompt-expanded; debug-expanded <=> SettingsUi.character-debug-expanded; connected: root.connected; active-character: root.active-character; }
                 }
                 if SettingsUi.section == 3: voice-scroll := SettingsScrollView {
                     content-height: voice-page.preferred-height;
