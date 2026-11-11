@@ -174,18 +174,8 @@ impl SpeechModelReference {
     }
 }
 
-// Read compatibility only: obsolete independent engine switches are not serialized.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(tag = "engine", rename_all = "snake_case", deny_unknown_fields)]
-enum LegacySpeechEngine {
-    Python,
-    Native {
-        model_id: String,
-        manifest_sha256: String,
-    },
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SpeechSettings {
     pub tts: TtsPreferences,
     pub asr: AsrPreferences,
@@ -195,51 +185,6 @@ pub struct SpeechSettings {
     pub tts_model: Option<SpeechModelReference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asr_model: Option<SpeechModelReference>,
-}
-
-// A legacy engine field is consumed exactly once into the model identity.
-// Subsequent serialization has no independent runtime toggle to drift out of sync.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SpeechSettingsWire {
-    tts: TtsPreferences,
-    asr: AsrPreferences,
-    tts_model_options: BTreeMap<String, serde_json::Value>,
-    asr_model_options: BTreeMap<String, serde_json::Value>,
-    #[serde(default)]
-    tts_model: Option<SpeechModelReference>,
-    #[serde(default)]
-    asr_model: Option<SpeechModelReference>,
-    #[serde(default)]
-    tts_engine: Option<LegacySpeechEngine>,
-    #[serde(default)]
-    asr_engine: Option<LegacySpeechEngine>,
-}
-
-impl<'de> Deserialize<'de> for SpeechSettings {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = SpeechSettingsWire::deserialize(deserializer)?;
-        fn selected(
-            model: Option<SpeechModelReference>,
-            legacy: Option<LegacySpeechEngine>,
-        ) -> Option<SpeechModelReference> {
-            model.or_else(|| match legacy {
-                Some(LegacySpeechEngine::Native {
-                    model_id,
-                    manifest_sha256,
-                }) => Some(SpeechModelReference::rust(model_id, manifest_sha256)),
-                _ => None,
-            })
-        }
-        Ok(Self {
-            tts: raw.tts,
-            asr: raw.asr,
-            tts_model_options: raw.tts_model_options,
-            asr_model_options: raw.asr_model_options,
-            tts_model: selected(raw.tts_model, raw.tts_engine),
-            asr_model: selected(raw.asr_model, raw.asr_engine),
-        })
-    }
 }
 
 impl SpeechSettings {
@@ -373,7 +318,7 @@ impl SpeechSettings {
 mod tests {
     use super::*;
     #[test]
-    fn legacy_profiles_and_same_named_implementations_are_distinct_models() {
+    fn same_named_implementations_are_distinct_models() {
         let mut saved = SpeechSettings::default();
         saved.tts.local_model_id = "voice".into();
         saved.asr.recognizer_id = "recognizer".into();
@@ -396,17 +341,6 @@ mod tests {
         );
         let mut legacy = serde_json::to_value(SpeechSettings::default()).unwrap();
         legacy["tts_engine"] = serde_json::json!({"engine":"native","model_id":"voice","manifest_sha256":"a".repeat(64)});
-        let migrated: SpeechSettings = serde_json::from_value(legacy).unwrap();
-        assert_eq!(
-            migrated
-                .model_for(crate::ai_runtime::AiService::Tts)
-                .unwrap()
-                .implementation,
-            WorkerImplementation::Rust
-        );
-        assert!(migrated.validate().is_ok());
-        let encoded = serde_json::to_value(migrated).unwrap();
-        assert!(encoded.get("tts_engine").is_none());
-        assert_eq!(encoded["tts_model"]["implementation"], "rust");
+        assert!(serde_json::from_value::<SpeechSettings>(legacy).is_err());
     }
 }

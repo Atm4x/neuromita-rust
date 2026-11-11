@@ -1218,7 +1218,7 @@ fn memory_render_and_contract(window: &AppWindow) {
             panic!("expected typed graph reindex preview")
         };
         assert_eq!(reindex_character, CharacterId::Crazy);
-        assert_eq!(reindex_source, page.records()[0].id);
+        assert_eq!(reindex_source, graph_memory);
         assert_eq!(
             reindex_mode,
             neuromita::knowledge::maintenance::GraphMaintenanceMode::Reindex
@@ -2076,6 +2076,106 @@ fn chat_retry_callback_preserves_original_request_identity_and_selection() {
     assert!(matches!(&recorded.borrow()[3], Command::Retry(origin, id)
         if *origin == ChatOrigin { character: CharacterId::Crazy, selection_revision: 2 } && id.0 == new_attempt));
     window.hide().unwrap();
+}
+
+#[test]
+fn ai_hub_preserves_model_identity_when_inventory_updates_arrive_in_either_order() {
+    use crate::{ai_hub, runtime::Command, view::HubModelIdentity};
+    use neuromita::ai_runtime::{
+        native_model::NativeBackend,
+        native_revisions::{NativeRevisionMetadata, NativeRevisionOverview},
+        native_speech::NativeSpeechKind,
+        native_trust::NativeAuthorizedRelease,
+        speech_catalog::{SpeechInventory, SpeechModelOption},
+    };
+
+    slint::platform::set_platform(Box::new(TestPlatform)).unwrap();
+    let speech = SpeechInventory {
+        tts: vec![SpeechModelOption {
+            id: "shared".into(),
+            name: "Shared Voice".into(),
+            package_detected: true,
+            verified_assets: false,
+            installed_revisions: vec![],
+        }],
+        ..Default::default()
+    };
+    let releases = [0x11, 0x22].map(|byte| NativeAuthorizedRelease {
+        model_id: "shared".into(),
+        manifest_sha256: [byte; 32],
+        publisher_id: "test-publisher".into(),
+    });
+    let overview = NativeRevisionOverview {
+        revisions: releases
+            .iter()
+            .map(|release| NativeRevisionMetadata {
+                model_id: release.model_id.clone(),
+                manifest_sha256: release.manifest_sha256,
+                display_name: "Shared Voice".into(),
+                package_version: "1.0.0".into(),
+                backends: vec![NativeBackend::Cpu],
+                speech_services: vec![NativeSpeechKind::Tts],
+            })
+            .collect(),
+        selections: vec![],
+    };
+    for native_first in [true, false] {
+        let window = AppWindow::new().unwrap();
+        let commands = Rc::new(RefCell::new(Vec::new()));
+        let captured = Rc::clone(&commands);
+        ai_hub::bind(
+            &window,
+            Rc::new(move |command| captured.borrow_mut().push(command)),
+        );
+        let mut state = ai_hub::HubCatalogState::default();
+        if native_first {
+            ai_hub::native_release_catalog(
+                &window,
+                &mut state,
+                releases.to_vec(),
+                overview.clone(),
+            );
+            ai_hub::inventory(&window, &mut state, &speech);
+        } else {
+            ai_hub::inventory(&window, &mut state, &speech);
+            ai_hub::native_release_catalog(
+                &window,
+                &mut state,
+                releases.to_vec(),
+                overview.clone(),
+            );
+        }
+        let entries = window.get_ai_hub_entries();
+        assert_eq!(entries.row_count(), 3);
+        assert_eq!(window.get_ai_hub_category_counts().row_data(0), Some(3));
+        for (index, entry) in entries.iter().enumerate() {
+            let identity = HubModelIdentity {
+                category: entry.category,
+                id: entry.id,
+                implementation: entry.implementation,
+                revision: entry.revision,
+            };
+            assert_eq!(
+                window.invoke_ai_hub_find_selection_index(identity.clone()),
+                index as i32
+            );
+            let mut stale = identity;
+            stale.revision = "f".repeat(64).into();
+            assert_eq!(window.invoke_ai_hub_find_selection_index(stale), -1);
+        }
+        let revision = "11".repeat(32);
+        window.invoke_native_activate("shared".into(), "tts".into(), revision.clone().into());
+        window.invoke_native_stop("tts".into(), "shared".into(), revision.clone().into());
+        let commands = commands.borrow();
+        assert!(
+            matches!(&commands[0], Command::ActivateNativeModel { model_id, service, revision: actual }
+            if model_id == "shared" && service == "tts" && actual == &revision)
+        );
+        assert!(
+            matches!(&commands[1], Command::StopNativeModel { model_id, service, revision: actual }
+            if model_id == "shared" && service == "tts" && actual == &revision)
+        );
+    }
 }
 
 #[test]

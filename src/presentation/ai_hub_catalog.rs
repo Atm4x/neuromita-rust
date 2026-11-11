@@ -252,9 +252,15 @@ impl UnifiedHubCatalog {
         });
         // Duplicate immutable identities are rejected, not silently mapped to
         // the first matching row (which could install a different revision).
-        let mut seen = std::collections::HashSet::new();
+        let mut occurrences = HashMap::new();
+        for entry in &entries {
+            *occurrences
+                .entry((entry.service.clone(), entry.identity.clone()))
+                .or_insert(0usize) += 1;
+        }
         let original_len = entries.len();
-        entries.retain(|entry| seen.insert((entry.service.clone(), entry.identity.clone())));
+        entries.retain(|entry| occurrences[&(entry.service.clone(), entry.identity.clone())] == 1);
+        let rejected = original_len - entries.len();
         let counts = ["tts", "asr", "core", "rag", "else"].map(|service| {
             i32::try_from(
                 entries
@@ -267,7 +273,7 @@ impl UnifiedHubCatalog {
         Self {
             entries,
             category_counts: counts,
-            discovery_error_count: speech_catalog.discovery_error_count + original_len - seen.len(),
+            discovery_error_count: speech_catalog.discovery_error_count + rejected,
         }
     }
 }
@@ -613,5 +619,21 @@ mod unified_tests {
         let catalog = UnifiedHubCatalog::project(&SpeechInventory::default(), &[native]);
         assert_eq!(catalog.category_counts, [1, 1, 0, 0, 0]);
         assert_ne!(catalog.entries[0].service, catalog.entries[1].service);
+    }
+
+    #[test]
+    fn conflicting_release_rows_are_all_rejected_in_either_discovery_order() {
+        let first = native_voice(&"a".repeat(64), true);
+        let mut conflicting = first.clone();
+        conflicting.display_name = Some("Different title".into());
+        for releases in [
+            vec![first.clone(), conflicting.clone()],
+            vec![conflicting, first],
+        ] {
+            let catalog = UnifiedHubCatalog::project(&SpeechInventory::default(), &releases);
+            assert!(catalog.entries.is_empty());
+            assert_eq!(catalog.category_counts, [0; 5]);
+            assert_eq!(catalog.discovery_error_count, 2);
+        }
     }
 }

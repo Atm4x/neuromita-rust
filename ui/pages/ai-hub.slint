@@ -59,7 +59,7 @@ export component AiHubPage inherits Rectangle {
                 || (root.category == "core" && item.category == "backend")
                 || (root.category == "else" && (item.category == "voices" || item.category == "extras"
                     || item.category == "beats" || item.category == "deps" || item.category == "dependency")))
-            && (root.runtime-filter == "all" || item.backend.to-lowercase() == root.runtime-filter)
+            && (root.runtime-filter == "all" || item.implementation == root.runtime-filter)
             && (root.search-text == "" || item.title.to-lowercase().replace-all(root.search-text.to-lowercase(), "") != item.title.to-lowercase()
                 || item.description.to-lowercase().replace-all(root.search-text.to-lowercase(), "") != item.description.to-lowercase()
                 || item.backend.to-lowercase().replace-all(root.search-text.to-lowercase(), "") != item.backend.to-lowercase());
@@ -315,16 +315,14 @@ export component AiHubPage inherits Rectangle {
                             width: 17px; alignment: center;
                             Icon {
                                 source: root.runtime-filter == "all" ? Icons.ai-hub
-                                    : root.runtime-filter == "nvidia" ? Icons.ai-core
-                                    : root.runtime-filter == "onnx" ? Icons.ai-rag : Icons.settings;
+                                    : root.runtime-filter == "python" ? Icons.python : Icons.rust;
                                 colorize: Theme.accent-hover;
                                 width: 16px; height: 16px;
                             }
                         }
                         Label {
                             text: root.runtime-filter == "all" ? "Все реализации"
-                                : root.runtime-filter == "nvidia" ? "NVIDIA / CUDA"
-                                : root.runtime-filter == "onnx" ? "ONNX" : "CPU";
+                                : root.runtime-filter == "python" ? "Python" : "Rust";
                             font-size: 12px; font-weight: 600;
                             horizontal-stretch: 1; min-width: 0px;
                         }
@@ -335,7 +333,7 @@ export component AiHubPage inherits Rectangle {
                     }
                     TouchArea { mouse-cursor: pointer; clicked => { filter-menu.show(); } }
                     filter-menu := PopupWindow {
-                        y: parent.height + 5px; width: parent.width; height: 160px;
+                        y: parent.height + 5px; width: parent.width; height: 120px;
                         close-policy: close-on-click-outside;
                         Rectangle {
                             background: Theme.sidebar; border-radius: 10px;
@@ -344,9 +342,8 @@ export component AiHubPage inherits Rectangle {
                                 padding: 4px; spacing: 2px;
                                 for filter in [
                                     { id: "all", label: "Все реализации", icon: Icons.ai-hub },
-                                    { id: "nvidia", label: "NVIDIA / CUDA", icon: Icons.ai-core },
-                                    { id: "onnx", label: "ONNX", icon: Icons.ai-rag },
-                                    { id: "cpu", label: "CPU", icon: Icons.settings }
+                                    { id: "python", label: "Python", icon: Icons.python },
+                                    { id: "rust", label: "Rust", icon: Icons.rust }
                                 ]: ActionSurface {
                                     label: filter.label;
                                     height: 36px; border-radius: 7px;
