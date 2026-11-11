@@ -16,14 +16,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p ../out
+          mkdir -p out
           git fetch --no-tags origin refs/heads/main:refs/heads/p1-latest
           test "$(git rev-parse refs/heads/p1-latest)" = 4efce2c67b69772ec7a3acb354b41853bca7abee
           git merge-base --is-ancestor 74e505f48862b814628bbb598a63e23a6834427c refs/heads/p1-latest
-          git bundle create ../out/p1-cycle4-incremental.bundle refs/heads/p1-latest ^74e505f48862b814628bbb598a63e23a6834427c
-          git bundle verify ../out/p1-cycle4-incremental.bundle
-          git bundle list-heads ../out/p1-cycle4-incremental.bundle > ../out/REFS.txt
-          cd ../out
+          git bundle create out/p1-cycle4-incremental.bundle refs/heads/p1-latest ^74e505f48862b814628bbb598a63e23a6834427c
+          git bundle verify out/p1-cycle4-incremental.bundle
+          git bundle list-heads out/p1-cycle4-incremental.bundle > out/REFS.txt
+          cd out
           sha256sum p1-cycle4-incremental.bundle > SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
