@@ -124,6 +124,21 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     });
 
+    let consent_rejected = Rc::new(RefCell::new(0_usize));
+    let rejected = consent_rejected.clone();
+    window.on_onboarding_reject(move || {
+        *rejected.borrow_mut() += 1;
+    });
+    let consent_accepted = Rc::new(RefCell::new(0_usize));
+    let accepted = consent_accepted.clone();
+    let weak_accept = window.as_weak();
+    window.on_onboarding_accept(move || {
+        *accepted.borrow_mut() += 1;
+        if let Some(window) = weak_accept.upgrade() {
+            window.set_onboarding_required(false);
+        }
+    });
+
     let output = Rc::new(output);
     let reference = Rc::new(RefCell::new(Vec::new()));
     let outcome: Rc<RefCell<Option<Result<(), String>>>> = Rc::new(RefCell::new(None));
@@ -201,8 +216,27 @@ fn main() -> Result<(), Box<dyn Error>> {
                         let image = shot("eula-en-wheel")?;
                         assert_changed(&reference.borrow(), &image, "EULA EN mouse wheel")?;
                     }
-                    10 => {
-                        window.set_onboarding_required(false);
+                    10 => click(&window, 764.0, 607.0),
+                    11 => {
+                        let _ = shot("eula-rejected")?;
+                        if *consent_rejected.borrow() != 1
+                            || *consent_accepted.borrow() != 0
+                            || !window.get_onboarding_required()
+                        {
+                            return Err("Reject must not dismiss or persist EULA consent".into());
+                        }
+                    }
+                    12 => click(&window, 927.0, 607.0),
+                    13 => {
+                        let _ = shot("eula-accepted")?;
+                        if *consent_accepted.borrow() != 1
+                            || *consent_rejected.borrow() != 1
+                            || window.get_onboarding_required()
+                        {
+                            return Err("Accept callback must dismiss EULA exactly once".into());
+                        }
+                    }
+                    14 => {
                         window.set_page(view::PageId::Wiki);
                         window.set_wiki_current_article("getting-started.md".into());
                         window.set_wiki_current_title("Index".into());
@@ -219,35 +253,35 @@ fn main() -> Result<(), Box<dyn Error>> {
                             .collect::<Vec<_>>();
                         window.set_wiki_sections(ModelRc::new(VecModel::from(sections)));
                     }
-                    11 => *reference.borrow_mut() = shot("wiki-before-anchor")?,
-                    12 => {
+                    15 => *reference.borrow_mut() = shot("wiki-before-anchor")?,
+                    16 => {
                         window.set_wiki_scroll_target(20);
                         window.set_wiki_scroll_revision(1);
                     }
-                    13 => {
+                    17 => {
                         let image = shot("wiki-after-anchor")?;
                         assert_changed(&reference.borrow(), &image, "Wiki anchor scroll")?;
                     }
-                    14 => {
+                    18 => {
                         window.set_wiki_current_article("index.md".into());
                         window.set_wiki_current_title("Главная".into());
                         window.set_wiki_language("ru".into());
                         window.set_wiki_home_left(home_cards("ru", true));
                         window.set_wiki_home_right(home_cards("ru", false));
                     }
-                    15 => *reference.borrow_mut() = shot("wiki-home-ru")?,
-                    16 => {
+                    19 => *reference.borrow_mut() = shot("wiki-home-ru")?,
+                    20 => {
                         window.set_wiki_language("en".into());
                         window.set_wiki_current_title("Home".into());
                         window.set_wiki_home_left(home_cards("en", true));
                         window.set_wiki_home_right(home_cards("en", false));
                     }
-                    17 => {
+                    21 => {
                         let image = shot("wiki-home-en")?;
                         assert_changed(&reference.borrow(), &image, "Wiki home locale")?;
                         *reference.borrow_mut() = image;
                     }
-                    18 => {
+                    22 => {
                         window.window().dispatch_event(
                             slint::platform::WindowEvent::PointerScrolled {
                                 position: slint::LogicalPosition::new(825.0, 490.0),
@@ -256,11 +290,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                             },
                         );
                     }
-                    19 => {
+                    23 => {
                         let image = shot("wiki-home-en-wheel")?;
                         assert_changed(&reference.borrow(), &image, "Wiki home wheel")?;
                     }
-                    20 => {
+                    24 => {
                         window.window().dispatch_event(
                             slint::platform::WindowEvent::PointerScrolled {
                                 position: slint::LogicalPosition::new(825.0, 490.0),
@@ -269,25 +303,40 @@ fn main() -> Result<(), Box<dyn Error>> {
                             },
                         );
                     }
-                    21 => {
+                    25 => {
                         click(&window, 665.0, 290.0);
                     }
-                    22 => {
+                    26 => {
                         let observed = clicked_link.borrow().clone();
                         if observed.as_deref() != Some("getting-started.md") {
                             return Err(format!("Wiki home card click: expected getting-started.md, got {observed:?}").into());
                         }
                         window.set_page(view::PageId::Home);
-                        window.set_onboarding_guide_wiki_target("getting-started.md".into());
-                        window.set_onboarding_guide_title("Guide acceptance".into());
-                        window.set_onboarding_guide_page(2);
+                        let guide = neuromita::onboarding::guide::page(
+                            neuromita::onboarding::guide::GuideLevel::Basic,
+                            1,
+                        )
+                        .expect("second basic guide page exists");
+                        window.set_onboarding_guide_wiki_target(
+                            guide.wiki_target.expect("Guide Wiki link").into(),
+                        );
+                        window.set_onboarding_guide_title(guide.title("en").into());
+                        window.set_onboarding_guide_description_rich(
+                            StyledText::from_markdown(&guide.description_markdown("en"))?,
+                        );
+                        window.set_onboarding_guide_count(
+                            neuromita::onboarding::guide::count(
+                                neuromita::onboarding::guide::GuideLevel::Basic,
+                            ) as i32,
+                        );
+                        window.set_onboarding_guide_page(1);
                         window.set_onboarding_guide_visible(true);
                     }
-                    23 => {
+                    27 => {
                         let _ = shot("guide-before-wiki")?;
                     }
-                    24 => click(&window, 220.0, 611.0),
-                    25 => {
+                    28 => click(&window, 220.0, 611.0),
+                    29 => {
                         let _ = shot("guide-to-wiki")?;
                         if window.get_page() != view::PageId::Wiki
                             || window.get_onboarding_guide_visible()
@@ -296,12 +345,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                             return Err("Guide to Wiki click did not navigate".into());
                         }
                     }
-                    26 => click(&window, 558.0, 58.0),
-                    27 => {
+                    30 => click(&window, 558.0, 58.0),
+                    31 => {
                         let _ = shot("wiki-back-to-guide")?;
                         if window.get_page() != view::PageId::Home
                             || !window.get_onboarding_guide_visible()
-                            || window.get_onboarding_guide_page() != 2
+                            || window.get_onboarding_guide_page() != 1
                             || *reopened_guide.borrow() != 0
                         {
                             return Err(format!("Wiki Back did not restore the existing Guide page; callbacks={}", reopened_guide.borrow()).into());
