@@ -1,0 +1,42 @@
+name: Q2 onboarding 150 and 200 percent DPI AppWindow
+on:
+  push:
+    branches: [codex/q2-onboarding-wiki-acceptance-20261111]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  dpi:
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    strategy:
+      fail-fast: false
+      matrix:
+        scale: ["1.5", "2.0"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust and GUI dependencies
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libfontconfig1-dev libxkbcommon-dev libxkbcommon-x11-0 libwayland-dev libgl1-mesa-dev libx11-dev libxcb1-dev xvfb
+      - name: Scaled EULA/Wiki/Guide interactive checks
+        env:
+          CARGO_BUILD_JOBS: "2"
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          WINIT_X11_SCALE_FACTOR: ${{ matrix.scale }}
+          Q2_UI_SCALE_FACTOR: ${{ matrix.scale }}
+        shell: bash
+        run: |
+          cargo +1.98.1 fmt --all -- --check
+          mkdir -p q2-evidence
+          xvfb-run -a -s "-screen 0 3000x1900x24" cargo +1.98.1 run --locked --features gui --example q2_onboarding_acceptance -- q2-evidence
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: q2-appwindow-dpi-${{ matrix.scale }}
+          path: q2-evidence/
+          retention-days: 3
+          if-no-files-found: warn
