@@ -4,5 +4,17 @@
   "version": "0.1.0",
   "kind": "tts",
   "entrypoint": "plugin.py",
-  "api_version": 1
+  "api_version": 1,
+  "bootstrap": {
+    "kind": "python_sdk",
+    "python_minor": "3.12",
+    "sdk_api_version": 1
+  },
+  "models": [
+    {
+      "id": "mock_tts",
+      "revision": "0.1.0",
+      "label": "Mock TTS"
+    }
+  ]
 }
