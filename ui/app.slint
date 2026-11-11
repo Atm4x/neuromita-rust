@@ -15,14 +15,14 @@ import { SettingsPage, SettingsUi, PresetItem, PresetTemplateItem, CharacterPres
 import { VoiceUi } from "pages/voice.slint";
 import { AsrUi } from "pages/asr.slint";
 import { PlaceholderPage } from "pages/placeholder.slint";
-import { WikiReader, WikiArticleEntry, WikiSection } from "pages/wiki.slint";
+import { WikiReader, WikiArticleEntry, WikiSection, WikiHomeCardEntry } from "pages/wiki.slint";
 import { LauncherMenuAction } from "components/launcher-menu.slint";
 import { I18n, LocaleOption } from "i18n.slint";
 import { SandboxPage, ChatRow, ChatStatus } from "pages/sandbox.slint";
 import { ReleasesPage, ReleaseEntry } from "pages/releases.slint";
 import { AboutPage } from "pages/about.slint";
 
-export { NativeRevisionRow, NativeReleaseRow, HubModel, AiEngineUi, AiHardwareDevice, VoiceUi, AsrUi, CharacterCatalog, MemoryUi, MemoryItem, ConversationUi, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, PageId, ComponentCard, ReleaseItem, ReleaseEntry, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus, GuideFocusTarget, GuideContentsEntry, WikiArticleEntry, WikiSection }
+export { NativeRevisionRow, NativeReleaseRow, HubModel, AiEngineUi, AiHardwareDevice, VoiceUi, AsrUi, CharacterCatalog, MemoryUi, MemoryItem, ConversationUi, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, PageId, ComponentCard, ReleaseItem, ReleaseEntry, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus, GuideFocusTarget, GuideContentsEntry, WikiArticleEntry, WikiSection, WikiHomeCardEntry }
 
 export struct GuideSectionEntry { first: int, last: int, title: string }
 export { HubImplementation }
@@ -53,6 +53,8 @@ export component AppWindow inherits Window {
     in property <string> onboarding-guide-image;
     in property <string> onboarding-guide-wiki-target;
     in property <[WikiArticleEntry]> wiki-articles;
+    in property <[WikiHomeCardEntry]> wiki-home-left;
+    in property <[WikiHomeCardEntry]> wiki-home-right;
     in property <string> wiki-current-article;
     in property <string> wiki-current-title;
     in property <styled-text> wiki-article-text;
@@ -288,6 +290,8 @@ export component AppWindow inherits Window {
             if !root.ai-hub-open && root.page == PageId.wiki: WikiReader {
                 width: parent.width; height: parent.height;
                 articles: root.wiki-articles;
+                home-left: root.wiki-home-left;
+                home-right: root.wiki-home-right;
                 sections: root.wiki-sections;
                 scroll-target: root.wiki-scroll-target;
                 scroll-revision: root.wiki-scroll-revision;

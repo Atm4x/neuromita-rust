@@ -28,6 +28,70 @@ impl WikiArticle {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WikiHomeCardInfo {
+    pub title_ru: &'static str,
+    pub title_en: &'static str,
+    pub body_ru: &'static str,
+    pub body_en: &'static str,
+    pub destination: &'static str,
+}
+
+impl WikiHomeCardInfo {
+    pub fn title(self, locale: &str) -> &'static str {
+        if locale.eq_ignore_ascii_case("ru") { self.title_ru } else { self.title_en }
+    }
+
+    pub fn body(self, locale: &str) -> &'static str {
+        if locale.eq_ignore_ascii_case("ru") { self.body_ru } else { self.body_en }
+    }
+}
+
+pub const HOME_CARDS: &[WikiHomeCardInfo] = &[
+    WikiHomeCardInfo {
+        title_ru: "Первый запуск",
+        title_en: "First setup",
+        body_ru: "Установите NeuroMita и пройдите настройку приложения шаг за шагом.",
+        body_en: "Install NeuroMita and complete the app setup step by step.",
+        destination: "getting-started.md",
+    },
+    WikiHomeCardInfo {
+        title_ru: "AI-провайдер",
+        title_en: "AI provider",
+        body_ru: "Подключите Gemini, OpenRouter или локальную модель для генерации ответов.",
+        body_en: "Connect Gemini, OpenRouter or a local model for response generation.",
+        destination: "app:settings/api",
+    },
+    WikiHomeCardInfo {
+        title_ru: "Персонажи",
+        title_en: "Characters",
+        body_ru: "Выберите Миту, настройте её характер и промпты для диалога.",
+        body_en: "Pick a Mita, configure her personality and dialogue prompts.",
+        destination: "app:settings/characters",
+    },
+    WikiHomeCardInfo {
+        title_ru: "Голос и микрофон",
+        title_en: "Voice & Microphone",
+        body_ru: "Включите озвучку и настройте распознавание речи для живого разговора.",
+        body_en: "Enable voice output and set up speech recognition for live conversation.",
+        destination: "app:settings/voice",
+    },
+    WikiHomeCardInfo {
+        title_ru: "Память и RAG",
+        title_en: "Memory & RAG",
+        body_ru: "Управляйте памятью персонажа, эмбеддингами и графом знаний.",
+        body_en: "Manage character memory, embeddings and the knowledge graph.",
+        destination: "app:settings/models?section=RAG",
+    },
+    WikiHomeCardInfo {
+        title_ru: "Диагностика",
+        title_en: "Troubleshooting",
+        body_ru: "Откройте логи, проверьте статус компонентов и найдите решение проблем.",
+        body_en: "Open logs, check component status and find solutions to issues.",
+        destination: "app:logs",
+    },
+];
+
 pub const ARTICLES: &[WikiArticle] = &[
     WikiArticle {
         id: "index.md",
@@ -85,6 +149,7 @@ pub enum WikiLink<'a> {
     },
     SamePageAnchor(&'a str),
     AppHome,
+    AppLogs,
     AppSandbox,
     AppSettings,
     AppSettingsSection(WikiSettingsSection),
@@ -116,6 +181,7 @@ pub fn resolve_link(link: &str) -> Result<WikiLink<'_>, WikiLinkError> {
     }
     match link {
         "app:home" => return Ok(WikiLink::AppHome),
+        "app:logs" => return Ok(WikiLink::AppLogs),
         "app:sandbox" => return Ok(WikiLink::AppSandbox),
         "app:settings" => return Ok(WikiLink::AppSettings),
         "app:settings/api" => return Ok(WikiLink::AppSettingsSection(WikiSettingsSection::Api)),
@@ -233,6 +299,18 @@ mod tests {
     }
 
     #[test]
+    fn python_wiki_home_cards_are_bilingual_and_navigable() {
+        assert_eq!(HOME_CARDS.len(), 6);
+        for card in HOME_CARDS {
+            assert!(!card.title("ru").is_empty());
+            assert!(!card.title("en").is_empty());
+            assert!(!card.body("ru").is_empty());
+            assert!(!card.body("en").is_empty());
+            assert!(resolve_link(card.destination).is_ok(), "{}", card.destination);
+        }
+    }
+
+    #[test]
     fn bundled_app_links_never_silently_open_unrelated_pages() {
         let mut supported = std::collections::BTreeSet::new();
         let mut unsupported = std::collections::BTreeSet::new();
@@ -249,11 +327,12 @@ mod tests {
                         Ok(WikiLink::AppSettingsSection(_))
                         | Ok(WikiLink::AppSettings)
                         | Ok(WikiLink::AppHome)
+                        | Ok(WikiLink::AppLogs)
                         | Ok(WikiLink::AppSandbox) => {
                             supported.insert(link);
                         }
                         Err(WikiLinkError::UnsupportedDeepLink)
-                            if matches!(link, "app:logs" | "app:settings/data_collection") =>
+                            if link == "app:settings/data_collection" =>
                         {
                             unsupported.insert(link);
                         }
@@ -262,8 +341,8 @@ mod tests {
                 }
             }
         }
-        assert_eq!(supported.len(), 11);
-        assert_eq!(unsupported.len(), 2);
+        assert_eq!(supported.len(), 12);
+        assert_eq!(unsupported.len(), 1);
         assert!(supported.contains("app:settings/models?section=RAG"));
     }
 
@@ -271,6 +350,7 @@ mod tests {
     fn app_links_have_explicit_destinations() {
         assert_eq!(resolve_link("app:settings"), Ok(WikiLink::AppSettings));
         assert_eq!(resolve_link("app:home"), Ok(WikiLink::AppHome));
+        assert_eq!(resolve_link("app:logs"), Ok(WikiLink::AppLogs));
         assert_eq!(resolve_link("app:sandbox"), Ok(WikiLink::AppSandbox));
         for (link, section) in [
             ("app:settings/api", WikiSettingsSection::Api),
@@ -291,7 +371,6 @@ mod tests {
             );
         }
         for link in [
-            "app:logs",
             "app:settings/data_collection",
             "app:settings/models?section=Unknown",
             "app:settings/models?section=rag",

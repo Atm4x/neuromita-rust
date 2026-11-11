@@ -261,6 +261,7 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
                 }
             }
             Ok(WikiLink::AppHome) => window.invoke_navigate(PageId::Home),
+            Ok(WikiLink::AppLogs) => window.invoke_navigate(PageId::Logs),
             Ok(WikiLink::AppSandbox) => window.invoke_navigate(PageId::Sandbox),
             Ok(WikiLink::AppSettings) => window.invoke_navigate(PageId::Settings),
             Ok(WikiLink::AppSettingsSection(target)) => {

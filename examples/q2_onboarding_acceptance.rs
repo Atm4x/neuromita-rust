@@ -137,7 +137,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     10 => {
                         window.set_onboarding_required(false);
                         window.set_page(view::PageId::Wiki);
-                        window.set_wiki_current_article("index.md".into());
+                        window.set_wiki_current_article("getting-started.md".into());
                         window.set_wiki_current_title("Index".into());
                         let sections = (0..30)
                             .map(|i| view::WikiSection {

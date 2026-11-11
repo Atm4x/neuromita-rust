@@ -2,7 +2,7 @@ use neuromita::onboarding::wiki;
 use slint::{ModelRc, StyledText, VecModel};
 use std::collections::HashMap;
 
-use super::view::{AppWindow, WikiArticleEntry, WikiSection};
+use super::view::{AppWindow, WikiArticleEntry, WikiHomeCardEntry, WikiSection};
 
 struct WikiVisit {
     id: &'static str,
@@ -199,6 +199,20 @@ pub fn render_to_anchor(window: &AppWindow, history: &WikiHistory, anchor: Optio
             .expect("bundled Wiki Markdown is valid"),
     );
     window.set_wiki_sections(ModelRc::new(VecModel::from(sections)));
+    let home_cards = |left: bool| {
+        wiki::HOME_CARDS
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| (*index % 2 == 0) == left)
+            .map(|(_, card)| WikiHomeCardEntry {
+                title: card.title(history.language()).into(),
+                description: card.body(history.language()).into(),
+                destination: card.destination.into(),
+            })
+            .collect::<Vec<_>>()
+    };
+    window.set_wiki_home_left(ModelRc::new(VecModel::from(home_cards(true))));
+    window.set_wiki_home_right(ModelRc::new(VecModel::from(home_cards(false))));
     window.set_wiki_articles(ModelRc::new(VecModel::from(
         wiki::ARTICLES
             .iter()

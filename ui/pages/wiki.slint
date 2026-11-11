@@ -14,8 +14,33 @@ export struct WikiSection {
     text: styled-text,
 }
 
+export struct WikiHomeCardEntry {
+    title: string,
+    description: string,
+    destination: string,
+}
+
+component WikiHomeTile inherits Rectangle {
+    in property <WikiHomeCardEntry> card;
+    callback chosen(string);
+    height: 136px;
+    background: Theme.hover;
+    border-width: 1px;
+    border-color: Theme.border;
+    border-radius: 12px;
+    VerticalLayout {
+        padding: 17px;
+        spacing: 9px;
+        Text { text: root.card.title; color: Theme.text; font-size: 17px; font-weight: 700; wrap: word-wrap; }
+        Text { text: root.card.description; color: Theme.muted; font-size: 13px; wrap: word-wrap; }
+    }
+    TouchArea { width: parent.width; height: parent.height; clicked => { root.chosen(root.card.destination); } }
+}
+
 export component WikiReader inherits Rectangle {
     in property <[WikiArticleEntry]> articles;
+    in property <[WikiHomeCardEntry]> home-left;
+    in property <[WikiHomeCardEntry]> home-right;
     in property <string> current-article;
     in property <string> current-title;
     in property <styled-text> article-text;
@@ -122,7 +147,40 @@ export component WikiReader inherits Rectangle {
                     }
                 }
                 Rectangle { height: 1px; background: Theme.divider; }
-                article-scroll := ScrollView {
+                if root.current-article == "index.md": ScrollView {
+                    vertical-stretch: 1;
+                    content-width: self.visible-width;
+                    content-height: max(self.visible-height, home-layout.preferred-height + 30px);
+                    home-layout := VerticalLayout {
+                        x: 12px; y: 12px;
+                        width: max(1px, parent.width - 24px);
+                        spacing: 18px;
+                        Text {
+                            text: root.language == "ru" ? "Что вы хотите настроить?" : "What would you like to configure?";
+                            color: Theme.text; font-size: 23px; font-weight: 700;
+                        }
+                        HorizontalLayout {
+                            spacing: 12px;
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                spacing: 12px;
+                                for card in root.home-left: WikiHomeTile {
+                                    card: card;
+                                    chosen(target) => { root.open-link(target); }
+                                }
+                            }
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                spacing: 12px;
+                                for card in root.home-right: WikiHomeTile {
+                                    card: card;
+                                    chosen(target) => { root.open-link(target); }
+                                }
+                            }
+                        }
+                    }
+                }
+                if root.current-article != "index.md": article-scroll := ScrollView {
                     vertical-stretch: 1;
                     content-width: self.visible-width;
                     content-height: max(self.visible-height, article-layout.preferred-height + 28px);
