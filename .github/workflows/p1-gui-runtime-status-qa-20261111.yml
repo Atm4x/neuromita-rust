@@ -19,8 +19,8 @@ jobs:
       - name: GUI Linux dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y pkg-config libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev libxcb-shape0-dev libxcb-xfixes0-dev libfontconfig1-dev libfreetype6-dev
+          sudo apt-get install -y pkg-config libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev libxcb-shape0-dev libxcb-xfixes0-dev libfontconfig1-dev libfreetype6-dev xvfb xauth
       - name: Rust 1.98.1
         run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
       - name: Executable software-render Slint binding tests
-        run: cargo +1.98.1 test --locked --offline --features gui --bin neuromita-gui -- --test-threads=1
+        run: xvfb-run -a cargo +1.98.1 test --locked --offline --features gui --bin neuromita-gui -- --test-threads=1
