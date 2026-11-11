@@ -37,6 +37,8 @@ export component AppWindow inherits Window {
     default-font-size: Theme.body-size;
     in property <PageId> page: home;
     private property <bool> ai-hub-open: false;
+    private property <bool> wiki-return-to-guide: false;
+    private property <PageId> wiki-return-page: PageId.home;
     in property <string> version;
     in property <string> page-title;
     in-out property <bool> onboarding-required: false;
@@ -283,7 +285,7 @@ export component AppWindow inherits Window {
             if !root.ai-hub-open && root.page == PageId.settings: SettingsPage {
                 width: parent.width; height: parent.height; connected: root.core-connected; connecting: root.core-connecting;
                 home => { root.navigate(PageId.home); }
-                wiki => { root.wiki-open-article("index.md"); root.navigate(PageId.wiki); }
+                wiki => { root.wiki-return-to-guide = false; root.wiki-open-article("index.md"); root.navigate(PageId.wiki); }
                 guide => { root.onboarding-guide-reopen(); }
                 language-selected(code) => { root.language-selected(code); }
             }
@@ -299,11 +301,19 @@ export component AppWindow inherits Window {
                 current-title: root.wiki-current-title;
                 article-text: root.wiki-article-text;
                 language: root.wiki-language;
-                can-back: root.wiki-can-back;
+                can-back: root.wiki-can-back || root.wiki-return-to-guide;
                 can-forward: root.wiki-can-forward;
                 open-article(id) => { root.wiki-open-article(id); }
                 open-link(url) => { root.wiki-open-link(url); }
-                back => { root.wiki-back(); }
+                back => {
+                    if root.wiki-return-to-guide {
+                        root.wiki-return-to-guide = false;
+                        root.navigate(root.wiki-return-page);
+                        root.onboarding-guide-reopen();
+                    } else {
+                        root.wiki-back();
+                    }
+                }
                 forward => { root.wiki-forward(); }
                 change-language(code) => { root.wiki-change-language(code); }
             }
@@ -482,7 +492,13 @@ export component AppWindow inherits Window {
                         width: 145px; height: 38px; label: "Documentation"; background: Theme.hover;
                         visible: root.onboarding-guide-wiki-target != "";
                         Label { text: "Wiki / Help"; horizontal-alignment: center; }
-                        activated => { root.onboarding-guide-visible = false; root.wiki-open-article(root.onboarding-guide-wiki-target); root.navigate(PageId.wiki); }
+                        activated => {
+                            root.wiki-return-page = root.page;
+                            root.wiki-return-to-guide = true;
+                            root.onboarding-guide-visible = false;
+                            root.wiki-open-article(root.onboarding-guide-wiki-target);
+                            root.navigate(PageId.wiki);
+                        }
                     }
                     ActionSurface {
                         width: 38px; height: 38px; label: "Zoom out";
