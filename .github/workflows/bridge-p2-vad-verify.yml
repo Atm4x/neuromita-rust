@@ -1,0 +1,36 @@
+name: P2 VAD GUI and backend acceptance on pinned head
+on:
+  push:
+    branches:
+      - bridge/p2-source-export-20261111
+    paths:
+      - .github/workflows/bridge-p2-vad-verify.yml
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 06be945e0d20a51d098d17ee0e6ad6a6a9979b43
+      - name: Install audio and GUI system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libasound2-dev pkg-config libfontconfig1-dev libfreetype-dev libxkbcommon-dev
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+          rustup default 1.98.1
+          rustc --version
+      - name: Validate source-only import and desktop bindings
+        env:
+          CARGO_BUILD_JOBS: "2"
+          CARGO_INCREMENTAL: "0"
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "06be945e0d20a51d098d17ee0e6ad6a6a9979b43"
+          cargo fmt --all -- --check
+          cargo check --locked --offline --features gui --all-targets
+          cargo test --locked --offline --features gui --bin neuromita-gui
