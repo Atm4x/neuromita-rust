@@ -1,0 +1,44 @@
+name: P2 source bundle bridge (one-off)
+on:
+  push:
+    branches:
+      - bridge/p2-source-export-20261111
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Fetch source DAG and create verified source-only bundles
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          git clone --no-checkout --filter=blob:none "https://github.com/Atm4x/neuromita-rust.git" rust
+          cd rust
+          git fetch --unshallow origin 2>/dev/null || true
+          git fetch origin '+refs/heads/main:refs/heads/p2-main'
+          for n in 79 77 262 251 257 258 259 323 191 190 76 418; do
+            git fetch origin "+refs/pull/$n/head:refs/heads/p2-pr-$n"
+          done
+          git bundle create ../out/p2-rust-source.bundle refs/heads/p2-main $(git for-each-ref --format='%(refname)' refs/heads/p2-pr-)
+          git bundle verify ../out/p2-rust-source.bundle
+          git for-each-ref --format='%(refname) %(objectname)' refs/heads/p2-main refs/heads/p2-pr- > ../out/rust-refs.txt
+          cd ..
+          git clone --no-checkout --filter=blob:none "https://github.com/Atm4x/NeuroMita.git" python
+          cd python
+          git fetch --unshallow origin 2>/dev/null || true
+          git fetch origin '+refs/heads/main:refs/heads/p2-python-main'
+          git bundle create ../out/p2-python-source.bundle refs/heads/p2-python-main
+          git bundle verify ../out/p2-python-source.bundle
+          git for-each-ref --format='%(refname) %(objectname)' refs/heads/p2-python-main > ../out/python-refs.txt
+          cd ../out
+          sha256sum *.bundle > SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p2-source-bundles-20261111
+          path: out/
+          retention-days: 2
+          compression-level: 0
