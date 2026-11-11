@@ -18,7 +18,7 @@ jobs:
       - name: Import verified local P2 patch on exact main snapshot
         shell: bash
         env:
-          BASE_SHA: 74e505f48862b814628bbb598a63e23a6834427c
+          BASE_SHA: adcc3156a8fd33487d7e886dc26bf5c6d19ba1df
           PATCH_SHA256: 17848b8bba8c33f308e197010fee056d2038d150ea144835894a8ae8a524fde3
           TARGET_BRANCH: codex/p2-vad-dispatch-fence-20261111
         run: |
