@@ -38,6 +38,8 @@ jobs:
           test "$(git rev-parse refs/remotes/origin/main)" = "$BASE_SHA"
           test "$(git rev-parse refs/remotes/origin/p2-vad-head)" = "$SOURCE_SHA"
           git checkout -B p2-premerge "$BASE_SHA"
+          git config user.name 'P2 CI Integrator'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git merge --no-commit --no-ff "$SOURCE_SHA"
           git diff --check "$BASE_SHA"
           git diff --name-only "$BASE_SHA" | sort > /tmp/p2-changed
