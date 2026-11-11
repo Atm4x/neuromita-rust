@@ -39,7 +39,8 @@ jobs:
           python ../bridge/tools/p1-character-editor-conflict-resolve-20261111.py
           git add ui/app.slint ui/pages/settings.slint ui/settings/presets-state.slint \
             src/bin/neuromita-gui/binding_tests.rs src/bin/neuromita-gui/runtime.rs \
-            src/bin/neuromita-gui/sandbox.rs src/bin/neuromita-gui/settings.rs
+            src/bin/neuromita-gui/sandbox.rs src/bin/neuromita-gui/settings.rs \
+            src/presentation/settings.rs
           git diff --cached --check
           git diff --cached --stat
       - name: GUI Linux development libraries
