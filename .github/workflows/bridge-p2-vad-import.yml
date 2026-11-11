@@ -1,0 +1,44 @@
+name: P2 VAD source-only verified import
+on:
+  push:
+    branches:
+      - bridge/p2-source-export-20261111
+    paths:
+      - .github/workflows/bridge-p2-vad-import.yml
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Import verified local P2 patch on exact main snapshot
+        shell: bash
+        env:
+          BASE_SHA: 74e505f48862b814628bbb598a63e23a6834427c
+          PATCH_SHA256: 17848b8bba8c33f308e197010fee056d2038d150ea144835894a8ae8a524fde3
+          TARGET_BRANCH: codex/p2-vad-dispatch-fence-20261111
+        run: |
+          set -euo pipefail
+          cp .github/bridge/p2-vad.patch.gz.b64 "$RUNNER_TEMP/p2-vad.patch.gz.b64"
+          base64 --decode "$RUNNER_TEMP/p2-vad.patch.gz.b64" | gzip -dc > "$RUNNER_TEMP/p2-vad.patch"
+          echo "$PATCH_SHA256  $RUNNER_TEMP/p2-vad.patch" | sha256sum -c -
+          git fetch origin main
+          actual=$(git rev-parse origin/main)
+          test "$actual" = "$BASE_SHA" || { echo "main advanced: $actual"; exit 3; }
+          if git ls-remote --exit-code --heads origin "refs/heads/$TARGET_BRANCH" >/dev/null; then
+            echo "target ref already exists; refusing overwrite"
+            exit 4
+          fi
+          git checkout -B "$TARGET_BRANCH" "$BASE_SHA"
+          git apply --check "$RUNNER_TEMP/p2-vad.patch"
+          git apply "$RUNNER_TEMP/p2-vad.patch"
+          git diff --check
+          git add src/app.rs src/audio/mod.rs src/audio/session.rs src/audio/ticket.rs src/bin/neuromita-gui/runtime.rs tests/audio_pipeline.rs
+          git -c user.name="P2 VAD Integrator" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "fix(audio): bind speech dispatch to Core and fence stale VAD tickets"
+          test "$(git rev-parse HEAD^)" = "$BASE_SHA"
+          git push origin "HEAD:refs/heads/$TARGET_BRANCH"
+          git log -1 --format="%H %P"
