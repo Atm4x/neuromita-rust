@@ -1592,3 +1592,149 @@ async fn local_control_accepts_only_loopback_bind_addresses() {
     assert!(handle.address().ip().is_loopback());
     drop(lifecycle);
 }
+
+#[tokio::test]
+async fn tcp_character_to_character_reply_preserves_identity_audience_and_canonical_events() {
+    let mut fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+    let source_id = Uuid::new_v4();
+    let publish_id = Uuid::new_v4();
+    let publish = json!({
+        "command_id": publish_id,
+        "command": "publish_message",
+        "event_id": source_id,
+        "occurred_at_unix_ms": 1000,
+        "speaker": {"character": "Crazy"},
+        "content": "Kind, can you hear me?",
+        "targets": [{"character": "Kind"}],
+        "participants": [{"character": "Crazy"}, {"character": "Kind"}],
+        "seen_by": ["Kind"]
+    });
+    client.send(publish.clone()).await;
+    let published = client
+        .until(|v| v["command_id"] == publish_id.to_string())
+        .await;
+    assert_eq!(published["type"], "published", "{published}");
+    assert_eq!(published["event_id"], json!(source_id));
+    assert_eq!(published["replayed"], false);
+    assert_eq!(fixture.app.at().through, 1);
+    let crazy = fixture
+        .app
+        .character(CharacterId::Crazy)
+        .unwrap()
+        .get_context(fixture.app.at())
+        .await
+        .unwrap();
+    let kind = fixture
+        .app
+        .character(CharacterId::Kind)
+        .unwrap()
+        .get_context(fixture.app.at())
+        .await
+        .unwrap();
+    let cappie = fixture
+        .app
+        .character(CharacterId::Cappie)
+        .unwrap()
+        .get_context(fixture.app.at())
+        .await
+        .unwrap();
+    assert_eq!(crazy.view.count(), 1);
+    assert_eq!(kind.view.count(), 1);
+    assert_eq!(cappie.view.count(), 0);
+    assert_eq!(crazy.view.messages()[0].event_id.0, source_id);
+    assert_eq!(kind.view.messages()[0].event_id.0, source_id);
+    assert_eq!(crazy.view.provider_messages()[0]["role"], "assistant");
+    assert_eq!(kind.view.provider_messages()[0]["role"], "user");
+
+    client.send(publish).await;
+    let replay = client
+        .until(|v| v["command_id"] == publish_id.to_string())
+        .await;
+    assert_eq!(replay["replayed"], true);
+    assert_eq!(fixture.app.at().through, 1);
+
+    let reply_id = Uuid::new_v4();
+    let reply = json!({
+        "command_id": reply_id,
+        "command": "reply",
+        "character": "Kind",
+        "message_id": source_id,
+        "targets": [{"character": "Crazy"}],
+        "participants": [{"character": "Crazy"}, {"character": "Kind"}],
+        "seen_by": ["Crazy"]
+    });
+    client.send(reply.clone()).await;
+    let accepted = client.accepted(reply_id).await;
+    let request_id = uuid(&accepted["request_id"]);
+    let call = fixture.call().await;
+    assert_eq!(call.context.view.count(), 1);
+    assert_eq!(call.context.view.messages()[0].event_id.0, source_id);
+    assert!(call.context.current_input.is_empty());
+    call.finish("Yes, I hear you.");
+    let result = client.terminal(request_id).await;
+    assert_eq!(result["outcome"], "success", "{result}");
+    let answer_id = uuid(&result["event_id"]);
+    assert_eq!(fixture.app.at().through, 2);
+    let crazy = fixture
+        .app
+        .character(CharacterId::Crazy)
+        .unwrap()
+        .get_context(fixture.app.at())
+        .await
+        .unwrap();
+    let kind = fixture
+        .app
+        .character(CharacterId::Kind)
+        .unwrap()
+        .get_context(fixture.app.at())
+        .await
+        .unwrap();
+    assert_eq!(crazy.view.count(), 2);
+    assert_eq!(kind.view.count(), 2);
+    assert_eq!(crazy.view.messages()[1].event_id.0, answer_id);
+    assert_eq!(kind.view.messages()[1].event_id.0, answer_id);
+    assert_eq!(crazy.view.provider_messages()[1]["role"], "user");
+    assert_eq!(kind.view.provider_messages()[1]["role"], "assistant");
+    assert_eq!(fixture.app.timeline().len(), 1);
+
+    client.send(reply).await;
+    let reply_replay = client.accepted(reply_id).await;
+    assert_eq!(reply_replay["replayed"], true);
+    assert_eq!(uuid(&reply_replay["request_id"]), request_id);
+    assert_eq!(fixture.app.at().through, 2);
+    assert!(fixture.calls.try_recv().is_err());
+
+    let hidden_id = Uuid::new_v4();
+    client
+        .send(json!({
+            "command_id": Uuid::new_v4(),
+            "command": "publish_message",
+            "event_id": hidden_id,
+            "occurred_at_unix_ms": 1001,
+            "speaker": "player",
+            "content": "Crazy only",
+            "targets": [{"character": "Kind"}],
+            "participants": [{"character": "Crazy"}, {"character": "Kind"}],
+            "seen_by": ["Crazy"]
+        }))
+        .await;
+    let hidden_published = client.until(|v| v["type"] == "published").await;
+    assert_eq!(hidden_published["event_id"], json!(hidden_id));
+    let denied_id = Uuid::new_v4();
+    client
+        .send(json!({
+            "command_id": denied_id,
+            "command": "reply",
+            "character": "Kind",
+            "message_id": hidden_id
+        }))
+        .await;
+    let denied = client
+        .until(|v| v["command_id"] == denied_id.to_string())
+        .await;
+    assert_eq!(denied["type"], "error", "{denied}");
+    assert_eq!(fixture.app.at().through, 3);
+    assert!(fixture.calls.try_recv().is_err());
+    fixture.shutdown().await;
+}
