@@ -4,13 +4,15 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::identity::{CharacterId, EventId};
-use crate::timeline::RegenerateAdmissionReceipt;
 use crate::timeline::domain::{
     AppendGuard, Branch, BranchId, BranchInfo, EventDraft, EventKind, KnownEvent, Receipt,
     SessionId, SessionProvenance, TimelineError, TimelineFact, TimelineRepository, TimelineStore,
     WorldLookup,
 };
-use crate::timeline::selection::{TimelineSelection, TimelineSelectionRepository};
+use crate::timeline::selection::{
+    SessionWorkspace, TimelineSelection, TimelineSelectionRepository, TimelineTurn,
+};
+use crate::timeline::{KnowledgeDispatchSource, RegenerateAdmissionReceipt};
 
 mod backup;
 mod maintenance;
@@ -128,6 +130,20 @@ CREATE TABLE IF NOT EXISTS timeline_active_selection(
     FOREIGN KEY(branch_id) REFERENCES timeline_branches(branch_id)
 );
 ";
+
+/// A canonical Timeline dispatch boundary. While held, SQLite's write reservation
+/// prevents *any* other SQLite connection from committing a visibility change,
+/// including connections that do not use our repository implementation.
+/// Cancellation and unwinding release the reservation through Drop.
+pub(crate) struct SqliteKnowledgeDispatchLease {
+    connection: Connection,
+}
+
+impl Drop for SqliteKnowledgeDispatchLease {
+    fn drop(&mut self) {
+        let _ = self.connection.exec("ROLLBACK");
+    }
+}
 
 fn storage(message: impl Into<String>) -> TimelineError {
     TimelineError::Storage(message.into())
@@ -369,6 +385,92 @@ impl SqliteTimelineRepository {
             save_branch(connection, store, child)?;
             select_branch_in_transaction(connection, child, Some(expected))
         })
+    }
+
+    /// Validate the exact pinned view under the SAME SQLite reservation that
+    /// stays active until the provider operation has completed or been dropped.
+    /// A plain SELECT/re-read before an external await is not sufficient in WAL.
+    pub(crate) fn admit_knowledge_dispatch(
+        &self,
+        turn: TimelineTurn,
+        sources: &[KnowledgeDispatchSource],
+    ) -> Result<SqliteKnowledgeDispatchLease, TimelineError> {
+        let connection = Connection::open_existing(&self.path)?;
+        connection.exec("BEGIN IMMEDIATE")?;
+        let validation = (|| {
+            if read_selection(&connection)? != Some(turn.selection) {
+                return Err(TimelineError::ConcurrentWrite);
+            }
+            let store = load(&connection)?;
+            if store.branch(turn.selection.branch_id)?.head_sequence < turn.context_head {
+                return Err(TimelineError::ConcurrentWrite);
+            }
+            SessionWorkspace::from_selection(turn.selection).assert_current(&store, turn)?;
+            if !sources.is_empty() {
+                let needs_memories = sources
+                    .iter()
+                    .any(|source| matches!(source, KnowledgeDispatchSource::Memory(..)));
+                let needs_history = sources
+                    .iter()
+                    .any(|source| matches!(source, KnowledgeDispatchSource::History(..)));
+                let memories = if needs_memories {
+                    crate::character::projection::character_memories_at(
+                        &store.world(turn.selection.branch_id)?,
+                        turn.character,
+                    )?
+                    .all()
+                } else {
+                    Vec::new()
+                };
+                let history = if needs_history {
+                    let world = store.world(turn.selection.branch_id)?;
+                    let head = store.branch(turn.selection.branch_id)?.head_sequence;
+                    crate::timeline::view::MitaView::from_facts(
+                        turn.selection.branch_id,
+                        head,
+                        turn.character,
+                        &world,
+                    )
+                    .messages()
+                } else {
+                    Vec::new()
+                };
+                for source in sources {
+                    let admitted = match source {
+                        KnowledgeDispatchSource::Memory(id, content) => {
+                            memories.iter().any(|record| {
+                                record.id == *id
+                                    && record.content == *content
+                                    && record.state == crate::memory::MemoryState::Active
+                                    && matches!(
+                                        record.kind,
+                                        crate::memory::MemoryKind::Fact
+                                            | crate::memory::MemoryKind::RagOnly
+                                    )
+                            })
+                        }
+                        KnowledgeDispatchSource::History(id, content) => {
+                            history.iter().any(|message| {
+                                message.event_id == *id
+                                    && !content.is_empty()
+                                    && message.content.starts_with(content)
+                            })
+                        }
+                    };
+                    if !admitted {
+                        return Err(TimelineError::ConcurrentWrite);
+                    }
+                }
+            }
+            Ok(())
+        })();
+        match validation {
+            Ok(()) => Ok(SqliteKnowledgeDispatchLease { connection }),
+            Err(error) => {
+                let _ = connection.exec("ROLLBACK");
+                Err(error)
+            }
+        }
     }
 
     fn connection(&self) -> Result<Connection, TimelineError> {
@@ -1370,6 +1472,158 @@ mod tests {
                 let _ = std::fs::remove_file(format!("{}{}", self.0.display(), suffix));
             }
         }
+    }
+
+    #[test]
+    fn dispatch_reservation_blocks_independent_sqlite_writer_until_release() {
+        use crate::timeline::selection::{SessionWorkspace, TimelineSelectionRepository};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let path = TestDb::new();
+        let mut owner = SqliteTimelineRepository::open(&path.0).unwrap();
+        let session = SessionId::new();
+        let branch = BranchId::new();
+        owner.create_session(session, branch).unwrap();
+        let selected = owner.select_branch(branch, None).unwrap();
+        let turn = SessionWorkspace::from_selection(selected)
+            .capture(&owner, CharacterId::Crazy, None)
+            .unwrap();
+        let mut foreign = SqliteTimelineRepository::open(&path.0).unwrap();
+        let lease = owner.admit_knowledge_dispatch(turn, &[]).unwrap();
+        let (started, entered) = mpsc::channel();
+        let (finished, completed) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            let result = foreign.select_branch(branch, Some(selected));
+            finished.send(result).unwrap();
+        });
+        entered.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(matches!(
+            completed.recv_timeout(Duration::from_millis(150)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        drop(lease);
+        let next = completed
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap()
+            .unwrap();
+        handle.join().unwrap();
+        assert!(next.generation > selected.generation);
+        assert!(matches!(
+            owner.admit_knowledge_dispatch(turn, &[]),
+            Err(TimelineError::ConcurrentWrite)
+        ));
+    }
+
+    #[test]
+    fn foreign_selection_before_dispatch_is_rejected_at_sqlite_boundary() {
+        use crate::timeline::selection::{SessionWorkspace, TimelineSelectionRepository};
+
+        let path = TestDb::new();
+        let mut owner = SqliteTimelineRepository::open(&path.0).unwrap();
+        let branch = BranchId::new();
+        owner.create_session(SessionId::new(), branch).unwrap();
+        let selected = owner.select_branch(branch, None).unwrap();
+        let turn = SessionWorkspace::from_selection(selected)
+            .capture(&owner, CharacterId::Crazy, None)
+            .unwrap();
+        let mut foreign = SqliteTimelineRepository::open(&path.0).unwrap();
+        foreign.select_branch(branch, Some(selected)).unwrap();
+        assert!(matches!(
+            owner.admit_knowledge_dispatch(turn, &[]),
+            Err(TimelineError::ConcurrentWrite)
+        ));
+    }
+
+    #[test]
+    fn stale_memory_payload_cannot_enter_provider_after_foreign_delete() {
+        use crate::memory::{MemoryChange, MemoryId, MemoryPriority, MemoryRecord};
+        use crate::timeline::KnowledgeDispatchSource;
+        use crate::timeline::selection::{SessionWorkspace, TimelineSelectionRepository};
+
+        let path = TestDb::new();
+        let mut owner = SqliteTimelineRepository::open(&path.0).unwrap();
+        let branch = BranchId::new();
+        owner.create_session(SessionId::new(), branch).unwrap();
+        let selected = owner.select_branch(branch, None).unwrap();
+        let id = MemoryId::new();
+        let mut initial = EventDraft::new(EventKind::CharacterMemoryChanged);
+        initial.actor = Some(CharacterId::Crazy.to_string());
+        initial.observers.insert(CharacterId::Crazy);
+        initial.payload.insert(
+            "change".into(),
+            json!(MemoryChange::Upsert(MemoryRecord::fact(
+                id,
+                MemoryPriority::High,
+                "private text"
+            ))),
+        );
+        owner
+            .append(branch, 0, "first-memory", json!({}), vec![initial])
+            .unwrap();
+        let turn = SessionWorkspace::from_selection(selected)
+            .capture(&owner, CharacterId::Crazy, None)
+            .unwrap();
+        let evidence = [KnowledgeDispatchSource::Memory(
+            id,
+            "private text".to_owned(),
+        )];
+        drop(owner.admit_knowledge_dispatch(turn, &evidence).unwrap());
+
+        let mut foreign = SqliteTimelineRepository::open(&path.0).unwrap();
+        let mut deletion = EventDraft::new(EventKind::CharacterMemoryChanged);
+        deletion.actor = Some(CharacterId::Crazy.to_string());
+        deletion.observers.insert(CharacterId::Crazy);
+        deletion
+            .payload
+            .insert("change".into(), json!(MemoryChange::Delete(id)));
+        foreign
+            .append(branch, 1, "delete-memory", json!({}), vec![deletion])
+            .unwrap();
+        assert!(matches!(
+            owner.admit_knowledge_dispatch(turn, &evidence),
+            Err(TimelineError::ConcurrentWrite)
+        ));
+    }
+
+    #[test]
+    fn forged_document_text_is_rejected_under_same_sqlite_reservation() {
+        use crate::memory::{MemoryChange, MemoryId, MemoryPriority, MemoryRecord};
+        use crate::timeline::KnowledgeDispatchSource;
+        use crate::timeline::selection::{SessionWorkspace, TimelineSelectionRepository};
+
+        let path = TestDb::new();
+        let mut owner = SqliteTimelineRepository::open(&path.0).unwrap();
+        let branch = BranchId::new();
+        owner.create_session(SessionId::new(), branch).unwrap();
+        let selected = owner.select_branch(branch, None).unwrap();
+        let id = MemoryId::new();
+        let mut initial = EventDraft::new(EventKind::CharacterMemoryChanged);
+        initial.actor = Some(CharacterId::Crazy.to_string());
+        initial.observers.insert(CharacterId::Crazy);
+        initial.payload.insert(
+            "change".into(),
+            json!(MemoryChange::Upsert(MemoryRecord::fact(
+                id,
+                MemoryPriority::High,
+                "authorized"
+            ))),
+        );
+        owner
+            .append(branch, 0, "memory", json!({}), vec![initial])
+            .unwrap();
+        let turn = SessionWorkspace::from_selection(selected)
+            .capture(&owner, CharacterId::Crazy, None)
+            .unwrap();
+        let forged = [KnowledgeDispatchSource::Memory(
+            id,
+            "unauthorized".to_owned(),
+        )];
+        assert!(matches!(
+            owner.admit_knowledge_dispatch(turn, &forged),
+            Err(TimelineError::ConcurrentWrite)
+        ));
     }
 
     fn memory_draft(content: &str) -> EventDraft {

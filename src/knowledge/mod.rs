@@ -329,7 +329,11 @@ impl KnowledgeRetrieval {
     pub(crate) fn bind_dispatch_authority(
         &self,
         authority: Arc<
-            dyn Fn(crate::timeline::selection::TimelineTurn) -> Result<(), EmbeddingError>
+            dyn Fn(
+                    crate::timeline::selection::TimelineTurn,
+                    Vec<crate::timeline::KnowledgeDispatchSource>,
+                )
+                    -> Result<crate::timeline::KnowledgeDispatchLease, EmbeddingError>
                 + Send
                 + Sync,
         >,

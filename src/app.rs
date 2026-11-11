@@ -1049,11 +1049,11 @@ impl ApplicationLifecycle {
         };
         knowledge.bind_dispatch_authority({
             let timeline = Arc::clone(&timeline);
-            Arc::new(move |turn| {
+            Arc::new(move |turn, sources| {
                 timeline
                     .lock()
                     .map_err(|_| EmbeddingError::StaleKnowledge)?
-                    .assert_knowledge_turn(turn, false)
+                    .admit_knowledge_dispatch(turn, &sources)
                     .map_err(|_| EmbeddingError::StaleKnowledge)
             })
         })?;

@@ -496,9 +496,7 @@ async fn search_history_semantic_with_window_at(
         buckets.push(lexical_bucket(character, view, &messages, query));
     }
     let mut hits = fuse(character, &buckets, fusion)?;
-    retriever.authorize_dispatch(turn)?;
-    retriever.rerank_fused(query, &mut hits).await?;
-    retriever.authorize_dispatch(turn)?;
+    retriever.rerank_fused(query, &mut hits, turn).await?;
     hits.truncate(config.limit);
     Ok(finish(
         view,
