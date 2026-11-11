@@ -14,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 06be945e0d20a51d098d17ee0e6ad6a6a9979b43
+          ref: bd7eb132e675ab191f08c3d12392b30f4e2ab401
       - name: Install audio and GUI system dependencies
         run: |
           sudo apt-get update -qq
@@ -30,7 +30,7 @@ jobs:
           CARGO_INCREMENTAL: "0"
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "06be945e0d20a51d098d17ee0e6ad6a6a9979b43"
+          test "$(git rev-parse HEAD)" = "bd7eb132e675ab191f08c3d12392b30f4e2ab401"
           cargo fmt --all -- --check
           cargo check --locked --offline --features gui --all-targets
           cargo test --locked --offline --features gui --bin neuromita-gui
