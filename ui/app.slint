@@ -309,7 +309,7 @@ export component AppWindow inherits Window {
                     if root.wiki-return-to-guide {
                         root.wiki-return-to-guide = false;
                         root.navigate(root.wiki-return-page);
-                        root.onboarding-guide-reopen();
+                        root.onboarding-guide-visible = true;
                     } else {
                         root.wiki-back();
                     }

@@ -271,6 +271,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         window.set_page(view::PageId::Home);
                         window.set_onboarding_guide_wiki_target("getting-started.md".into());
                         window.set_onboarding_guide_title("Guide acceptance".into());
+                        window.set_onboarding_guide_page(2);
                         window.set_onboarding_guide_visible(true);
                     }
                     23 => {
@@ -291,9 +292,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                         let _ = shot("wiki-back-to-guide")?;
                         if window.get_page() != view::PageId::Home
                             || !window.get_onboarding_guide_visible()
-                            || *reopened_guide.borrow() != 1
+                            || window.get_onboarding_guide_page() != 2
+                            || *reopened_guide.borrow() != 0
                         {
-                            return Err(format!("Wiki Back did not reopen Guide; callbacks={}", reopened_guide.borrow()).into());
+                            return Err(format!("Wiki Back did not restore the existing Guide page; callbacks={}", reopened_guide.borrow()).into());
                         }
                     }
                     _ => {
