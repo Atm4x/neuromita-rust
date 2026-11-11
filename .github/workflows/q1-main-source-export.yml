@@ -1,0 +1,33 @@
+name: Q1 fresh main Git source export
+on:
+  push:
+    branches:
+      - bridge/q1-main-source-export-20261111
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bundle exact main
+        run: |
+          set -euo pipefail
+          git fetch origin +refs/heads/main:refs/heads/q1-main
+          test "$(git rev-parse refs/heads/q1-main)" = "74e505f48862b814628bbb598a63e23a6834427c"
+          git bundle create "$RUNNER_TEMP/q1-main.bundle" refs/heads/q1-main
+          cd "$RUNNER_TEMP"
+          sha256sum q1-main.bundle > q1-main.bundle.sha256
+          git bundle list-heads q1-main.bundle > q1-manifest.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: q1-rust-main-bundle
+          path: |
+            ${{ runner.temp }}/q1-main.bundle
+            ${{ runner.temp }}/q1-main.bundle.sha256
+            ${{ runner.temp }}/q1-manifest.txt
+          retention-days: 1
+          compression-level: 0
