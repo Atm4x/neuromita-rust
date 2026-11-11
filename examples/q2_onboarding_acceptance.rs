@@ -53,6 +53,22 @@ fn home_cards(locale: &str, left: bool) -> ModelRc<view::WikiHomeCardEntry> {
     ))
 }
 
+fn click(window: &view::AppWindow, x: f32, y: f32) {
+    let position = slint::LogicalPosition::new(x, y);
+    window
+        .window()
+        .dispatch_event(slint::platform::WindowEvent::PointerPressed {
+            position,
+            button: slint::platform::PointerEventButton::Left,
+        });
+    window
+        .window()
+        .dispatch_event(slint::platform::WindowEvent::PointerReleased {
+            position,
+            button: slint::platform::PointerEventButton::Left,
+        });
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let output = PathBuf::from(
         std::env::args_os()
@@ -71,6 +87,33 @@ fn main() -> Result<(), Box<dyn Error>> {
     window
         .window()
         .set_size(slint::PhysicalSize::new(1180, 680));
+
+    let clicked_link = Rc::new(RefCell::new(None::<String>));
+    let clicked_for_callback = clicked_link.clone();
+    window.on_wiki_open_link(move |link| {
+        *clicked_for_callback.borrow_mut() = Some(link.to_string());
+    });
+    let weak_navigate = window.as_weak();
+    window.on_navigate(move |page| {
+        if let Some(window) = weak_navigate.upgrade() {
+            window.set_page(page);
+        }
+    });
+    let weak_article = window.as_weak();
+    window.on_wiki_open_article(move |id| {
+        if let Some(window) = weak_article.upgrade() {
+            window.set_wiki_current_article(id);
+        }
+    });
+    let reopened_guide = Rc::new(RefCell::new(0_usize));
+    let reopened_counter = reopened_guide.clone();
+    let weak_reopen = window.as_weak();
+    window.on_onboarding_guide_reopen(move || {
+        *reopened_counter.borrow_mut() += 1;
+        if let Some(window) = weak_reopen.upgrade() {
+            window.set_onboarding_guide_visible(true);
+        }
+    });
 
     let output = Rc::new(output);
     let reference = Rc::new(RefCell::new(Vec::new()));
@@ -193,6 +236,65 @@ fn main() -> Result<(), Box<dyn Error>> {
                     17 => {
                         let image = shot("wiki-home-en")?;
                         assert_changed(&reference.borrow(), &image, "Wiki home locale")?;
+                        *reference.borrow_mut() = image;
+                    }
+                    18 => {
+                        window.window().dispatch_event(
+                            slint::platform::WindowEvent::PointerScrolled {
+                                position: slint::LogicalPosition::new(825.0, 490.0),
+                                delta_x: 0.0,
+                                delta_y: -380.0,
+                            },
+                        );
+                    }
+                    19 => {
+                        let image = shot("wiki-home-en-wheel")?;
+                        assert_changed(&reference.borrow(), &image, "Wiki home wheel")?;
+                    }
+                    20 => {
+                        window.window().dispatch_event(
+                            slint::platform::WindowEvent::PointerScrolled {
+                                position: slint::LogicalPosition::new(825.0, 490.0),
+                                delta_x: 0.0,
+                                delta_y: 450.0,
+                            },
+                        );
+                    }
+                    21 => {
+                        click(&window, 665.0, 290.0);
+                    }
+                    22 => {
+                        let observed = clicked_link.borrow().clone();
+                        if observed.as_deref() != Some("getting-started.md") {
+                            return Err(format!("Wiki home card click: expected getting-started.md, got {observed:?}").into());
+                        }
+                        window.set_page(view::PageId::Home);
+                        window.set_onboarding_guide_wiki_target("getting-started.md".into());
+                        window.set_onboarding_guide_title("Guide acceptance".into());
+                        window.set_onboarding_guide_visible(true);
+                    }
+                    23 => {
+                        let _ = shot("guide-before-wiki")?;
+                    }
+                    24 => click(&window, 220.0, 611.0),
+                    25 => {
+                        let _ = shot("guide-to-wiki")?;
+                        if window.get_page() != view::PageId::Wiki
+                            || window.get_onboarding_guide_visible()
+                            || window.get_wiki_current_article().as_str() != "getting-started.md"
+                        {
+                            return Err("Guide to Wiki click did not navigate".into());
+                        }
+                    }
+                    26 => click(&window, 558.0, 58.0),
+                    27 => {
+                        let _ = shot("wiki-back-to-guide")?;
+                        if window.get_page() != view::PageId::Home
+                            || !window.get_onboarding_guide_visible()
+                            || *reopened_guide.borrow() != 1
+                        {
+                            return Err(format!("Wiki Back did not reopen Guide; callbacks={}", reopened_guide.borrow()).into());
+                        }
                     }
                     _ => {
                         *completed.borrow_mut() = Some(Ok(()));
