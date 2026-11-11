@@ -1,0 +1,80 @@
+name: P1 PR307 accepted-only prompt SET variable staging
+on:
+  push:
+    branches: [bridge/p1-dsl-staged-20261111]
+permissions:
+  contents: write
+jobs:
+  source-verify-test-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 28
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      RUSTFLAGS: '-C debuginfo=0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: Atm4x/neuromita-rust
+          ref: 8230fa2592c6ab1b0a4fc2b805a58ae4b1132417
+          fetch-depth: 0
+          path: rust
+      - uses: actions/checkout@v4
+        with:
+          repository: Atm4x/neuromita-rust
+          ref: bridge/p1-dsl-staged-20261111
+          path: bridge
+      - name: Verify original local patch checksum and apply to fresh main
+        working-directory: rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64,hashlib,zlib
+          from pathlib import Path
+          data=Path("../bridge/tools/p1-cycle5-pr307-zlib-base64.txt").read_text().strip()
+          decoded=zlib.decompress(base64.b64decode(data))
+          expected="f69e8aabbe0b711a60b551b3f036c151b82539052bf814815b9d2472a0eed779"
+          assert hashlib.sha256(decoded).hexdigest()==expected, "source patch checksum mismatch"
+          Path("/tmp/p1-pr307-accepted-only.patch").write_bytes(decoded)
+          PY
+          test "$(git rev-parse HEAD)" = "8230fa2592c6ab1b0a4fc2b805a58ae4b1132417"
+          git apply --check /tmp/p1-pr307-accepted-only.patch
+          git apply --index /tmp/p1-pr307-accepted-only.patch
+          git diff --cached --check
+          git diff --cached --stat
+      - name: Native Linux packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y pkg-config libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev libxcb-shape0-dev libxcb-xfixes0-dev libfontconfig1-dev libfreetype6-dev
+      - name: Pinned Rust 1.98.1
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+      - name: Format check
+        working-directory: rust
+        run: cargo +1.98.1 fmt --all -- --check
+      - name: Offline all-target check
+        working-directory: rust
+        run: cargo +1.98.1 check --locked --offline --all-targets
+      - name: Staged SET preparation test
+        working-directory: rust
+        run: cargo +1.98.1 test --locked --offline --lib nonlocal_set_is_staged_but_not_committed_before_acceptance -- --test-threads=2
+      - name: Actual accepted-rejected-accepted LLM vertical slice
+        working-directory: rust
+        run: cargo +1.98.1 test --locked --offline --test vertical_slice prompt_nonlocal_set_is_persisted_only_after_accepted_reply -- --test-threads=2
+      - name: Prompt and PostDSL tests
+        working-directory: rust
+        run: |
+          cargo +1.98.1 test --locked --offline --lib prompts::tests:: -- --test-threads=2
+          cargo +1.98.1 test --locked --offline --lib prompts::post_dsl:: -- --test-threads=2
+      - name: GUI all-target check
+        working-directory: rust
+        run: cargo +1.98.1 check --locked --offline --features gui --all-targets
+      - name: Publish exact verified 6-file source only
+        working-directory: rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "P1 DSL integrator"
+          git config user.email "p1-dsl-integrator@users.noreply.github.com"
+          git commit -m "fix(prompts): persist nonlocal SET through accepted TurnProposal only"
+          git push origin HEAD:refs/heads/codex/p1-dsl-staged-20261111
