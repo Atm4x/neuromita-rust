@@ -87,6 +87,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                         *reference.borrow_mut() = image;
                     }
                     3 => {
+                        window
+                            .window()
+                            .dispatch_event(slint::platform::WindowEvent::KeyReleased {
+                                text: slint::platform::Key::PageDown.into(),
+                            });
+                        window
+                            .window()
+                            .dispatch_event(slint::platform::WindowEvent::KeyPressed {
+                                text: slint::platform::Key::Home.into(),
+                            });
+                    }
+                    4 => {
+                        *reference.borrow_mut() = shot("eula-ru-home")?;
                         window.window().dispatch_event(
                             slint::platform::WindowEvent::PointerScrolled {
                                 position: slint::LogicalPosition::new(480.0, 360.0),
@@ -95,11 +108,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                             },
                         );
                     }
-                    4 => {
+                    5 => {
                         let image = shot("eula-ru-wheel")?;
                         assert_changed(&reference.borrow(), &image, "EULA RU mouse wheel")?;
                     }
-                    5 => {
+                    6 => {
                         window.set_onboarding_required(false);
                         window.set_onboarding_eula_text(
                             neuromita::onboarding::eula_text("en").into(),
@@ -107,8 +120,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         window.set_onboarding_language("en".into());
                         window.set_onboarding_required(true);
                     }
-                    6 => *reference.borrow_mut() = shot("eula-en-before")?,
-                    7 => {
+                    7 => *reference.borrow_mut() = shot("eula-en-before")?,
+                    8 => {
                         window.window().dispatch_event(
                             slint::platform::WindowEvent::PointerScrolled {
                                 position: slint::LogicalPosition::new(480.0, 360.0),
@@ -117,11 +130,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                             },
                         );
                     }
-                    8 => {
+                    9 => {
                         let image = shot("eula-en-wheel")?;
                         assert_changed(&reference.borrow(), &image, "EULA EN mouse wheel")?;
                     }
-                    9 => {
+                    10 => {
                         window.set_onboarding_required(false);
                         window.set_page(view::PageId::Wiki);
                         window.set_wiki_current_article("index.md".into());
@@ -139,12 +152,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                             .collect::<Vec<_>>();
                         window.set_wiki_sections(ModelRc::new(VecModel::from(sections)));
                     }
-                    10 => *reference.borrow_mut() = shot("wiki-before-anchor")?,
-                    11 => {
+                    11 => *reference.borrow_mut() = shot("wiki-before-anchor")?,
+                    12 => {
                         window.set_wiki_scroll_target(20);
                         window.set_wiki_scroll_revision(1);
                     }
-                    12 => {
+                    13 => {
                         let image = shot("wiki-after-anchor")?;
                         assert_changed(&reference.borrow(), &image, "Wiki anchor scroll")?;
                     }
