@@ -32,15 +32,12 @@ jobs:
           git apply "$RUNNER_TEMP/q2.patch"
           git diff --check
           git diff --stat
-          git config user.name "NeuroMita QA Git Bridge"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add ui/app.slint ui/pages/wiki.slint src/bin/neuromita-gui/wiki.rs src/bin/neuromita-gui/binding.rs src/onboarding/wiki.rs
-          git commit -m "fix(onboarding): scroll EULA and render navigable Wiki sections"
-          git push origin HEAD:refs/heads/codex/q2-onboarding-wiki-acceptance-20261111
-          git rev-parse HEAD
+          git fetch origin refs/heads/codex/q2-onboarding-wiki-acceptance-20261111
+          git diff --quiet FETCH_HEAD -- ui/app.slint ui/pages/wiki.slint src/bin/neuromita-gui/wiki.rs src/bin/neuromita-gui/binding.rs src/onboarding/wiki.rs
+          echo "Remote candidate branch matches the verified patch byte-for-byte"
       - name: Install Rust toolchain and system dependencies
         run: |
-          rustup toolchain install 1.98.1 --profile minimal
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
           sudo apt-get update -qq
           sudo apt-get install -y -qq libasound2-dev libfontconfig1-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev libx11-dev libxcb1-dev xvfb
       - name: Rustfmt and GUI bin check
