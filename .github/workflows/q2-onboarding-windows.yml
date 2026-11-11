@@ -1,8 +1,18 @@
 name: Q2 onboarding Windows native Rust GUI check
 on:
-  push:
-    branches: [codex/q2-onboarding-wiki-acceptance-20261111]
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/onboarding/**"
+      - "src/bin/neuromita-gui/wiki.rs"
+      - "src/bin/neuromita-gui/binding.rs"
+      - "ui/pages/wiki.slint"
+      - "examples/q2_onboarding_acceptance.rs"
+      - ".github/workflows/q2-onboarding-*.yml"
   workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
