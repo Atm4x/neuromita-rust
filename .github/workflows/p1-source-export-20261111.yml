@@ -1,0 +1,60 @@
+name: P1 source-only multi-ref audit export
+on:
+  push:
+    branches:
+      - bridge/p1-pr-integrator-source-20261111
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: rust
+          fetch-depth: 0
+      - name: Fetch exact audit heads and build Rust bundle
+        working-directory: rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ../audit-artifacts
+          git fetch --no-tags origin refs/heads/main:refs/heads/audit-main
+          for n in 396 309 310 311 307 308 304 273 274; do
+            git fetch --no-tags origin "refs/pull/${n}/head:refs/heads/audit-pr-${n}"
+          done
+          git bundle create ../audit-artifacts/neuromita-p1-rust.bundle             refs/heads/audit-main             refs/heads/audit-pr-396 refs/heads/audit-pr-309             refs/heads/audit-pr-310 refs/heads/audit-pr-311             refs/heads/audit-pr-307 refs/heads/audit-pr-308             refs/heads/audit-pr-304 refs/heads/audit-pr-273             refs/heads/audit-pr-274
+          git bundle verify ../audit-artifacts/neuromita-p1-rust.bundle
+          git for-each-ref refs/heads/audit- --format='%(refname:short) %(objectname)' > ../audit-artifacts/rust-refs.txt
+          test "$(git rev-parse refs/heads/audit-main)" = "74e505f48862b814628bbb598a63e23a6834427c"
+      - uses: actions/checkout@v4
+        with:
+          repository: Atm4x/NeuroMita
+          ref: main
+          path: python
+          fetch-depth: 0
+      - name: Bundle Python read-only reference
+        working-directory: python
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin refs/heads/main:refs/heads/audit-main
+          git fetch --no-tags origin refs/heads/ForRelease:refs/heads/audit-for-release
+          git bundle create ../audit-artifacts/neuromita-p1-python.bundle refs/heads/audit-main refs/heads/audit-for-release
+          git bundle verify ../audit-artifacts/neuromita-p1-python.bundle
+          git for-each-ref refs/heads/audit- --format='%(refname:short) %(objectname)' > ../audit-artifacts/python-refs.txt
+          test "$(git rev-parse refs/heads/audit-main)" = "97310d6aaf6bf7eeb15ae84cf606adc0f024e135"
+      - name: SHA256 and upload
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd audit-artifacts
+          sha256sum *.bundle > SHA256SUMS
+          sha256sum -c SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neuromita-p1-audit-bundles
+          path: audit-artifacts/
+          if-no-files-found: error
+          retention-days: 3
