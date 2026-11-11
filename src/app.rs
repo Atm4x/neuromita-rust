@@ -1487,7 +1487,11 @@ impl ApplicationLifecycle {
         let recognizer = self.speech.as_ref()?;
         let handler = crate::audio::session::SpeechInputHandler::new(
             Arc::clone(recognizer),
-            Arc::new(crate::audio::session::ChatReplyTarget { character, source }),
+            Arc::new(crate::audio::session::ChatReplyTarget::bound(
+                Arc::clone(&self.bindings.chat),
+                character,
+                source,
+            )),
             playback,
         );
         Some((handler, self.stop.child_token()))

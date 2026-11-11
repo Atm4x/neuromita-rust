@@ -137,10 +137,8 @@ async fn microphone_vad_asr_player_message_generation_tts_playback() {
     let recorded = Arc::new(Mutex::new(Vec::new()));
     let handler = SpeechInputHandler::new(
         Arc::new(Transcriber),
-        Arc::new(ChatReplyTarget {
-            character: CharacterId::Crazy,
-            source: RequestSource::Presenter,
-        }) as Arc<dyn SpeechConversation>,
+        Arc::new(ChatReplyTarget::capture(CharacterId::Crazy, RequestSource::Presenter).unwrap())
+            as Arc<dyn SpeechConversation>,
         Arc::new(Playback(Arc::clone(&recorded))),
     );
     let config = SegmentConfig {

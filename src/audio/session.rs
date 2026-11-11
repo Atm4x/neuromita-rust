@@ -8,24 +8,27 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, time::timeout};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     ai_runtime::speech::{PythonSpeechRecognizer, SpeechRecognitionError, Transcript},
-    api::ChatApi,
     character::CharacterId,
     interaction::UserInput,
-    request::{ReplyRequest, RequestHandle, RequestOutcome, RequestSource, RequestState},
+    request::{
+        ChatApiState, ReplyRequest, RequestHandle, RequestOutcome, RequestSource, RequestState,
+    },
     voice::AudioArtifact,
 };
 
 use super::{
     device::{AudioCapture, AudioPlayback, DeviceError},
     segment::{SegmentError, SpeechSegment, SpeechSegmenter, VoiceGate},
+    ticket::{SpeechStream, SpeechTicket},
 };
 
 #[derive(Debug, Error)]
@@ -64,7 +67,11 @@ impl SpeechTranscriber for PythonSpeechRecognizer {
 }
 
 pub trait SpeechConversation: Send + Sync {
-    fn reply<'a>(&'a self, transcript: &'a Transcript) -> SpeechFuture<'a, Option<AudioArtifact>>;
+    fn reply<'a>(
+        &'a self,
+        ticket: &'a SpeechTicket,
+        transcript: &'a Transcript,
+    ) -> SpeechFuture<'a, Option<AudioArtifact>>;
 }
 
 struct CancelUnfinished<'a> {
@@ -81,19 +88,52 @@ impl Drop for CancelUnfinished<'_> {
 }
 
 pub struct ChatReplyTarget {
-    pub character: CharacterId,
-    pub source: RequestSource,
+    api: Arc<ChatApiState>,
+    character: CharacterId,
+    source: RequestSource,
+}
+
+impl ChatReplyTarget {
+    pub fn capture(
+        character: CharacterId,
+        source: RequestSource,
+    ) -> Result<Self, SpeechSessionError> {
+        let bindings = crate::runtime::current()
+            .map_err(|_| SpeechSessionError::Conversation("application unavailable".into()))?;
+        Ok(Self::bound(Arc::clone(&bindings.chat), character, source))
+    }
+
+    pub(crate) fn bound(
+        api: Arc<ChatApiState>,
+        character: CharacterId,
+        source: RequestSource,
+    ) -> Self {
+        Self {
+            api,
+            character,
+            source,
+        }
+    }
 }
 
 impl SpeechConversation for ChatReplyTarget {
-    fn reply<'a>(&'a self, transcript: &'a Transcript) -> SpeechFuture<'a, Option<AudioArtifact>> {
+    fn reply<'a>(
+        &'a self,
+        ticket: &'a SpeechTicket,
+        transcript: &'a Transcript,
+    ) -> SpeechFuture<'a, Option<AudioArtifact>> {
         Box::pin(async move {
             let input = UserInput::new(transcript.text.clone())
                 .map_err(|error| SpeechSessionError::Conversation(error.to_string()))?;
-            let event = ChatApi::publish_message(self.character, input)
-                .map_err(|error| SpeechSessionError::Conversation(error.to_string()))?;
-            let handle = ChatApi::reply(ReplyRequest::new(self.character, event, self.source))
-                .map_err(|error| SpeechSessionError::Conversation(error.to_string()))?;
+            let Some(handle) = ticket.admit(|| {
+                let event = self.api.publish_message(self.character, input)?;
+                self.api
+                    .send(ReplyRequest::new(self.character, event, self.source))
+            }) else {
+                return Ok(None);
+            };
+            let handle =
+                handle.map_err(|error| SpeechSessionError::Conversation(error.to_string()))?;
             let mut cancellation = CancelUnfinished {
                 request: &handle,
                 finished: false,
@@ -139,11 +179,21 @@ impl Drop for PlaybackState {
     }
 }
 
-fn queue_segment(
-    send: &mpsc::Sender<SpeechSegment>,
+struct QueuedSegment {
     segment: SpeechSegment,
+    ticket: SpeechTicket,
+}
+
+fn queue_segment(
+    send: &mpsc::Sender<QueuedSegment>,
+    segment: SpeechSegment,
+    stream: &Arc<SpeechStream>,
 ) -> Result<(), SpeechSessionError> {
-    send.try_send(segment).map_err(|error| match error {
+    send.try_send(QueuedSegment {
+        segment,
+        ticket: stream.ticket(),
+    })
+    .map_err(|error| match error {
         mpsc::error::TrySendError::Full(_) => SpeechSessionError::QueueFull,
         mpsc::error::TrySendError::Closed(_) => SpeechSessionError::DispatchClosed,
     })
@@ -176,8 +226,10 @@ impl SpeechInputHandler {
         mut controls: mpsc::Receiver<SpeechControl>,
         stop: CancellationToken,
     ) -> Result<(), SpeechSessionError> {
-        let (send, mut receive) = mpsc::channel::<SpeechSegment>(2);
+        let stream = SpeechStream::new(stop.clone());
+        let (send, mut receive) = mpsc::channel::<QueuedSegment>(2);
         let worker_stop = stop.clone();
+        let capture_stream = Arc::clone(&stream);
         let playing = Arc::new(AtomicBool::new(false));
         let worker_playing = Arc::clone(&playing);
         let playback_token = Arc::new(Mutex::new(None::<CancellationToken>));
@@ -185,11 +237,14 @@ impl SpeechInputHandler {
         let active_turn = Arc::new(Mutex::new(None::<CancellationToken>));
         let worker_active_turn = Arc::clone(&active_turn);
         let worker = tokio::spawn(async move {
-            while let Some(segment) = receive.recv().await {
+            while let Some(QueuedSegment { segment, ticket }) = receive.recv().await {
                 if worker_stop.is_cancelled() {
                     return Ok(());
                 }
-                let turn_stop = worker_stop.child_token();
+                if !ticket.is_current() {
+                    continue;
+                }
+                let turn_stop = ticket.cancellation().child_token();
                 if let Ok(mut active) = worker_active_turn.lock() {
                     *active = Some(turn_stop.clone());
                 }
@@ -207,7 +262,7 @@ impl SpeechInputHandler {
                     biased;
                     _ = turn_stop.cancelled() => continue,
                     _ = worker_stop.cancelled() => return Ok(()),
-                    result = self.conversation.reply(&transcript) => result?,
+                    result = self.conversation.reply(&ticket, &transcript) => result?,
                 };
                 if let Some(audio) = audio {
                     let playing_token = turn_stop.child_token();
@@ -242,6 +297,9 @@ impl SpeechInputHandler {
                 control = controls.recv(), if controls_open => {
                     match control {
                         Some(SpeechControl::PushToTalk(pressed)) => {
+                            if pressed {
+                                capture_stream.invalidate();
+                            }
                             if pressed && let Ok(active) = active_turn.lock()
                                 && let Some(token) = active.as_ref() { token.cancel(); }
                             if pressed && let Ok(active) = playback_token.lock()
@@ -249,9 +307,10 @@ impl SpeechInputHandler {
                                     token.cancel();
                             }
                             if let Some(segment) = segmenter.set_pressed(pressed)
-                                && let Err(error) = queue_segment(&send, segment) { break Err(error); }
+                                && let Err(error) = queue_segment(&send, segment, &capture_stream) { break Err(error); }
                         }
                         Some(SpeechControl::Reset | SpeechControl::CancelPlayback) => {
+                            capture_stream.invalidate();
                             if let Ok(active) = active_turn.lock()
                                 && let Some(token) = active.as_ref() { token.cancel(); }
                             if let Ok(active) = playback_token.lock()
@@ -271,11 +330,11 @@ impl SpeechInputHandler {
                                 continue;
                             }
                             if let Some(segment) = segmenter.process(frame)
-                                && let Err(error) = queue_segment(&send, segment) { break Err(error); }
+                                && let Err(error) = queue_segment(&send, segment, &capture_stream) { break Err(error); }
                         }
                         Ok(None) => {
                             if let Some(segment) = segmenter.flush()
-                                && let Err(error) = queue_segment(&send, segment) { break Err(error); }
+                                && let Err(error) = queue_segment(&send, segment, &capture_stream) { break Err(error); }
                             break Ok(());
                         }
                         Err(error) => break Err(error.into()),
@@ -290,7 +349,16 @@ impl SpeechInputHandler {
         }
         let dispatch = match match worker_finished {
             Some(result) => result,
-            None => worker.await,
+            None => match timeout(Duration::from_secs(30), &mut worker).await {
+                Ok(result) => result,
+                Err(_) => {
+                    stop.cancel();
+                    worker.abort();
+                    return Err(SpeechSessionError::Task(
+                        "speech dispatch drain exceeded 30 seconds".into(),
+                    ));
+                }
+            },
         } {
             Ok(result) => result,
             Err(error) if stop.is_cancelled() && error.is_cancelled() => Ok(()),
@@ -349,10 +417,11 @@ mod tests {
     impl SpeechConversation for Chat {
         fn reply<'a>(
             &'a self,
+            ticket: &'a SpeechTicket,
             transcript: &'a Transcript,
         ) -> SpeechFuture<'a, Option<AudioArtifact>> {
             Box::pin(async move {
-                self.0.lock().unwrap().push(transcript.text.clone());
+                ticket.admit(|| self.0.lock().unwrap().push(transcript.text.clone()));
                 Ok(None)
             })
         }
@@ -390,5 +459,103 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(&*delivered.lock().unwrap(), &["hello from microphone"]);
+    }
+
+    struct SignalledCapture {
+        frames: mpsc::Receiver<MonoPcm16Frame>,
+        consumed: mpsc::UnboundedSender<()>,
+    }
+
+    impl AudioCapture for SignalledCapture {
+        fn next_frame(&mut self) -> DeviceFuture<'_, Option<MonoPcm16Frame>> {
+            Box::pin(async {
+                let frame = self.frames.recv().await;
+                if frame.is_some() {
+                    let _ = self.consumed.send(());
+                }
+                Ok(frame)
+            })
+        }
+    }
+
+    struct BlockFirstAsr {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        first_started: Arc<tokio::sync::Notify>,
+    }
+
+    impl SpeechTranscriber for BlockFirstAsr {
+        fn transcribe<'a>(&'a self, _wav: &'a [u8]) -> SpeechFuture<'a, Transcript> {
+            Box::pin(async move {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                if call == 0 {
+                    self.first_started.notify_one();
+                    std::future::pending::<()>().await;
+                }
+                Ok(Transcript {
+                    text: format!("utterance {call}"),
+                    language: Some("en".into()),
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn reset_rejects_queued_segments_and_late_asr_before_dispatch() {
+        let delivered = Arc::new(Mutex::new(Vec::new()));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let first_started = Arc::new(tokio::sync::Notify::new());
+        let session = SpeechInputHandler::new(
+            Arc::new(BlockFirstAsr {
+                calls: Arc::clone(&calls),
+                first_started: Arc::clone(&first_started),
+            }),
+            Arc::new(Chat(Arc::clone(&delivered))),
+            Arc::new(SilentPlayback),
+        );
+        let config = SegmentConfig {
+            mode: SpeechMode::Automatic,
+            pre_roll_frames: 0,
+            start_voice_frames: 2,
+            end_silence_frames: 3,
+            min_segment_frames: 2,
+            max_segment_frames: 25,
+        };
+        let (frames_send, frames_receive) = mpsc::channel(64);
+        let (consumed_send, mut consumed_receive) = mpsc::unbounded_channel();
+        let (control_send, control_receive) = mpsc::channel(8);
+        let task = tokio::spawn(session.run(
+            SignalledCapture {
+                frames: frames_receive,
+                consumed: consumed_send,
+            },
+            SpeechSegmenter::new(Gate, config).unwrap(),
+            control_receive,
+            CancellationToken::new(),
+        ));
+        let utterance = [vec![[100; FRAME_SAMPLES]; 5], vec![[0; FRAME_SAMPLES]; 4]].concat();
+        for frame in utterance.iter().copied().chain(utterance.iter().copied()) {
+            frames_send.send(frame).await.unwrap();
+        }
+        for _ in 0..utterance.len() * 2 {
+            tokio::time::timeout(Duration::from_secs(2), consumed_receive.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(2), first_started.notified())
+            .await
+            .unwrap();
+        control_send.send(SpeechControl::Reset).await.unwrap();
+        for &frame in &utterance {
+            frames_send.send(frame).await.unwrap();
+        }
+        drop(frames_send);
+        tokio::time::timeout(Duration::from_secs(3), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(&*delivered.lock().unwrap(), &["utterance 1"]);
     }
 }

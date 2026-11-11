@@ -333,12 +333,14 @@ fn speech_conversation(
 impl SpeechConversation for DesktopTranscriptSink {
     fn reply<'a>(
         &'a self,
+        ticket: &'a neuromita::audio::ticket::SpeechTicket,
         transcript: &'a Transcript,
     ) -> SpeechFuture<'a, Option<neuromita::voice::AudioArtifact>> {
         Box::pin(async move {
-            self.send
-                .send((self.origin, transcript.clone()))
-                .map_err(|_| SpeechSessionError::DispatchClosed)?;
+            if let Some(result) = ticket.admit(|| self.send.send((self.origin, transcript.clone())))
+            {
+                result.map_err(|_| SpeechSessionError::DispatchClosed)?;
+            }
             Ok(None)
         })
     }
