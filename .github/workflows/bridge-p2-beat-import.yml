@@ -1,0 +1,74 @@
+name: P2 Beat Sync guarded source port
+on:
+  push:
+    branches:
+      - bridge/p2-beat-sync-import-20261111
+    paths:
+      - .github/workflows/bridge-p2-beat-import.yml
+
+permissions:
+  contents: write
+
+jobs:
+  port-and-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      BASE_SHA: 4efce2c67b69772ec7a3acb354b41853bca7abee
+      SOURCE_SHA: 3707f42929a98f7e80307129118596bf59228432
+      TARGET: codex/p2-beat-sync-core-port-20261111
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install native link dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq pkg-config libasound2-dev
+      - name: Install pinned Rust
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+          rustup default 1.98.1
+          rustc --version
+      - name: Squash only the 14-file Beat Sync product slice
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin '+refs/heads/main:refs/remotes/origin/main'
+          test "$(git rev-parse refs/remotes/origin/main)" = "$BASE_SHA" || { echo 'main advanced; retry with fresh base'; exit 3; }
+          git fetch origin "+refs/pull/190/head:refs/remotes/origin/p2-beat-source"
+          test "$(git rev-parse refs/remotes/origin/p2-beat-source)" = "$SOURCE_SHA"
+          if git ls-remote --exit-code --heads origin "refs/heads/$TARGET" >/dev/null; then echo 'target exists; refusing overwrite'; exit 4; fi
+          git checkout -B "$TARGET" "$BASE_SHA"
+          git merge --squash --no-commit "$SOURCE_SHA"
+          git diff --cached --check
+          git diff --cached --name-only | sort > /tmp/actual-beat-paths
+          cat > /tmp/expected-beat-paths <<'EOF'
+          .github/workflows/beat-sync-cache.yml
+          docs/01-functional/beat-sync-cache-slice.md
+          src/app.rs
+          src/bin/beat_sync.rs
+          src/game_link.rs
+          src/lib.rs
+          src/music.rs
+          src/music/batch.rs
+          src/music/dsp.rs
+          src/music/runtime.rs
+          src/music/wav.rs
+          tests/beat_sync_cache.rs
+          tests/beat_sync_runtime.rs
+          tests/game_beat_sync.rs
+          EOF
+          sort -o /tmp/expected-beat-paths /tmp/expected-beat-paths
+          diff -u /tmp/expected-beat-paths /tmp/actual-beat-paths
+          cargo fmt --all -- --check
+          cargo check --locked --offline --all-targets
+          cargo test --locked --offline --test beat_sync_cache --test beat_sync_runtime --test game_beat_sync -- --test-threads=2
+          git fetch origin main
+          test "$(git rev-parse refs/remotes/origin/main)" = "$BASE_SHA" || { echo 'main advanced during acceptance'; exit 3; }
+          git -c user.name="P2 Beat Sync Integrator" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "feat(music): port native WAV Beat Sync, GameLink and versioned cache (#29)"
+          test "$(git rev-parse HEAD^)" = "$BASE_SHA"
+          git push origin "HEAD:refs/heads/$TARGET"
+          git log -1 --format='%H %P'
