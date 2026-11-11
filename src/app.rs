@@ -22,6 +22,7 @@ use crate::{
         AiService,
         application::{AiApplicationConfig, AiApplicationError, RunningAiApplication},
         install_coordinator::AiHubInstallCoordinator,
+        installation_owner::InstallationOwner,
         live_speech::{
             LiveSpeechRuntime, LiveSpeechTranscriber, LiveSpeechVoice, watch_speech_settings,
         },
@@ -376,6 +377,7 @@ pub struct ApplicationLifecycle {
     recovery_workers: Arc<ServiceWorkerRegistry>,
     ai_hub_install: Option<Arc<AiHubInstallCoordinator>>,
     ai_hub_native: Option<Arc<AiHubNativeService>>,
+    installation: Option<Arc<InstallationOwner>>,
     id: Uuid,
     stop: CancellationToken,
     completion: Option<oneshot::Receiver<Result<(), ApplicationError>>>,
@@ -753,6 +755,7 @@ struct ApplicationOwner {
     prepared_claims: Vec<WorkerClaim>,
     ai_hub_install: Option<Arc<AiHubInstallCoordinator>>,
     ai_hub_native: Option<Arc<AiHubNativeService>>,
+    installation: Option<Arc<InstallationOwner>>,
     live_speech: Option<Arc<LiveSpeechRuntime>>,
     speech_watch_task: Option<JoinHandle<()>>,
 }
@@ -849,11 +852,28 @@ impl ApplicationLifecycle {
             .into());
         }
         let service_workers = ServiceWorkerRegistry::new();
-        let ai_hub_install = ai_hub_install_root
+        let installation = ai_hub_install_root
             .as_ref()
-            .map(|root| AiHubInstallCoordinator::new(root.clone()));
+            .map(|root| InstallationOwner::new(root.join("AIData")));
+        let ai_hub_install =
+            ai_hub_install_root
+                .as_ref()
+                .zip(installation.as_ref())
+                .map(|(root, owner)| {
+                    AiHubInstallCoordinator::with_installation_owner(
+                        root.clone(),
+                        Arc::clone(owner),
+                    )
+                });
         let ai_hub_native = ai_hub_install_root
-            .map(|root| AiHubNativeService::with_registry(root, Arc::clone(&service_workers)));
+            .zip(installation.as_ref())
+            .map(|(root, owner)| {
+                AiHubNativeService::with_registry_and_installation(
+                    root,
+                    Arc::clone(&service_workers),
+                    Arc::clone(owner),
+                )
+            });
         let finetune = finetune
             .map(|settings| FineTuneCollector::from_settings(&settings))
             .transpose()?;
@@ -1316,6 +1336,7 @@ impl ApplicationLifecycle {
             ))
         });
         let game_link_handle = game_link.as_ref().map(|(_, handle)| handle.clone());
+        let installation_view = installation.clone();
         let mut owner = ApplicationOwner {
             finetune: finetune.clone(),
             releases_task: Some(releases_task),
@@ -1339,6 +1360,7 @@ impl ApplicationLifecycle {
             prepared_claims,
             ai_hub_install: ai_hub_install.clone(),
             ai_hub_native: ai_hub_native.clone(),
+            installation,
             live_speech,
             speech_watch_task,
         };
@@ -1394,6 +1416,7 @@ impl ApplicationLifecycle {
             recovery_workers: Arc::clone(&service_workers),
             ai_hub_install,
             ai_hub_native,
+            installation: installation_view,
             id,
             stop,
             completion: Some(completion),
@@ -1518,6 +1541,11 @@ impl ApplicationLifecycle {
 
     pub fn ai_hub_install(&self) -> Option<&Arc<AiHubInstallCoordinator>> {
         self.ai_hub_install.as_ref()
+    }
+
+    /// One Core-owned read/command boundary shared by Python/native installation.
+    pub fn installation_owner(&self) -> Option<&Arc<InstallationOwner>> {
+        self.installation.as_ref()
     }
 
     pub fn presenter(&self) -> &GuiPresenter {
@@ -1810,6 +1838,9 @@ impl ApplicationOwner {
             && let Err(error) = task.await
         {
             failure = Some(ApplicationError::Task(error.to_string()));
+        }
+        if let Some(installation) = self.installation.take() {
+            installation.shutdown();
         }
         if let Some(native) = self.ai_hub_native.take() {
             native.shutdown().await;

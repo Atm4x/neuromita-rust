@@ -17,6 +17,7 @@ use super::{
         install_reviewed_wheel_stage, preview_install_action,
     },
     install_review::{InstallPreviewError, InstallReviewFence},
+    installation_owner::{InstallComponentKind, InstallationOwner, InstallationTarget},
     speech_catalog::SpeechModelCatalog,
 };
 
@@ -53,10 +54,19 @@ pub struct AiHubInstallCoordinator {
     events: mpsc::UnboundedSender<InstallEvent>,
     receiver: Mutex<Option<mpsc::UnboundedReceiver<InstallEvent>>>,
     stop: CancellationToken,
+    installation: Arc<InstallationOwner>,
 }
 
 impl AiHubInstallCoordinator {
     pub fn new(root: PathBuf) -> Arc<Self> {
+        let installation = InstallationOwner::new(root.join("AIData"));
+        Self::with_installation_owner(root, installation)
+    }
+
+    pub fn with_installation_owner(
+        root: PathBuf,
+        installation: Arc<InstallationOwner>,
+    ) -> Arc<Self> {
         let (events, receiver) = mpsc::unbounded_channel();
         Arc::new(Self {
             catalog: SpeechModelCatalog::for_desktop(root.clone()),
@@ -71,6 +81,7 @@ impl AiHubInstallCoordinator {
             events,
             receiver: Mutex::new(Some(receiver)),
             stop: CancellationToken::new(),
+            installation,
         })
     }
 
@@ -201,18 +212,49 @@ impl AiHubInstallCoordinator {
         if entries.iter().filter(|entry| entry.id == id).count() != 1 {
             return Err("Модель исчезла из актуального каталога");
         }
-        let operation = Uuid::new_v4();
         let action = approved.action;
+        let component = match &action {
+            InstallAction::Overlay => "overlay",
+            InstallAction::Wheel { .. } => "wheel",
+        };
+        let permit = self
+            .installation
+            .begin(InstallationTarget {
+                kind: InstallComponentKind::Package,
+                service: Some(service),
+                module_id: id.clone(),
+                revision: approved.review.identity.plugin_revision.clone(),
+                component: component.into(),
+            })
+            .map_err(|_| "Установка уже выполняется либо журнал недоступен")?;
+        let operation = permit.operation();
         let action_for_worker = action.clone();
         let root = self.root.clone();
         let events = self.events.clone();
         let stop = self.stop.clone();
         let task = tokio::spawn(async move {
-            let result = match &action_for_worker {
-                InstallAction::Overlay => install_reviewed_overlay(&root, &approved.review).await,
-                InstallAction::Wheel { stage_id, backend } => {
-                    install_reviewed_wheel_stage(&root, &approved.review, stage_id, backend).await
-                }
+            let result = tokio::select! {
+                _ = permit.cancellation().cancelled() => Err(InstallPreviewError::Cancelled),
+                result = async {
+                    match &action_for_worker {
+                        InstallAction::Overlay => install_reviewed_overlay(&root, &approved.review).await,
+                        InstallAction::Wheel { stage_id, backend } => {
+                            install_reviewed_wheel_stage(&root, &approved.review, stage_id, backend).await
+                        }
+                    }
+                } => result,
+            };
+            let result = match result {
+                Ok(path) => permit
+                    .complete()
+                    .map(|_| path)
+                    .map_err(|error| InstallPreviewError::Plan(error.to_string())),
+                Err(error) => match permit.fail() {
+                    Ok(()) => Err(error),
+                    Err(journal_error) => Err(InstallPreviewError::Plan(format!(
+                        "{error}; installation journal: {journal_error}"
+                    ))),
+                },
             };
             if !stop.is_cancelled() {
                 let _ = events.send(InstallEvent::Finished {
