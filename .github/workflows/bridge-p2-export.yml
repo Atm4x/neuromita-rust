@@ -22,9 +22,11 @@ jobs:
           for n in 79 77 262 251 257 258 259 323 191 190 76 418; do
             git fetch origin "+refs/pull/$n/head:refs/heads/p2-pr-$n"
           done
-          git bundle create ../out/p2-rust-source.bundle refs/heads/p2-main $(git for-each-ref --format='%(refname)' refs/heads/p2-pr-)
+          PR_REFS=$(git for-each-ref --format='%(refname)' refs/heads | grep '^refs/heads/p2-pr-')
+          test "$(printf '%s\n' "$PR_REFS" | wc -l)" -eq 12
+          git bundle create ../out/p2-rust-source.bundle refs/heads/p2-main $PR_REFS
           git bundle verify ../out/p2-rust-source.bundle
-          git for-each-ref --format='%(refname) %(objectname)' refs/heads/p2-main refs/heads/p2-pr- > ../out/rust-refs.txt
+          git for-each-ref --format='%(refname) %(objectname)' refs/heads | grep -E '^refs/heads/p2-(main|pr-)' > ../out/rust-refs.txt
           cd ..
           git clone --no-checkout --filter=blob:none "https://github.com/Atm4x/NeuroMita.git" python
           cd python
