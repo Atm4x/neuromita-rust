@@ -1,0 +1,47 @@
+name: P1 offline settings exact CLI and Python review acceptance
+on:
+  push:
+    branches:
+      - bridge/p1-offline-cli-qa-20261111
+permissions:
+  contents: read
+jobs:
+  offline-settings:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      RUSTFLAGS: '-C debuginfo=0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 018126a1d52e6f0649041d341de054ae07e7e214
+      - name: Linux FFI dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y pkg-config libasound2-dev libudev-dev
+      - name: Pinned Rust 1.98.1
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+          cargo +1.98.1 --version
+      - name: Format
+        run: cargo +1.98.1 fmt --all -- --check
+      - name: Offline CLI executable tests
+        run: |
+          set -o pipefail
+          cargo +1.98.1 test --locked --offline --test settings_cli -- --test-threads=2 2>&1 | tee p1-settings-cli.log
+      - name: Exact Python review receipt integration tests
+        run: |
+          set -o pipefail
+          cargo +1.98.1 test --locked --offline --test python_settings_import -- --test-threads=2 2>&1 | tee p1-python-review.log
+      - name: Three-file import and rollback integration tests
+        run: |
+          set -o pipefail
+          cargo +1.98.1 test --locked --offline --test python_preset_three_file -- --test-threads=2 2>&1 | tee p1-three-file.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: p1-cli-review-logs
+          path: p1-*.log
+          retention-days: 3
