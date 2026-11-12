@@ -54,7 +54,7 @@ pub enum ToolOption {
 #[path = "chat_fence.rs"]
 pub mod chat_fence;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuideChange {
     Page(u8),
     Level(GuideLevel),
@@ -63,11 +63,11 @@ pub enum GuideChange {
 }
 
 impl GuideChange {
-    fn edit_onboarding(self, state: &mut OnboardingSettings) {
+    fn edit_onboarding(&self, state: &mut OnboardingSettings) {
         match self {
-            Self::Page(page) => state.guide_page = page,
+            Self::Page(page) => state.guide_page = *page,
             Self::Level(level) => {
-                state.guide_level = level;
+                state.guide_level = *level;
                 state.guide_page = 0;
             }
             Self::Complete => state.guide_completed = true,
@@ -75,9 +75,10 @@ impl GuideChange {
         }
     }
 
-    fn apply(self) -> Result<(), SettingsError> {
+    fn apply(&self) -> Result<(), SettingsError> {
         match self {
             Self::Page(page) => {
+                let page = *page;
                 let current = SettingsApi::snapshot::<OnboardingSettings>()?;
                 if usize::from(page)
                     >= neuromita::onboarding::guide::count(current.value.guide_level)
@@ -92,7 +93,7 @@ impl GuideChange {
                 SettingsApi::edit::<OnboardingSettings>(|state| self.edit_onboarding(state))?;
             }
             Self::Language(language) => {
-                SettingsApi::edit::<InterfaceSettings>(|state| state.language = language)?;
+                SettingsApi::edit::<InterfaceSettings>(|state| state.language = language.clone())?;
             }
         }
         Ok(())
