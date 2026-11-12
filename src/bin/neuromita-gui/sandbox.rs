@@ -803,6 +803,11 @@ fn apply_with_catalog(
         Update::GuideCompleted => window.set_onboarding_guide_visible(false),
         Update::PresetSaved(id) => super::settings::saved(window, Some(id)),
         Update::Stopped => {
+            if window.get_onboarding_guide_saving() {
+                window.set_onboarding_guide_saving(false);
+                window.set_onboarding_guide_save_failed(true);
+                window.set_notice("Guide page was not confirmed before Core stopped; retry after restart".into());
+            }
             super::ai_hub::stopped(window);
             let stopped = neuromita::ai_runtime::runtime_status::RuntimeSnapshot::default();
             super::voice::runtime_status(window, &stopped);

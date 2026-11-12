@@ -2318,3 +2318,64 @@ fn failed_gui_shutdown_and_cancellation_report_both_errors_as_pending() {
         })
     );
 }
+
+#[test]
+fn guide_navigation_ack_is_correlated_and_does_not_advance_before_persistence() {
+    use super::super::{memory::MemoryEditor, runtime::Update, sandbox::apply_with_pager};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::AtomicU64,
+    };
+
+    slint::platform::set_platform(Box::new(TestPlatform)).unwrap();
+    let window = AppWindow::new().unwrap();
+    window.set_onboarding_guide_level(0);
+    window.set_onboarding_guide_page(0);
+    window.set_onboarding_guide_request_id(17);
+    window.set_onboarding_guide_saving(true);
+
+    let editor = Arc::new(Mutex::new(MemoryEditor::default()));
+    let revision = Arc::new(AtomicU64::new(0));
+    apply_with_pager(
+        &window,
+        Update::GuidePagePersisted {
+            request_id: 16,
+            page: 2,
+        },
+        &editor,
+        &revision,
+        None,
+    );
+    assert_eq!(window.get_onboarding_guide_page(), 0);
+    assert!(window.get_onboarding_guide_saving());
+
+    apply_with_pager(
+        &window,
+        Update::GuidePageFailed {
+            request_id: 17,
+            error: "simulated flush failure".into(),
+        },
+        &editor,
+        &revision,
+        None,
+    );
+    assert_eq!(window.get_onboarding_guide_page(), 0);
+    assert!(!window.get_onboarding_guide_saving());
+    assert!(window.get_onboarding_guide_save_failed());
+
+    window.set_onboarding_guide_request_id(18);
+    window.set_onboarding_guide_saving(true);
+    apply_with_pager(
+        &window,
+        Update::GuidePagePersisted {
+            request_id: 18,
+            page: 1,
+        },
+        &editor,
+        &revision,
+        None,
+    );
+    assert_eq!(window.get_onboarding_guide_page(), 1);
+    assert!(!window.get_onboarding_guide_saving());
+    assert!(!window.get_onboarding_guide_save_failed());
+}

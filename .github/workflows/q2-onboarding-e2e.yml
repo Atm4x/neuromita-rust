@@ -50,6 +50,14 @@ jobs:
           test -s "$RUNNER_TEMP/q2-altcwd/guide-image-focus-zoom.ppm"
           cp "$RUNNER_TEMP/q2-altcwd/guide-image-focus-zoom.ppm" q2-evidence/guide-focus-altcwd.ppm
           cp "$RUNNER_TEMP/q2-altcwd/wiki-home-ru.ppm" q2-evidence/wiki-home-altcwd.ppm
+      - name: Verify Guide page ACK ordering and failure isolation
+        env:
+          CARGO_BUILD_JOBS: "1"
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: |
+          xvfb-run -a -s "-screen 0 1600x1000x24" cargo +1.98.1 test --locked --features gui --bin neuromita-gui guide_navigation_ack -- --test-threads=1
       - uses: actions/upload-artifact@v4
         if: always()
         with:
