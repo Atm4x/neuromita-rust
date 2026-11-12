@@ -241,12 +241,6 @@ pub fn execute(api: &GuiPresenter, command: Command) -> Result<(), String> {
             .guide_level
             .set(level)
             .map_err(|e| e.to_string())?,
-        Command::SetGuidePage(page) => api
-            .settings
-            .onboarding
-            .guide_page
-            .set(page)
-            .map_err(|e| e.to_string())?,
         Command::SetGuideLanguage(language) => api
             .settings
             .interface

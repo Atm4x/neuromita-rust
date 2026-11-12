@@ -140,7 +140,7 @@ pub enum Command {
     HidePrivate(bool),
     StructuredDisplay(neuromita::settings::StructuredDisplayMode),
     SetGuideLevel(GuideLevel),
-    SetGuidePage(u8),
+    SetGuidePage { request_id: u64, page: u8 },
     SetGuideLanguage(neuromita::settings::Language),
     CompleteGuide,
     SetToolOption(ToolOption, bool),
@@ -245,6 +245,8 @@ pub enum Update {
     AdminSaved,
     GuideError(String),
     GuideCompleted,
+    GuidePagePersisted { request_id: u64, page: u8 },
+    GuidePageFailed { request_id: u64, error: String },
     PresetSaved(PresetId),
     AdminError(String),
     CharacterProfileError(CharacterId, String),
@@ -744,7 +746,26 @@ async fn observe(
                         Err(error) => publish(Update::AdminError(error)),
                     }
                 },
-                Some(command @ (Command::SetGuideLevel(_) | Command::SetGuidePage(_) | Command::SetGuideLanguage(_))) => {
+                Some(Command::SetGuidePage { request_id, page }) => {
+                    let level = administration.settings.onboarding.guide_level.get();
+                    let result = if usize::from(page) >= neuromita::onboarding::guide::count(level) {
+                        Err(format!("Guide page {page} is outside selected level"))
+                    } else {
+                        administration.settings.onboarding.guide_page
+                            .set(page)
+                            .map_err(|error| error.to_string())
+                    };
+                    let result = match result {
+                        Ok(()) => neuromita::settings::SettingsApi::flush().await
+                            .map_err(|error| error.to_string()),
+                        Err(error) => Err(error),
+                    };
+                    match result {
+                        Ok(()) => publish(Update::GuidePagePersisted { request_id, page }),
+                        Err(error) => publish(Update::GuidePageFailed { request_id, error }),
+                    }
+                },
+                Some(command @ (Command::SetGuideLevel(_) | Command::SetGuideLanguage(_))) => {
                     let result = super::settings::execute(administration, command);
                     let result = match result {
                         Ok(()) => neuromita::settings::SettingsApi::flush().await
