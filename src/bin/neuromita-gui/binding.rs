@@ -285,6 +285,9 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
         let Some(window) = guide_window.upgrade() else {
             return;
         };
+        if window.get_onboarding_guide_saving() {
+            return;
+        }
         let runtime = guide_runtime.borrow();
         let Some(runtime) = runtime.as_ref() else {
             window.set_notice("Guide position cannot be saved until Core starts".into());
@@ -294,11 +297,23 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
             window.get_onboarding_guide_level(),
         );
         let page = index.clamp(0, (neuromita::onboarding::guide::count(level) - 1) as i32) as u8;
+        if i32::from(page) == window.get_onboarding_guide_page() {
+            return;
+        }
+        let request_id = window
+            .get_onboarding_guide_request_id()
+            .checked_add(1)
+            .unwrap_or(1);
         match runtime
             .commands
-            .try_send(super::runtime::Command::SetGuidePage(page))
-        {
-            Ok(()) => update_guide(&window, i32::from(page)),
+            .try_send(super::runtime::Command::SetGuidePage {
+                request_id: request_id as u64,
+                page,
+            }) {
+            Ok(()) => {
+                window.set_onboarding_guide_request_id(request_id);
+                window.set_onboarding_guide_saving(true);
+            }
             Err(error) => {
                 window.set_notice(format!("Failed to queue Guide position: {error}").into())
             }
@@ -310,6 +325,9 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
         let Some(window) = guide_window.upgrade() else {
             return;
         };
+        if window.get_onboarding_guide_saving() {
+            return;
+        }
         let runtime = guide_runtime.borrow();
         let Some(runtime) = runtime.as_ref() else {
             window.set_notice("Guide completion requires a running Core".into());
@@ -360,6 +378,9 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
         let Some(window) = guide_window.upgrade() else {
             return;
         };
+        if window.get_onboarding_guide_saving() {
+            return;
+        }
         let level = neuromita::onboarding::guide::GuideLevel::from_index(index);
         if level.index() == window.get_onboarding_guide_level() {
             return;
@@ -383,6 +404,9 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
         let Some(window) = language_window.upgrade() else {
             return;
         };
+        if window.get_onboarding_guide_saving() {
+            return;
+        }
         let language = match code.as_str() {
             "ru" => neuromita::settings::Language::Russian,
             "en" => neuromita::settings::Language::English,

@@ -46,6 +46,9 @@ export component AppWindow inherits Window {
     in property <string> onboarding-eula-text;
     in-out property <bool> onboarding-guide-visible: false;
     in-out property <int> onboarding-guide-page: 0;
+    in-out property <int> onboarding-guide-request-id: 0;
+    in-out property <bool> onboarding-guide-saving: false;
+    in-out property <bool> onboarding-guide-save-failed: false;
     in-out property <int> onboarding-guide-level: 0;
     in property <int> onboarding-guide-count: 3;
     in property <string> onboarding-guide-title;
@@ -369,6 +372,10 @@ export component AppWindow inherits Window {
                 Text {
                     text: root.onboarding-guide-title;
                     color: Theme.text; font-size: 23px; font-weight: 700;
+                }
+                if root.onboarding-guide-saving: Text {
+                    text: root.onboarding-language == "ru" ? "Сохраняется позиция руководства…" : "Saving Guide position…";
+                    color: Theme.muted; font-size: 12px;
                 }
                 HorizontalLayout {
                     spacing: 8px;

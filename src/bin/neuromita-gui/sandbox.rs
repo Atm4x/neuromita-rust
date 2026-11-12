@@ -751,11 +751,13 @@ fn apply_with_catalog(
             super::settings::render_character_debug(window, character, &fields, error.as_deref());
         }
         Update::Administration(snapshot) => {
-            super::binding::sync_guide_position(
-                window,
-                snapshot.settings.values.onboarding.guide_level,
-                snapshot.settings.values.onboarding.guide_page,
-            );
+            if !window.get_onboarding_guide_saving() && !window.get_onboarding_guide_save_failed() {
+                super::binding::sync_guide_position(
+                    window,
+                    snapshot.settings.values.onboarding.guide_level,
+                    snapshot.settings.values.onboarding.guide_page,
+                );
+            }
             super::settings::render(window, &snapshot);
             super::voice::render(window, &snapshot.settings.values.speech.tts);
             super::asr::render(window, &snapshot.settings.values.speech.asr);
@@ -776,9 +778,38 @@ fn apply_with_catalog(
         }
         Update::AdminSaved => super::settings::saved(window, None),
         Update::GuideError(error) => window.set_notice(format!("Guide not saved: {error}").into()),
+        Update::GuidePagePersisted { request_id, page } => {
+            if window.get_onboarding_guide_saving()
+                && window.get_onboarding_guide_request_id() as u64 == request_id
+            {
+                window.set_onboarding_guide_saving(false);
+                window.set_onboarding_guide_save_failed(false);
+                let level = neuromita::onboarding::guide::GuideLevel::from_index(
+                    window.get_onboarding_guide_level(),
+                );
+                super::binding::sync_guide_position(window, level, page);
+            }
+        }
+        Update::GuidePageFailed { request_id, error } => {
+            if window.get_onboarding_guide_saving()
+                && window.get_onboarding_guide_request_id() as u64 == request_id
+            {
+                window.set_onboarding_guide_saving(false);
+                window.set_onboarding_guide_save_failed(true);
+                window
+                    .set_notice(format!("Guide page not saved; retry navigation: {error}").into());
+            }
+        }
         Update::GuideCompleted => window.set_onboarding_guide_visible(false),
         Update::PresetSaved(id) => super::settings::saved(window, Some(id)),
         Update::Stopped => {
+            if window.get_onboarding_guide_saving() {
+                window.set_onboarding_guide_saving(false);
+                window.set_onboarding_guide_save_failed(true);
+                window.set_notice(
+                    "Guide page was not confirmed before Core stopped; retry after restart".into(),
+                );
+            }
             super::ai_hub::stopped(window);
             let stopped = neuromita::ai_runtime::runtime_status::RuntimeSnapshot::default();
             super::voice::runtime_status(window, &stopped);
