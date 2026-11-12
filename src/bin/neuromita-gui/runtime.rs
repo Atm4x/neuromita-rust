@@ -34,7 +34,10 @@ use neuromita::{
         PresetSlot, native_download::NativeDownloadPresenter,
     },
     request::{CancelResult, RequestId},
-    settings::{AsrPreferences, GuideLevel, PresetId, PresetSelection, TtsPreferences, Volume},
+    settings::{
+        AsrPreferences, GuideLevel, InterfaceSettings, OnboardingSettings, PresetId,
+        PresetSelection, SettingsApi, SettingsError, TtsPreferences, Volume,
+    },
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -50,6 +53,51 @@ pub enum ToolOption {
 
 #[path = "chat_fence.rs"]
 pub mod chat_fence;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuideChange {
+    Page(u8),
+    Level(GuideLevel),
+    Language(neuromita::settings::Language),
+    Complete,
+}
+
+impl GuideChange {
+    fn edit_onboarding(self, state: &mut OnboardingSettings) {
+        match self {
+            Self::Page(page) => state.guide_page = page,
+            Self::Level(level) => {
+                state.guide_level = level;
+                state.guide_page = 0;
+            }
+            Self::Complete => state.guide_completed = true,
+            Self::Language(_) => {}
+        }
+    }
+
+    fn apply(self) -> Result<(), SettingsError> {
+        match self {
+            Self::Page(page) => {
+                let current = SettingsApi::snapshot::<OnboardingSettings>()?;
+                if usize::from(page)
+                    >= neuromita::onboarding::guide::count(current.value.guide_level)
+                {
+                    return Err(SettingsError::Validation(format!(
+                        "Guide page {page} is outside selected level"
+                    )));
+                }
+                SettingsApi::edit::<OnboardingSettings>(|state| self.edit_onboarding(state))?;
+            }
+            Self::Level(_) | Self::Complete => {
+                SettingsApi::edit::<OnboardingSettings>(|state| self.edit_onboarding(state))?;
+            }
+            Self::Language(language) => {
+                SettingsApi::edit::<InterfaceSettings>(|state| state.language = language)?;
+            }
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChatOrigin {
@@ -139,13 +187,10 @@ pub enum Command {
     SectionVisibility(neuromita::settings::SettingsArea, bool),
     HidePrivate(bool),
     StructuredDisplay(neuromita::settings::StructuredDisplayMode),
-    SetGuideLevel(GuideLevel),
-    SetGuidePage {
+    ChangeGuide {
         request_id: u64,
-        page: u8,
+        change: GuideChange,
     },
-    SetGuideLanguage(neuromita::settings::Language),
-    CompleteGuide,
     SetToolOption(ToolOption, bool),
     SetToolDepth(u8),
     SetMemoryDedupEnabled(bool),
@@ -246,13 +291,11 @@ pub enum Update {
     },
     PresetCreated(PresetId, PresetRecord),
     AdminSaved,
-    GuideError(String),
-    GuideCompleted,
-    GuidePagePersisted {
+    GuidePersisted {
         request_id: u64,
-        page: u8,
+        change: GuideChange,
     },
-    GuidePageFailed {
+    GuideFailed {
         request_id: u64,
         error: String,
     },
@@ -741,49 +784,15 @@ async fn observe(
                         Err(error) => publish(Update::AdminError(error)),
                     }
                 },
-                Some(Command::CompleteGuide) => {
-                    let result = administration.settings.onboarding.guide_completed
-                        .set(true)
-                        .map_err(|error| error.to_string());
+                Some(Command::ChangeGuide { request_id, change }) => {
+                    let result = change.apply();
                     let result = match result {
-                        Ok(()) => neuromita::settings::SettingsApi::flush().await
-                            .map_err(|error| error.to_string()),
-                        Err(error) => Err(error),
+                        Ok(()) => SettingsApi::flush().await.map_err(|error| error.to_string()),
+                        Err(error) => Err(error.to_string()),
                     };
                     match result {
-                        Ok(()) => publish(Update::GuideCompleted),
-                        Err(error) => publish(Update::AdminError(error)),
-                    }
-                },
-                Some(Command::SetGuidePage { request_id, page }) => {
-                    let level = administration.settings.onboarding.guide_level.get();
-                    let result = if usize::from(page) >= neuromita::onboarding::guide::count(level) {
-                        Err(format!("Guide page {page} is outside selected level"))
-                    } else {
-                        administration.settings.onboarding.guide_page
-                            .set(page)
-                            .map_err(|error| error.to_string())
-                    };
-                    let result = match result {
-                        Ok(()) => neuromita::settings::SettingsApi::flush().await
-                            .map_err(|error| error.to_string()),
-                        Err(error) => Err(error),
-                    };
-                    match result {
-                        Ok(()) => publish(Update::GuidePagePersisted { request_id, page }),
-                        Err(error) => publish(Update::GuidePageFailed { request_id, error }),
-                    }
-                },
-                Some(command @ (Command::SetGuideLevel(_) | Command::SetGuideLanguage(_))) => {
-                    let result = super::settings::execute(administration, command);
-                    let result = match result {
-                        Ok(()) => neuromita::settings::SettingsApi::flush().await
-                            .map_err(|error| error.to_string()),
-                        Err(error) => Err(error),
-                    };
-                    match result {
-                        Ok(()) => publish(Update::AdminSaved),
-                        Err(error) => publish(Update::GuideError(error)),
+                        Ok(()) => publish(Update::GuidePersisted { request_id, change }),
+                        Err(error) => publish(Update::GuideFailed { request_id, error }),
                     }
                 },
                 Some(command @ (Command::DeletePreset(_) | Command::MovePreset(..) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::AssignAllPresets(..) | Command::SelectPromptSet(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_) | Command::SectionVisibility(..) | Command::HidePrivate(_) | Command::StructuredDisplay(_) | Command::SetToolOption(..) | Command::SetToolDepth(_) | Command::SetMemoryDedupEnabled(_) | Command::SetMemoryDedupThreshold(_) | Command::SaveTts(_) | Command::SaveAsr(..) | Command::SaveCharacterVoice(..) | Command::SelectAsrRecognizer(_))) => {
