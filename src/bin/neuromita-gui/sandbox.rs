@@ -806,7 +806,9 @@ fn apply_with_catalog(
             if window.get_onboarding_guide_saving() {
                 window.set_onboarding_guide_saving(false);
                 window.set_onboarding_guide_save_failed(true);
-                window.set_notice("Guide page was not confirmed before Core stopped; retry after restart".into());
+                window.set_notice(
+                    "Guide page was not confirmed before Core stopped; retry after restart".into(),
+                );
             }
             super::ai_hub::stopped(window);
             let stopped = neuromita::ai_runtime::runtime_status::RuntimeSnapshot::default();
