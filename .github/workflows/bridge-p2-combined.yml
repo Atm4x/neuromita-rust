@@ -1,0 +1,56 @@
+name: P2 combined Beat and VAD production acceptance
+on:
+  push:
+    branches: [bridge/p2-combined-main-check-20261112]
+    paths: [.github/workflows/bridge-p2-combined.yml]
+permissions:
+  contents: read
+jobs:
+  combined:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 24
+    env:
+      BASE_SHA: 9e5fa51e9b24a6a7664c05df02b291e87c26bcae
+      BEAT_SHA: 5812f5b335d6d7bfd15e86844ecccc634da73a6c
+      EVAL_SHA: 5431ddd35aeba7ae4b9066d87b7fb25dbf6afea8
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - name: Install native build and headless GUI dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq pkg-config libasound2-dev libfontconfig1-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-0 xvfb xauth jq
+      - name: Pinned Rust 1.98.1
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+          rustup default 1.98.1
+          rustc --version
+      - name: Compose precise sequential merge and test
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'P2 CI Integrator'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin '+refs/heads/main:refs/remotes/origin/main'
+          git fetch origin '+refs/pull/430/head:refs/remotes/origin/p2-beat'
+          git fetch origin '+refs/pull/432/head:refs/remotes/origin/p2-eval'
+          test "$(git rev-parse refs/remotes/origin/main)" = "$BASE_SHA"
+          test "$(git rev-parse refs/remotes/origin/p2-beat)" = "$BEAT_SHA"
+          test "$(git rev-parse refs/remotes/origin/p2-eval)" = "$EVAL_SHA"
+          git checkout -B p2-combined "$BASE_SHA"
+          git merge --no-ff --no-edit "$BEAT_SHA"
+          git merge --no-ff --no-edit "$EVAL_SHA"
+          git diff --check "$BASE_SHA"
+          cargo fmt --all -- --check
+          cargo check --locked --offline --all-targets
+          cargo check --locked --offline --features gui --all-targets
+          cargo test --locked --offline --test beat_sync_cache --test beat_sync_runtime --test game_beat_sync --test audio_pipeline -- --test-threads=2
+          cargo test --locked --offline --lib -- --test-threads=2
+          xvfb-run -a cargo test --locked --offline --features gui --bin neuromita-gui -- --test-threads=2
+          cargo run --locked --offline --example vad_core_eval -- assets/eval/manifest.json 0.5 --validated-only >/tmp/p2-eval.json
+          jq -e '.fixtures | length == 18' /tmp/p2-eval.json
+          git fetch origin main
+          test "$(git rev-parse refs/remotes/origin/main)" = "$BASE_SHA" || { echo 'main advanced; require new merge check'; exit 3; }
+          echo "P2 COMBINED PASS BASE=$BASE_SHA BEAT=$BEAT_SHA EVAL=$EVAL_SHA"
