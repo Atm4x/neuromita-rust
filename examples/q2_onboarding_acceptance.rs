@@ -2,7 +2,16 @@ use std::{
     cell::RefCell, collections::HashSet, error::Error, path::PathBuf, rc::Rc, time::Duration,
 };
 
+use neuromita::settings::{JsonSettingsRepository, Language, SettingsRepository};
 use slint::{ComponentHandle, ModelRc, StyledText, VecModel};
+
+struct ConsentScratch(PathBuf);
+
+impl Drop for ConsentScratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
 mod view {
     slint::include_modules!();
@@ -109,6 +118,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             .ok_or("usage: q2_onboarding_acceptance <output-directory>")?,
     );
     std::fs::create_dir_all(&output)?;
+    let consent_scratch = Rc::new(ConsentScratch(
+        std::env::temp_dir().join(format!("q2-onboarding-eula-{}", uuid::Uuid::new_v4())),
+    ));
+    std::fs::create_dir_all(&consent_scratch.0)?;
+    if !neuromita::onboarding::startup_state(&consent_scratch.0)?.requires_consent {
+        return Err("Fresh GUI acceptance fixture must start without consent".into());
+    }
     slint::BackendSelector::new()
         .backend_name("winit".into())
         .renderer_name("femtovg".into())
@@ -164,11 +180,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     });
     let consent_accepted = Rc::new(RefCell::new(0_usize));
     let accepted = consent_accepted.clone();
+    let accept_failure = Rc::new(RefCell::new(None::<String>));
+    let acceptance_failure = accept_failure.clone();
+    let acceptance_directory = consent_scratch.clone();
     let weak_accept = window.as_weak();
     window.on_onboarding_accept(move || {
         *accepted.borrow_mut() += 1;
         if let Some(window) = weak_accept.upgrade() {
-            window.set_onboarding_required(false);
+            match neuromita::onboarding::accept(
+                &acceptance_directory.0,
+                &window.get_onboarding_language(),
+            ) {
+                Ok(()) => window.set_onboarding_required(false),
+                Err(error) => *acceptance_failure.borrow_mut() = Some(error.to_string()),
+            }
         }
     });
 
@@ -180,6 +205,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let weak = window.as_weak();
     let completed = outcome.clone();
     let t = timer.clone();
+    let consent_for_assertions = consent_scratch.clone();
+    let acceptance_failure_for_assertions = accept_failure.clone();
     timer.start(
         slint::TimerMode::Repeated,
         Duration::from_millis(350),
@@ -255,6 +282,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                         if *consent_rejected.borrow() != 1
                             || *consent_accepted.borrow() != 0
                             || !window.get_onboarding_required()
+                            || consent_for_assertions.0.join("settings.json").exists()
+                            || !neuromita::onboarding::startup_state(&consent_for_assertions.0)?
+                                .requires_consent
                         {
                             return Err("Reject must not dismiss or persist EULA consent".into());
                         }
@@ -262,12 +292,30 @@ fn main() -> Result<(), Box<dyn Error>> {
                     12 => click(&window, 927.0, 607.0),
                     13 => {
                         let _ = shot("eula-accepted")?;
+                        let restarted = neuromita::onboarding::startup_state(
+                            &consent_for_assertions.0,
+                        )?;
+                        let stored = JsonSettingsRepository::new(
+                            consent_for_assertions.0.join("settings.json"),
+                        )
+                        .load()?;
                         if *consent_accepted.borrow() != 1
                             || *consent_rejected.borrow() != 1
                             || window.get_onboarding_required()
+                            || acceptance_failure_for_assertions.borrow().is_some()
+                            || restarted.requires_consent
+                            || !restarted.requires_guide
+                            || restarted.guide_page != 0
+                            || !stored.settings.onboarding.eula_accepted
+                            || stored.settings.interface.language != Language::English
                         {
-                            return Err("Accept callback must dismiss EULA exactly once".into());
+                            return Err(format!(
+                                "Accept click failed to persist offline startup state: {restarted:?}, error={:?}",
+                                acceptance_failure_for_assertions.borrow()
+                            )
+                            .into());
                         }
+                        eprintln!("Offline EULA click persisted; restart skips consent and opens Guide");
                     }
                     14 => {
                         window.set_page(view::PageId::Wiki);
