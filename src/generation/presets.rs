@@ -318,6 +318,8 @@ pub struct PresetGenerationEdit {
     pub protocol: PresetProtocol,
     pub send_temperature: bool,
     pub send_max_output_tokens: bool,
+    pub stream: bool,
+    pub max_retries: u8,
     pub endpoint: String,
     pub model: String,
     pub credential: Option<super::CredentialReference>,
@@ -863,6 +865,8 @@ impl PresetCatalog {
                     };
                     options.send_temperature = edit.send_temperature;
                     options.send_max_output_tokens = edit.send_max_output_tokens;
+                    options.stream = edit.stream;
+                    options.max_retries = edit.max_retries;
                     let definition =
                         PresetDefinition::OpenAi(super::openai::OpenAiPresetDefinition {
                             protocol,
@@ -897,6 +901,8 @@ impl PresetCatalog {
                 };
                 options.send_temperature = edit.send_temperature;
                 options.send_max_output_tokens = edit.send_max_output_tokens;
+                options.stream = edit.stream;
+                options.max_retries = edit.max_retries;
                 PresetDefinition::Gemini(GeminiPresetDefinition {
                     endpoint: edit.endpoint,
                     model: edit.model,
@@ -1014,6 +1020,8 @@ mod tests {
                         temperature: 0.7,
                         max_output_tokens: 128,
                         timeout_ms: 1000,
+                        stream: true,
+                        max_retries: 4,
                     }),
                 },
             )
@@ -1023,6 +1031,17 @@ mod tests {
         let key = reopened.editor_key(id).unwrap().unwrap();
         assert_eq!(key.expose(), "replacement-fixture-key");
         assert!(!format!("{key:?}").contains("replacement-fixture-key"));
+        let saved = reopened
+            .list()
+            .into_iter()
+            .find(|(key, _)| *key == id)
+            .unwrap()
+            .1;
+        let PresetDefinition::Gemini(saved) = saved.definition else {
+            panic!()
+        };
+        assert!(saved.options.stream);
+        assert_eq!(saved.options.max_retries, 4);
         let json = std::fs::read_to_string(directory.join("presets.json")).unwrap();
         assert!(
             !json.contains("original-fixture-key") && !json.contains("replacement-fixture-key")
@@ -1060,6 +1079,8 @@ mod tests {
                         temperature: 1.0,
                         max_output_tokens: 3000,
                         timeout_ms: 1000,
+                        stream: false,
+                        max_retries: 0,
                     }),
                 },
             )
@@ -1075,6 +1096,8 @@ mod tests {
         };
         assert_eq!(config.model, "after");
         assert!(!config.options.send_temperature);
+        assert!(!config.options.stream);
+        assert_eq!(config.options.max_retries, 0);
         assert_eq!(
             config.transforms,
             [super::super::MessageTransform::EnsureAlternatingRoles]
