@@ -27,6 +27,7 @@ jobs:
           rustup toolchain install 1.98.1 --profile minimal --component rustfmt
           rustup default 1.98.1
           rustc --version
+          echo 'P2 Cycle7: rerun exact-main acceptance after repository Actions queue recovery'
       - name: Check merge and run acceptance
         shell: bash
         run: |
