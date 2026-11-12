@@ -1,11 +1,12 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     future::Future,
     pin::Pin,
     sync::Arc,
     time::{Duration, SystemTime},
 };
 
+use serde_json::Value;
 use thiserror::Error;
 
 use super::{
@@ -62,6 +63,8 @@ pub struct GenerationRequest {
     pub context: CharacterContext,
     pub prompt: Option<PreparedPrompt>,
     pub post_dsl: Option<PostDslProgram>,
+    /// Request-local nonlocal SET changes, owned by accepted response only.
+    pub prompt_variables: BTreeMap<String, Value>,
     pub preset: GenerationPreset,
     pub prepared_knowledge: Option<String>,
     pub history_window: Option<HistoryWindow>,
@@ -80,6 +83,7 @@ impl GenerationRequest {
             context,
             prompt: None,
             post_dsl: None,
+            prompt_variables: BTreeMap::new(),
             preset,
             prepared_knowledge,
             history_window: None,
@@ -120,6 +124,11 @@ impl GenerationRequest {
 
     pub fn with_prompt(mut self, prompt: Option<PreparedPrompt>) -> Self {
         self.prompt = prompt;
+        self
+    }
+
+    pub fn with_prompt_variables(mut self, variables: BTreeMap<String, Value>) -> Self {
+        self.prompt_variables = variables;
         self
     }
 }
@@ -331,6 +340,7 @@ impl ResponseGenerator {
             })?;
         let post_dsl = request.post_dsl;
         let model_memory_policy = request.model_memory_policy;
+        let prompt_variables = request.prompt_variables;
         let context_variables = request.context.variables.clone();
         let kind = template.kind();
         let provider = self
@@ -457,7 +467,7 @@ impl ResponseGenerator {
             depth += 1;
             tokio::task::yield_now().await;
         };
-        let (structured, variables) = match post_dsl {
+        let (structured, post_variables) = match post_dsl {
             Some(program) => {
                 let output = match program.apply(structured, &context_variables) {
                     Ok(output) => output,
@@ -474,6 +484,8 @@ impl ResponseGenerator {
             }
             None => (structured, Default::default()),
         };
+        let mut variables = prompt_variables;
+        variables.extend(post_variables);
         match ProposedResponse::from_structured_with_memory_policy(structured, model_memory_policy)
         {
             Ok(response) => Ok(response.with_character_variables(variables)),
