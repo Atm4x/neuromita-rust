@@ -42,4 +42,4 @@ The generated speaker is always included in its own `seen_by`. Other witnesses, 
 - This TCP interface is the current Rust transport adapter, **not** proof that the existing Unity C# client uses the same commands yet; aligning the C# client is a separate integration step.
 - Provider-specific structured output schema parity with the Python application remains incomplete and is not covered by this transport change.
 - Existing historical `ProactiveOpportunity` facts remain readable for old databases, but new `reply/react/initiate` invocations no longer synthesize them.
-- Current `CharacterId` is still a closed two-character enum. Dynamic roster identifiers require a separate domain migration, not ad hoc aliases in the wire adapter.
+- Current `CharacterId` is a closed catalog of nine built-in characters (`Crazy`, `Kind`, `Cappie`, `ShortHair`, `Mila`, `Sleepy`, `Ghost`, `Creepy`, `GameMaster`). Dynamic roster identifiers require a separate domain migration, not ad hoc aliases in the wire adapter.
