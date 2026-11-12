@@ -1,0 +1,50 @@
+name: P2 PTT stale-ASR negative test acceptance
+on:
+  push:
+    branches: [bridge/p2-ptt-smoke-20261112]
+    paths: [.github/workflows/bridge-p2-ptt-smoke.yml]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      SOURCE_SHA: 6ebe7ba55dac006f9f0e8e229bb88357c708c4d8
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - name: Native system packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq pkg-config libasound2-dev libfontconfig1-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-0
+      - name: Install pinned Rust 1.98.1
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+          rustup default 1.98.1
+          rustc --version
+      - name: Compose exact head with current main and verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'P2 CI'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin '+refs/heads/main:refs/remotes/origin/main'
+          git fetch origin '+refs/pull/440/head:refs/remotes/origin/p2-test'
+          BASE_SHA=$(git rev-parse refs/remotes/origin/main)
+          echo "P2 BASE=$BASE_SHA"
+          test "$(git rev-parse refs/remotes/origin/p2-test)" = "$SOURCE_SHA"
+          git checkout -B p2-tested "$BASE_SHA"
+          git merge --no-ff --no-edit "$SOURCE_SHA"
+          git diff --check "$BASE_SHA"
+          cargo fmt --all -- --check
+          cargo check --locked --offline --lib
+          cargo test --locked --offline --lib reset_rejects_queued_segments_and_late_asr_before_dispatch -- --exact --nocapture || cargo test --locked --offline --lib reset_rejects_queued_segments_and_late_asr_before_dispatch -- --nocapture
+          cargo test --locked --offline --lib ptt_press_rejects_queued_segments_and_late_asr_before_dispatch -- --nocapture
+          cargo test --locked --offline --lib -- --test-threads=2
+          cargo check --locked --offline --features gui --all-targets
+          git fetch origin main
+          test "$(git rev-parse refs/remotes/origin/main)" = "$BASE_SHA" || { echo 'main advanced during acceptance'; exit 3; }
+          echo "P2 PTT NEGATIVE CI PASS"
