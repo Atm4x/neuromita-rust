@@ -930,6 +930,8 @@ fn settings_render_and_bindings(window: &AppWindow) {
     assert!(!settings.get_settings_error().is_empty());
     settings.set_settings_error("".into());
     settings.set_preset_max_retries("3".into());
+    settings.set_preset_stream(true);
+    assert!(!settings.get_preset_dirty());
     settings.invoke_preset_edit("7".into());
     super::super::settings::saved(window, None);
     assert_eq!(settings.get_preset_edit_id(), "7");
