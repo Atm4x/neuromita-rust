@@ -300,13 +300,16 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
         if i32::from(page) == window.get_onboarding_guide_page() {
             return;
         }
-        let request_id = window.get_onboarding_guide_request_id()
+        let request_id = window
+            .get_onboarding_guide_request_id()
             .checked_add(1)
             .unwrap_or(1);
-        match runtime.commands.try_send(super::runtime::Command::SetGuidePage {
-            request_id: request_id as u64,
-            page,
-        }) {
+        match runtime
+            .commands
+            .try_send(super::runtime::Command::SetGuidePage {
+                request_id: request_id as u64,
+                page,
+            }) {
             Ok(()) => {
                 window.set_onboarding_guide_request_id(request_id);
                 window.set_onboarding_guide_saving(true);

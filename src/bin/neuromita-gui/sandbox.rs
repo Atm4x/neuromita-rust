@@ -796,7 +796,8 @@ fn apply_with_catalog(
             {
                 window.set_onboarding_guide_saving(false);
                 window.set_onboarding_guide_save_failed(true);
-                window.set_notice(format!("Guide page not saved; retry navigation: {error}").into());
+                window
+                    .set_notice(format!("Guide page not saved; retry navigation: {error}").into());
             }
         }
         Update::GuideCompleted => window.set_onboarding_guide_visible(false),

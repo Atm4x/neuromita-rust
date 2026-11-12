@@ -140,7 +140,10 @@ pub enum Command {
     HidePrivate(bool),
     StructuredDisplay(neuromita::settings::StructuredDisplayMode),
     SetGuideLevel(GuideLevel),
-    SetGuidePage { request_id: u64, page: u8 },
+    SetGuidePage {
+        request_id: u64,
+        page: u8,
+    },
     SetGuideLanguage(neuromita::settings::Language),
     CompleteGuide,
     SetToolOption(ToolOption, bool),
@@ -245,8 +248,14 @@ pub enum Update {
     AdminSaved,
     GuideError(String),
     GuideCompleted,
-    GuidePagePersisted { request_id: u64, page: u8 },
-    GuidePageFailed { request_id: u64, error: String },
+    GuidePagePersisted {
+        request_id: u64,
+        page: u8,
+    },
+    GuidePageFailed {
+        request_id: u64,
+        error: String,
+    },
     PresetSaved(PresetId),
     AdminError(String),
     CharacterProfileError(CharacterId, String),
