@@ -1628,3 +1628,24 @@ mod speech_dispatch_tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod guide_change_tests {
+    use super::*;
+
+    #[test]
+    fn guide_level_reset_updates_page_in_one_section_snapshot() {
+        let mut onboarding = OnboardingSettings::default();
+        onboarding.guide_page = 2;
+        GuideChange::Level(GuideLevel::Full).edit_onboarding(&mut onboarding);
+        assert_eq!(onboarding.guide_level, GuideLevel::Full);
+        assert_eq!(onboarding.guide_page, 0);
+        GuideChange::Page(8).edit_onboarding(&mut onboarding);
+        assert_eq!(onboarding.guide_page, 8);
+        GuideChange::Complete.edit_onboarding(&mut onboarding);
+        assert!(onboarding.guide_completed);
+        GuideChange::Language(neuromita::settings::Language::English)
+            .edit_onboarding(&mut onboarding);
+        assert_eq!(onboarding.guide_page, 8);
+    }
+}
