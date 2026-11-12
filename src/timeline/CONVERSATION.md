@@ -48,9 +48,12 @@ checks in the same guarded append. All fields required by the legacy
 
 This is **not** automatic broadcast. The sender's dialogue roster and real
 witnesses must be supplied by the caller. Unity's live dialogue participant
-rules and network IPC are not implemented here. `React` can currently respond
-to a known character message, but `ReplyRequest` does not yet directly bind its
-trigger to an already-existing character message: ordinary `reply` still
-admits a new player utterance. That dedicated existing-message reply workflow
-remains open in Issue #10. Full Python UI/provider time/metadata parity is
-tracked in Issue #2. Crash recovery is explicitly deferred in Issue #54.
+rules and network IPC are not implemented here. `React` can respond to a known character message or any other observed
+event. `ReplyRequest` binds directly to an already-existing, observed player
+or character message; it **does not** admit a synthetic player utterance.
+The native TCP path is exercised by `tests/local_control.rs` with a
+multi-character message, visibility checks, reset and command replay.
+Issue #10 remains open for the live Unity participant/witness mapping and
+remaining consumer semantics. Full Python UI/provider time/metadata parity
+is tracked in Issue #2. Technical request-state crash recovery is deferred
+in Issue #54.

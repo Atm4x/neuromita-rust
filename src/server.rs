@@ -374,6 +374,15 @@ struct WireAudience {
 }
 
 impl WireAudience {
+    fn normalize(&mut self) {
+        self.targets.sort_unstable();
+        self.targets.dedup();
+        self.participants.sort_unstable();
+        self.participants.dedup();
+        self.seen_by.sort_unstable();
+        self.seen_by.dedup();
+    }
+
     fn into_audience(self, sender: Option<CharacterId>) -> ConversationAudience {
         let mut audience = ConversationAudience::default();
         audience.targets.extend(self.targets);
@@ -383,6 +392,18 @@ impl WireAudience {
             audience.seen_by.insert(character);
         }
         audience
+    }
+}
+
+impl Command {
+    fn normalize_audience(&mut self) {
+        match self {
+            Self::PublishMessage { audience, .. }
+            | Self::Reply { audience, .. }
+            | Self::React { audience, .. }
+            | Self::Initiate { audience, .. } => audience.normalize(),
+            _ => {}
+        }
     }
 }
 
@@ -498,10 +519,11 @@ async fn client(
                 _ = stop.cancelled() => break,
                 line = read_command(&mut reader, config.max_command_bytes.get()) => match line? { Some(line) => line, None => break },
             };
-            let envelope = match decode(&line) {
+            let mut envelope = match decode(&line) {
                 Ok(envelope) => envelope,
                 Err(error) => { send(&outbound, error, &stop).await?; continue; }
             };
+            envelope.command.normalize_audience();
             let fingerprint = serde_json::to_string(&envelope.command).map_err(io::Error::other)?;
             if let Some(receipt) = receipts.iter().find(|receipt| receipt.command_id == envelope.command_id) {
                 if receipt.fingerprint != fingerprint {
