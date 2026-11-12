@@ -18,6 +18,10 @@ harness = false
 name = "gui_snapshot"
 required-features = ["gui"]
 
+[[example]]
+name = "q2_onboarding_acceptance"
+required-features = ["gui"]
+
 [features]
 default = ["sqlite-system"]
 sqlite-system = ["dep:rusqlite"]
