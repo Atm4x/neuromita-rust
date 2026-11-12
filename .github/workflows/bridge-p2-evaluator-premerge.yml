@@ -1,0 +1,52 @@
+name: P2 evaluator exact-main acceptance
+on:
+  push:
+    branches: [bridge/p2-evaluator-premerge-20261112]
+    paths: [.github/workflows/bridge-p2-evaluator-premerge.yml]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 24
+    env:
+      BASE_SHA: 8230fa2592c6ab1b0a4fc2b805a58ae4b1132417
+      SOURCE_SHA: 5431ddd35aeba7ae4b9066d87b7fb25dbf6afea8
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - name: Install audio and GUI native packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev pkg-config libfontconfig1-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-0 xvfb xauth jq
+      - name: Install pinned Rust 1.98.1
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+          rustup default 1.98.1
+          rustc --version
+      - name: Exact-main VAD evaluator acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'P2 CI Integration'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin '+refs/heads/main:refs/remotes/origin/main'
+          git fetch origin '+refs/pull/432/head:refs/remotes/origin/p2-evaluator'
+          test "$(git rev-parse refs/remotes/origin/main)" = "$BASE_SHA"
+          test "$(git rev-parse refs/remotes/origin/p2-evaluator)" = "$SOURCE_SHA"
+          git checkout -B p2-eval-merged "$BASE_SHA"
+          git merge --no-commit --no-ff "$SOURCE_SHA"
+          git diff --check "$BASE_SHA"
+          cargo fmt --all -- --check
+          cargo check --locked --offline --all-targets
+          cargo check --locked --offline --features gui --all-targets
+          cargo test --locked --offline --lib -- --test-threads=2
+          cargo test --locked --offline --test audio_pipeline
+          xvfb-run -a cargo test --locked --offline --features gui --bin neuromita-gui -- --test-threads=2
+          cargo run --locked --offline --example vad_core_eval -- assets/eval/manifest.json 0.50 --validated-only > /tmp/p2-eval.json
+          jq -e '.fixtures | length == 18' /tmp/p2-eval.json
+          git fetch origin main
+          test "$(git rev-parse refs/remotes/origin/main)" = "$BASE_SHA" || { echo 'main advanced during acceptance'; exit 3; }
+          echo "P2 EVALUATOR VERIFIED BASE=$BASE_SHA SOURCE=$SOURCE_SHA"
