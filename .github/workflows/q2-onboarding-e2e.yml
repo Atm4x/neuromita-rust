@@ -1,0 +1,45 @@
+name: Q2 onboarding real AppWindow EULA Wiki scroll screenshots
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/onboarding/**"
+      - "src/bin/neuromita-gui/wiki.rs"
+      - "src/bin/neuromita-gui/binding.rs"
+      - "ui/pages/wiki.slint"
+      - "examples/q2_onboarding_acceptance.rs"
+      - ".github/workflows/q2-onboarding-*.yml"
+  workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  q2-gui-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.98.1 and Slint OS dependencies
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libfontconfig1-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev libx11-dev libxcb1-dev xvfb mesa-utils
+      - name: Rustfmt and full AppWindow interactive scroll fixture
+        env:
+          CARGO_BUILD_JOBS: "1"
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: |
+          cargo +1.98.1 fmt --all -- --check
+          mkdir -p q2-evidence
+          xvfb-run -a -s "-screen 0 1600x1000x24" cargo +1.98.1 run --locked --features gui --example q2_onboarding_acceptance -- q2-evidence
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: q2-onboarding-appwindow-screenshots
+          path: q2-evidence/
+          retention-days: 3
+          if-no-files-found: warn
