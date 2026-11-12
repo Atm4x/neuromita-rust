@@ -407,6 +407,8 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
                 ui.set_preset_temperature("".into());
                 ui.set_preset_tokens("".into());
                 ui.set_preset_timeout("".into());
+                ui.set_preset_stream(false);
+                ui.set_preset_max_retries("2".into());
             } else if ui
                 .get_preset_templates()
                 .iter()
@@ -530,6 +532,13 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
                     protocol: template.protocol,
                     send_temperature: window.get_preset_temperature_enabled(),
                     send_max_output_tokens: window.get_preset_tokens_enabled(),
+                    stream: window.get_preset_stream(),
+                    max_retries: window
+                        .get_preset_max_retries()
+                        .parse::<u8>()
+                        .ok()
+                        .filter(|count| *count <= 4)
+                        .ok_or("Retry count must be in 0..=4")?,
                     endpoint: window.get_preset_endpoint().into(),
                     model: window.get_preset_model().into(),
                     credential: None,
@@ -1067,6 +1076,8 @@ pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {
             template_id: record.template_id.into(),
             temperature_enabled: record.send_temperature,
             tokens_enabled: record.send_max_output_tokens,
+            stream: record.stream,
+            max_retries: record.max_retries.to_string().into(),
             id: record.id.0.to_string().into(),
             name: record.name.as_str().into(),
             model: record.model.as_str().into(),
@@ -1135,6 +1146,8 @@ fn mark_preset_baseline(ui: &SettingsUi) {
     ui.set_preset_baseline_temperature(ui.get_preset_temperature());
     ui.set_preset_baseline_tokens(ui.get_preset_tokens());
     ui.set_preset_baseline_timeout(ui.get_preset_timeout());
+    ui.set_preset_baseline_stream(ui.get_preset_stream());
+    ui.set_preset_baseline_max_retries(ui.get_preset_max_retries());
 }
 
 fn select_preset(ui: &SettingsUi, record: &PresetItem) {
@@ -1156,6 +1169,8 @@ fn select_preset(ui: &SettingsUi, record: &PresetItem) {
     ui.set_preset_temperature(record.temperature.clone());
     ui.set_preset_tokens(record.tokens.clone());
     ui.set_preset_timeout(record.timeout.clone());
+    ui.set_preset_stream(record.stream);
+    ui.set_preset_max_retries(record.max_retries.clone());
     ui.set_preset_template_id("".into());
     ui.set_preset_template_name("".into());
     ui.set_preset_provider_icon("".into());
@@ -1194,6 +1209,8 @@ pub fn clear_preset(ui: &SettingsUi) {
     ui.set_preset_temperature("".into());
     ui.set_preset_tokens("".into());
     ui.set_preset_timeout("".into());
+    ui.set_preset_stream(false);
+    ui.set_preset_max_retries("2".into());
     ui.set_preset_template_id("".into());
     ui.set_preset_template_name("".into());
     ui.set_preset_provider_icon("".into());
@@ -1211,6 +1228,8 @@ pub fn created(window: &AppWindow, id: PresetId, record: &PresetRecord) {
         template_id: "".into(),
         temperature_enabled: false,
         tokens_enabled: false,
+        stream: false,
+        max_retries: "2".into(),
         id: id.0.to_string().into(),
         name: record.name.as_str().into(),
         model: "".into(),
