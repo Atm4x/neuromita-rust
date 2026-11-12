@@ -7,11 +7,55 @@ export struct WikiArticleEntry {
     title: string,
 }
 
+export struct WikiSection {
+    id: string,
+    title: string,
+    level: int,
+    text: styled-text,
+}
+
+export struct WikiHomeCardEntry {
+    title: string,
+    description: string,
+    destination: string,
+}
+
+component WikiHomeTile inherits Rectangle {
+    in property <WikiHomeCardEntry> card;
+    callback chosen(string);
+    callback wheel-scroll(length);
+    height: 136px;
+    background: Theme.hover;
+    border-width: 1px;
+    border-color: Theme.border;
+    border-radius: 12px;
+    VerticalLayout {
+        padding: 17px;
+        spacing: 9px;
+        Text { text: root.card.title; color: Theme.text; font-size: 17px; font-weight: 700; wrap: word-wrap; }
+        Text { text: root.card.description; color: Theme.muted; font-size: 13px; wrap: word-wrap; }
+    }
+    TouchArea {
+        width: parent.width;
+        height: parent.height;
+        clicked => { root.chosen(root.card.destination); }
+        scroll-event(event) => {
+            root.wheel-scroll(event.delta-y);
+            return accept;
+        }
+    }
+}
+
 export component WikiReader inherits Rectangle {
     in property <[WikiArticleEntry]> articles;
+    in property <[WikiHomeCardEntry]> home-left;
+    in property <[WikiHomeCardEntry]> home-right;
     in property <string> current-article;
     in property <string> current-title;
     in property <styled-text> article-text;
+    in property <[WikiSection]> sections;
+    in property <int> scroll-target: 0;
+    in property <int> scroll-revision: 0;
     in property <string> language: "ru";
     in property <bool> can-back;
     in property <bool> can-forward;
@@ -112,19 +156,88 @@ export component WikiReader inherits Rectangle {
                     }
                 }
                 Rectangle { height: 1px; background: Theme.divider; }
-                ScrollView {
+                if root.current-article == "index.md": home-scroll := ScrollView {
                     vertical-stretch: 1;
                     content-width: self.visible-width;
-                    StyledText {
-                        x: 10px;
-                        y: 10px;
-                        width: parent.width - 20px;
-                        height: self.preferred-height;
-                        text: root.article-text;
-                        default-color: Theme.text;
-                        default-font-size: 14px;
-                        link-color: Theme.accent-hover;
-                        link-clicked(url) => { root.open-link(url); }
+                    content-height: max(self.visible-height, home-layout.preferred-height + 60px);
+                    home-layout := VerticalLayout {
+                        x: 12px; y: 12px;
+                        width: max(1px, parent.width - 24px);
+                        spacing: 18px;
+                        Text {
+                            text: root.language == "ru" ? "Что вы хотите настроить?" : "What would you like to configure?";
+                            color: Theme.text; font-size: 23px; font-weight: 700;
+                        }
+                        HorizontalLayout {
+                            spacing: 12px;
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                spacing: 12px;
+                                for card in root.home-left: WikiHomeTile {
+                                    card: card;
+                                    chosen(target) => { root.open-link(target); }
+                                    wheel-scroll(delta) => {
+                                        home-scroll.content-y = clamp(
+                                            home-scroll.content-y + delta,
+                                            min(0px, home-scroll.visible-height - home-scroll.content-height),
+                                            0px
+                                        );
+                                    }
+                                }
+                            }
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                spacing: 12px;
+                                for card in root.home-right: WikiHomeTile {
+                                    card: card;
+                                    chosen(target) => { root.open-link(target); }
+                                    wheel-scroll(delta) => {
+                                        home-scroll.content-y = clamp(
+                                            home-scroll.content-y + delta,
+                                            min(0px, home-scroll.visible-height - home-scroll.content-height),
+                                            0px
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if root.current-article != "index.md": article-scroll := ScrollView {
+                    vertical-stretch: 1;
+                    content-width: self.visible-width;
+                    content-height: max(self.visible-height, article-layout.preferred-height + 28px);
+                    private property <string> observed-article: root.current-article;
+                    changed observed-article => { article-scroll.content-y = 0px; }
+                    article-layout := VerticalLayout {
+                        x: 10px; y: 10px;
+                        width: max(1px, article-scroll.visible-width - 36px);
+                        spacing: 15px;
+                        for section[index] in root.sections: VerticalLayout {
+                            spacing: 7px;
+                            private property <int> observed-revision: root.scroll-revision;
+                            changed observed-revision => {
+                                if index == root.scroll-target {
+                                    article-scroll.content-y = max(article-scroll.visible-height - article-scroll.content-height, -self.y - 10px);
+                                }
+                            }
+                            Text {
+                                text: section.title;
+                                color: Theme.text;
+                                font-size: section.level == 1 ? 25px : 18px;
+                                font-weight: 700;
+                                wrap: word-wrap;
+                            }
+                            StyledText {
+                                width: parent.width;
+                                height: self.preferred-height;
+                                text: section.text;
+                                default-color: Theme.text;
+                                default-font-size: 14px;
+                                link-color: Theme.accent-hover;
+                                link-clicked(url) => { root.open-link(url); }
+                            }
+                        }
                     }
                 }
             }
