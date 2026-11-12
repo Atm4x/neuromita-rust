@@ -1,4 +1,4 @@
-use std::{cell::RefCell, error::Error, path::PathBuf, rc::Rc, time::Duration};
+use std::{cell::RefCell, collections::HashSet, error::Error, path::PathBuf, rc::Rc, time::Duration};
 
 use slint::{ComponentHandle, ModelRc, StyledText, VecModel};
 
@@ -35,6 +35,34 @@ fn assert_changed(before: &[u8], after: &[u8], scenario: &str) -> Result<(), Str
         return Err(format!("{scenario}: only {changed} pixels changed"));
     }
     eprintln!("{scenario}: {changed} changed pixels");
+    Ok(())
+}
+
+fn assert_bundled_guide_image(image: &[u8], scale: f32) -> Result<(), String> {
+    let width = (1180.0 * scale).round() as usize;
+    let height = (680.0 * scale).round() as usize;
+    if image.len() != width * height * 4 {
+        return Err("Guide snapshot buffer dimensions do not match the window".into());
+    }
+    let step = (4.0 * scale).round().max(1.0) as usize;
+    let left = (458.0 * scale).round() as usize;
+    let right = (722.0 * scale).round() as usize;
+    let top = (195.0 * scale).round() as usize;
+    let bottom = (357.0 * scale).round() as usize;
+    let mut distinct = HashSet::new();
+    for y in (top..bottom).step_by(step) {
+        for x in (left..right).step_by(step) {
+            let offset = (y * width + x) * 4;
+            distinct.insert(&image[offset..offset + 3]);
+        }
+    }
+    eprintln!("Bundled Guide image distinct sampled colors: {}", distinct.len());
+    if distinct.len() < 80 {
+        return Err(format!(
+            "Bundled Guide screenshot appears missing: only {} sampled colors",
+            distinct.len()
+        ));
+    }
     Ok(())
 }
 
@@ -347,7 +375,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         window.set_onboarding_guide_visible(true);
                     }
                     27 => {
-                        let _ = shot("guide-before-wiki")?;
+                        let image = shot("guide-before-wiki")?;
+                        assert_bundled_guide_image(&image, ui_scale)?;
                     }
                     28 => click(&window, 220.0, 611.0),
                     29 => {
