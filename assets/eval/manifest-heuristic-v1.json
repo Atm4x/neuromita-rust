@@ -1,0 +1,230 @@
+{
+  "fixtures": [
+    {
+      "id": "fleurs-ru-1554",
+      "category": "ru",
+      "wav": "ru-01.wav",
+      "role": "calibration",
+      "speech": [
+        {
+          "start_sample": 29760,
+          "end_sample": 96480
+        }
+      ]
+    },
+    {
+      "id": "fleurs-ru-1615",
+      "category": "ru",
+      "wav": "ru-02.wav",
+      "role": "calibration",
+      "speech": [
+        {
+          "start_sample": 10080,
+          "end_sample": 43200
+        },
+        {
+          "start_sample": 50880,
+          "end_sample": 97440
+        }
+      ]
+    },
+    {
+      "id": "fleurs-ru-1587",
+      "category": "ru",
+      "wav": "ru-03.wav",
+      "role": "calibration",
+      "speech": [
+        {
+          "start_sample": 12000,
+          "end_sample": 70560
+        }
+      ]
+    },
+    {
+      "id": "fleurs-ru-1651",
+      "category": "ru",
+      "wav": "ru-04.wav",
+      "role": "heldout",
+      "speech": [
+        {
+          "start_sample": 10560,
+          "end_sample": 85920
+        },
+        {
+          "start_sample": 91680,
+          "end_sample": 119040
+        }
+      ]
+    },
+    {
+      "id": "fleurs-ru-1560",
+      "category": "ru",
+      "wav": "ru-05.wav",
+      "role": "heldout",
+      "speech": [
+        {
+          "start_sample": 15360,
+          "end_sample": 44160
+        },
+        {
+          "start_sample": 51360,
+          "end_sample": 75360
+        },
+        {
+          "start_sample": 84000,
+          "end_sample": 90240
+        }
+      ]
+    },
+    {
+      "id": "fleurs-ru-1534",
+      "category": "ru",
+      "wav": "ru-06.wav",
+      "role": "heldout",
+      "speech": [
+        {
+          "start_sample": 17280,
+          "end_sample": 60000
+        },
+        {
+          "start_sample": 66720,
+          "end_sample": 74880
+        },
+        {
+          "start_sample": 86400,
+          "end_sample": 121440
+        }
+      ]
+    },
+    {
+      "id": "fleurs-en-1548",
+      "category": "en",
+      "wav": "en-01.wav",
+      "role": "calibration",
+      "speech": [
+        {
+          "start_sample": 18240,
+          "end_sample": 62400
+        },
+        {
+          "start_sample": 68640,
+          "end_sample": 86880
+        }
+      ]
+    },
+    {
+      "id": "fleurs-en-1510",
+      "category": "en",
+      "wav": "en-02.wav",
+      "role": "calibration",
+      "speech": [
+        {
+          "start_sample": 12960,
+          "end_sample": 117120
+        }
+      ]
+    },
+    {
+      "id": "fleurs-en-1578",
+      "category": "en",
+      "wav": "en-03.wav",
+      "role": "calibration",
+      "speech": [
+        {
+          "start_sample": 6240,
+          "end_sample": 41760
+        },
+        {
+          "start_sample": 49440,
+          "end_sample": 57600
+        }
+      ]
+    },
+    {
+      "id": "fleurs-en-1652",
+      "category": "en",
+      "wav": "en-04.wav",
+      "role": "heldout",
+      "speech": [
+        {
+          "start_sample": 12000,
+          "end_sample": 57120
+        }
+      ]
+    },
+    {
+      "id": "fleurs-en-1531",
+      "category": "en",
+      "wav": "en-05.wav",
+      "role": "heldout",
+      "speech": [
+        {
+          "start_sample": 1440,
+          "end_sample": 64320
+        }
+      ]
+    },
+    {
+      "id": "fleurs-en-1528",
+      "category": "en",
+      "wav": "en-06.wav",
+      "role": "heldout",
+      "speech": [
+        {
+          "start_sample": 5760,
+          "end_sample": 54720
+        },
+        {
+          "start_sample": 60000,
+          "end_sample": 98880
+        },
+        {
+          "start_sample": 104640,
+          "end_sample": 107520
+        }
+      ]
+    },
+    {
+      "id": "esc10-dog",
+      "category": "noise",
+      "wav": "noise-01-dog.wav",
+      "role": "heldout",
+      "speech": []
+    },
+    {
+      "id": "esc10-crackling_fire",
+      "category": "noise",
+      "wav": "noise-02-crackling_fire.wav",
+      "role": "heldout",
+      "speech": []
+    },
+    {
+      "id": "esc10-rain",
+      "category": "noise",
+      "wav": "noise-03-rain.wav",
+      "role": "heldout",
+      "speech": []
+    },
+    {
+      "id": "esc10-clock_tick",
+      "category": "noise",
+      "wav": "noise-04-clock_tick.wav",
+      "role": "heldout",
+      "speech": []
+    },
+    {
+      "id": "esc10-rooster",
+      "category": "noise",
+      "wav": "noise-05-rooster.wav",
+      "role": "heldout",
+      "speech": []
+    },
+    {
+      "id": "esc10-sea_waves",
+      "category": "noise",
+      "wav": "noise-06-sea_waves.wav",
+      "role": "heldout",
+      "speech": []
+    }
+  ]
+}
