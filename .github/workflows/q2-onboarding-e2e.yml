@@ -34,8 +34,22 @@ jobs:
           LIBGL_ALWAYS_SOFTWARE: "1"
         run: |
           cargo +1.98.1 fmt --all -- --check
+          cargo +1.98.1 build --locked --features gui --example q2_onboarding_acceptance
           mkdir -p q2-evidence
-          xvfb-run -a -s "-screen 0 1600x1000x24" cargo +1.98.1 run --locked --features gui --example q2_onboarding_acceptance -- q2-evidence
+          xvfb-run -a -s "-screen 0 1600x1000x24" ./target/debug/examples/q2_onboarding_acceptance q2-evidence
+      - name: Re-run packaged Guide/Wiki from unrelated working directory
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/q2-altcwd"
+          (
+            cd "$RUNNER_TEMP"
+            xvfb-run -a -s "-screen 0 1600x1000x24" "$GITHUB_WORKSPACE/target/debug/examples/q2_onboarding_acceptance" "$RUNNER_TEMP/q2-altcwd"
+          )
+          test -s "$RUNNER_TEMP/q2-altcwd/guide-image-focus-zoom.ppm"
+          cp "$RUNNER_TEMP/q2-altcwd/guide-image-focus-zoom.ppm" q2-evidence/guide-focus-altcwd.ppm
+          cp "$RUNNER_TEMP/q2-altcwd/wiki-home-ru.ppm" q2-evidence/wiki-home-altcwd.ppm
       - uses: actions/upload-artifact@v4
         if: always()
         with:

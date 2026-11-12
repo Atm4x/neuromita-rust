@@ -444,8 +444,10 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
     });
     let reject_window = window.as_weak();
     window.on_onboarding_reject(move || {
-        if let Some(window) = reject_window.upgrade() {
-            let _ = window.hide();
+        if let Err(error) = slint::quit_event_loop() {
+            if let Some(window) = reject_window.upgrade() {
+                window.set_notice(format!("Cannot exit after EULA rejection: {error}").into());
+            }
         }
     });
     let handler = dispatch.clone();

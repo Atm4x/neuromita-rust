@@ -1,0 +1,58 @@
+name: Q2 Windows interactive native probe
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/bin/neuromita-gui/binding.rs"
+      - "examples/q2_onboarding_acceptance.rs"
+      - ".github/workflows/q2-onboarding-windows-e2e-probe.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  windows-interactive-probe:
+    runs-on: windows-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.98.1
+        shell: pwsh
+        run: rustup toolchain install 1.98.1 --profile minimal
+      - name: Compile real Slint AppWindow E2E example on Windows
+        env:
+          CARGO_BUILD_JOBS: "2"
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        shell: pwsh
+        run: |
+          cargo +1.98.1 build --locked --features gui --example q2_onboarding_acceptance
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Try real Win32 pointer/keyboard EULA and Guide interaction
+        continue-on-error: true
+        timeout-minutes: 4
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP "q2-windows-evidence"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $exe = Join-Path $env:GITHUB_WORKSPACE "target\debug\examples\q2_onboarding_acceptance.exe"
+          $stdout = Join-Path $out "stdout.log"
+          $stderr = Join-Path $out "stderr.log"
+          $p = Start-Process -FilePath $exe -ArgumentList $out -WorkingDirectory $env:RUNNER_TEMP -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+          if (-not $p.WaitForExit(120000)) {
+            $p.Kill()
+            throw "Windows runner cannot complete interactive GUI in 120s"
+          }
+          Get-Content $stdout -ErrorAction SilentlyContinue
+          Get-Content $stderr -ErrorAction SilentlyContinue
+          if ($p.ExitCode -ne 0) { throw "Windows GUI E2E exit code $($p.ExitCode)" }
+          if (-not (Test-Path (Join-Path $out "guide-image-focus-zoom.ppm"))) { throw "Guide image snapshot missing" }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: q2-windows-interactive-probe
+          path: "${{ runner.temp }}/q2-windows-evidence/"
+          retention-days: 3
+          if-no-files-found: warn
