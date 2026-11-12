@@ -829,7 +829,8 @@ fn apply_with_catalog(
                 window.set_onboarding_guide_saving(false);
                 window.set_onboarding_guide_save_failed(true);
                 window.set_notice(
-                    "Guide change was not confirmed before Core stopped; retry after restart".into(),
+                    "Guide change was not confirmed before Core stopped; retry after restart"
+                        .into(),
                 );
             }
             super::ai_hub::stopped(window);

@@ -598,10 +598,12 @@ fn queue_guide_change(
         .get_onboarding_guide_request_id()
         .checked_add(1)
         .unwrap_or(1);
-    match runtime.commands.try_send(super::runtime::Command::ChangeGuide {
-        request_id: request_id as u64,
-        change,
-    }) {
+    match runtime
+        .commands
+        .try_send(super::runtime::Command::ChangeGuide {
+            request_id: request_id as u64,
+            change,
+        }) {
         Ok(()) => {
             window.set_onboarding_guide_request_id(request_id);
             window.set_onboarding_guide_saving(true);
