@@ -4,6 +4,10 @@ use crate::{
     character::CharacterId,
     game_context::GameRuntimeContext,
     identity::EventId,
+    music::{
+        BeatBackend, BeatCache,
+        runtime::{BeatRuntime, MusicJob},
+    },
     request::{
         InitiateRequest, ReactRequest, ReplyRequest, RequestHandle, RequestOutcome, RequestSource,
         RequestState,
@@ -23,6 +27,7 @@ use std::{
     collections::HashMap,
     io,
     net::SocketAddr,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -438,6 +443,22 @@ enum GameCommand {
     },
     Ping {},
     GetGameSettings {},
+    GetMusicBeatStatus {},
+    GetMusicBeats {
+        request_id: Uuid,
+        audio_path: String,
+        #[serde(default)]
+        track_name: String,
+        #[serde(default = "default_beat_stream")]
+        stream: bool,
+        #[serde(default = "default_beat_confidence")]
+        min_confidence: f32,
+        #[serde(default = "default_beat_backend")]
+        backend: BeatBackend,
+    },
+    CancelMusicBeats {
+        request_id: Uuid,
+    },
     PublishMessage {
         event_id: Uuid,
         occurred_at_unix_ms: u64,
@@ -493,6 +514,16 @@ enum GameCommand {
         error: Option<String>,
     },
 }
+fn default_beat_stream() -> bool {
+    true
+}
+fn default_beat_backend() -> BeatBackend {
+    BeatBackend::Auto
+}
+fn default_beat_confidence() -> f32 {
+    0.2
+}
+
 #[derive(Deserialize)]
 struct Frame {
     command_id: Uuid,
@@ -543,13 +574,77 @@ fn request_frame(snapshot: &crate::request::RequestSnapshot, session_id: Uuid) -
     frame
 }
 
+/// Opt-in Beat Sync scope for a game session. No arbitrary file paths can be
+/// opened outside the canonical music root. Default GameLink has no Beat Sync.
+#[derive(Clone)]
+pub struct GameBeatConfig {
+    pub media_root: PathBuf,
+    pub cache_root: PathBuf,
+    pub enabled: bool,
+}
+
+struct GameBeatService {
+    media_root: PathBuf,
+    runtime: BeatRuntime,
+    enabled: bool,
+    permits: Arc<Semaphore>,
+}
+
+impl GameBeatService {
+    fn new(config: GameBeatConfig) -> io::Result<Self> {
+        let root = std::fs::canonicalize(config.media_root)?;
+        if !root.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "music root is not a directory",
+            ));
+        }
+        Ok(Self {
+            media_root: root,
+            runtime: BeatRuntime::new(BeatCache::new(config.cache_root)),
+            enabled: config.enabled,
+            permits: Arc::new(Semaphore::new(2)),
+        })
+    }
+    fn resolve_source(&self, source: &str) -> io::Result<PathBuf> {
+        let path = Path::new(source);
+        let candidate = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.media_root.join(path)
+        };
+        let resolved = std::fs::canonicalize(candidate)?;
+        if !resolved.starts_with(&self.media_root)
+            || !resolved.is_file()
+            || resolved
+                .extension()
+                .is_none_or(|ext| !ext.eq_ignore_ascii_case("wav"))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "music source is not an allowed WAV",
+            ));
+        }
+        Ok(resolved)
+    }
+}
+
 pub struct GameLinkLifecycle {
     listener: TcpListener,
     config: GameLinkConfig,
     sessions: Arc<Sessions>,
+    beats: Option<Arc<GameBeatService>>,
 }
 impl GameLinkLifecycle {
     pub async fn bind(config: GameLinkConfig) -> io::Result<(Self, GameLinkHandle)> {
+        Self::bind_with_beats(config, None).await
+    }
+
+    pub async fn bind_with_beats(
+        config: GameLinkConfig,
+        music: Option<GameBeatConfig>,
+    ) -> io::Result<(Self, GameLinkHandle)> {
+        let beats = music.map(GameBeatService::new).transpose()?.map(Arc::new);
         if !config.bind.ip().is_loopback() {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -563,6 +658,7 @@ impl GameLinkLifecycle {
                 listener,
                 config,
                 sessions: Arc::new(Sessions::default()),
+                beats,
             },
             GameLinkHandle { address },
         ))
@@ -595,7 +691,8 @@ impl GameLinkLifecycle {
                     let api = Arc::clone(&api);
                     let config = self.config;
                     let connection_stop = stop.child_token();
-                    connections.spawn(async move { let _permit = permit; let _ = client(stream,config,sessions,api,connection_stop).await; });
+                    let beats = self.beats.clone();
+                    connections.spawn(async move { let _permit = permit; let _ = client(stream,config,sessions,api,connection_stop,beats).await; });
                 }
             }
         }
@@ -611,8 +708,10 @@ async fn client(
     sessions: Arc<Sessions>,
     api: Arc<ApiBindings>,
     stop: CancellationToken,
+    beats: Option<Arc<GameBeatService>>,
 ) -> io::Result<()> {
     let connection = Uuid::new_v4();
+    let beat_jobs = Arc::new(Mutex::new(HashMap::<Uuid, CancellationToken>::new()));
     let (read, mut write) = stream.into_split();
     let (tx, mut rx) = mpsc::channel::<Value>(config.outbound_capacity.max(1));
     let connection_stop = stop.child_token();
@@ -776,6 +875,107 @@ async fn client(
                                 None=>tx.send(error(Some(id),"ownership_denied","request is not owned by game session")).await.map_err(io::Error::other)?,
                             }
                         }
+                        GameCommand::GetMusicBeatStatus {} => {
+                            let (enabled, root) = beats.as_ref().map_or((false, None), |service| (
+                                service.enabled, Some(service.media_root.to_string_lossy().to_string()),
+                            ));
+                            tx.send(json!({
+                                "type":"music_beats_status",
+                                "command_id":id,
+                                "enabled":enabled,
+                                "available_backends":["dsp"],
+                                "unavailable_backends":["beat_this","librosa"],
+                                "model_loaded":false,
+                                "max_source_bytes":crate::music::runtime::MAX_SOURCE_BYTES,
+                                "media_root":root,
+                            })).await.map_err(io::Error::other)?;
+                        }
+                        GameCommand::GetMusicBeats { request_id, audio_path, track_name, stream, min_confidence, backend } => {
+                            let Some(service) = &beats else {
+                                tx.send(error(Some(id),"beat_disabled","Beat Sync is not configured")).await.map_err(io::Error::other)?;
+                                continue;
+                            };
+                            if !service.enabled {
+                                tx.send(error(Some(id),"beat_disabled","Beat Sync is disabled")).await.map_err(io::Error::other)?;
+                                continue;
+                            }
+                            if !min_confidence.is_finite() || !(0.0..=1.0).contains(&min_confidence) {
+                                tx.send(error(Some(id),"invalid_confidence","min_confidence must be within [0,1]")).await.map_err(io::Error::other)?;
+                                continue;
+                            }
+                            let path = match service.resolve_source(&audio_path) {
+                                Ok(path) => path,
+                                Err(reason) => {
+                                    tx.send(error(Some(id),"music_source_denied",reason)).await.map_err(io::Error::other)?;
+                                    continue;
+                                }
+                            };
+                            if let Err(reason) = sessions.can_record(session, config.max_requests_per_session) {
+                                tx.send(error(Some(id),"capacity",reason)).await.map_err(io::Error::other)?;
+                                continue;
+                            }
+                            if beat_jobs.lock().expect("beat jobs poisoned").contains_key(&request_id) {
+                                tx.send(error(Some(id),"beat_request_conflict","beat request ID is already active")).await.map_err(io::Error::other)?;
+                                continue;
+                            }
+                            let permit = match service.permits.clone().try_acquire_owned() {
+                                Ok(permit) => permit,
+                                Err(_) => {
+                                    tx.send(error(Some(id),"beat_busy","maximum concurrent beat jobs reached")).await.map_err(io::Error::other)?;
+                                    continue;
+                                }
+                            };
+                            let ack = json!({"type":"music_beats_accepted","command_id":id,"request_id":request_id});
+                            if let Err(reason) = sessions.record(session,id,fingerprint,Receipt::Ack(ack.clone()),config.max_requests_per_session) {
+                                tx.send(error(Some(id),"capacity",reason)).await.map_err(io::Error::other)?;
+                                continue;
+                            }
+                            let token = connection_stop.child_token();
+                            beat_jobs.lock().expect("beat jobs poisoned").insert(request_id, token.clone());
+                            tx.send(ack).await.map_err(io::Error::other)?;
+                            let jobs = Arc::clone(&beat_jobs);
+                            let runtime = Arc::clone(service);
+                            let output = tx.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let _permit = permit;
+                                let media = BeatRuntime::read_source(&path);
+                                match media {
+                                    Ok(bytes) => {
+                                        let request_id_string = request_id.to_string();
+                                        let job = MusicJob {
+                                            request_id: &request_id_string,
+                                            track_name: &track_name,
+                                            audio_path: &audio_path,
+                                            stream,
+                                            min_confidence,
+                                            backend,
+                                            enabled: true,
+                                        };
+                                        let _ = runtime.runtime.run(&bytes, &job, &|| token.is_cancelled(), |frame| {
+                                            if output.blocking_send(frame).is_err() { token.cancel(); }
+                                        });
+                                    }
+                                    Err(reason) => {
+                                        let frame = json!({"type":"music_beats_error","body":{
+                                            "track_name":track_name,"audio_path":audio_path,
+                                            "request_id":request_id,"error":reason.to_string()
+                                        }});
+                                        let _ = output.blocking_send(frame);
+                                    }
+                                }
+                                jobs.lock().expect("beat jobs poisoned").remove(&request_id);
+                            });
+                        }
+                        GameCommand::CancelMusicBeats { request_id } => {
+                            let token = beat_jobs.lock().expect("beat jobs poisoned").get(&request_id).cloned();
+                            match token {
+                                Some(token) => {
+                                    token.cancel();
+                                    tx.send(json!({"type":"music_beats_cancel_ack","command_id":id,"request_id":request_id})).await.map_err(io::Error::other)?;
+                                }
+                                None => tx.send(error(Some(id),"ownership_denied","unknown or completed beat job")).await.map_err(io::Error::other)?,
+                            }
+                        }
                         GameCommand::GetGameSettings {} => {
                             match api.settings.snapshot_all() {
                                 Ok(snapshot) => tx.send(game_settings_frame(&snapshot, Some(id), "game_settings")).await.map_err(io::Error::other)?,
@@ -881,6 +1081,10 @@ async fn client(
         }
         Ok::<(),io::Error>(())
     }.await;
+    for token in beat_jobs.lock().expect("beat jobs poisoned").values() {
+        token.cancel();
+    }
+    connection_stop.cancel();
     if let Some(session) = session_id {
         sessions.clear(session, connection);
     }
