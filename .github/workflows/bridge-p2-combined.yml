@@ -44,7 +44,7 @@ jobs:
           git merge --no-ff --no-edit "$EVAL_SHA"
           git diff --check "$BASE_SHA"
           cargo fmt --all -- --check
-          cargo check --locked --offline --all-targets
+          cargo check --locked --offline --lib
           cargo check --locked --offline --features gui --all-targets
           cargo test --locked --offline --test beat_sync_cache --test beat_sync_runtime --test game_beat_sync --test audio_pipeline -- --test-threads=2
           cargo test --locked --offline --lib -- --test-threads=2
