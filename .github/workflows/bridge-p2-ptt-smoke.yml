@@ -41,9 +41,9 @@ jobs:
           git diff --check "$BASE_SHA"
           cargo fmt --all -- --check
           cargo check --locked --offline --lib
-          cargo test --locked --offline --lib reset_rejects_queued_segments_and_late_asr_before_dispatch -- --exact --nocapture || cargo test --locked --offline --lib reset_rejects_queued_segments_and_late_asr_before_dispatch -- --nocapture
+          cargo test --locked --offline --lib reset_rejects_queued_segments_and_late_asr_before_dispatch -- --nocapture
           cargo test --locked --offline --lib ptt_press_rejects_queued_segments_and_late_asr_before_dispatch -- --nocapture
-          cargo test --locked --offline --lib -- --test-threads=2
+          cargo test --locked --offline --lib -- --test-threads=1
           cargo check --locked --offline --features gui --all-targets
           git fetch origin main
           test "$(git rev-parse refs/remotes/origin/main)" = "$BASE_SHA" || { echo 'main advanced during acceptance'; exit 3; }
