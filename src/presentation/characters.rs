@@ -211,6 +211,45 @@ pub struct CharacterDebugField {
     pub value: String,
 }
 
+/// DEBUG_DISPLAY is user-authored. Never surface credential-like variables
+/// or known key formats in the GUI, even when the label looks harmless.
+fn sensitive_debug_name(name: &str) -> bool {
+    let compact = name
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect::<String>();
+    [
+        "apikey",
+        "apitoken",
+        "accesstoken",
+        "refreshtoken",
+        "authtoken",
+        "bearertoken",
+        "clientsecret",
+        "privatekey",
+        "password",
+        "credential",
+    ]
+    .iter()
+    .any(|needle| compact.contains(needle))
+        || compact == "secret"
+        || compact.ends_with("token")
+}
+
+fn sensitive_debug_value(value: &serde_json::Value) -> bool {
+    let Some(raw) = value.as_str() else {
+        return false;
+    };
+    let raw = raw.trim();
+    raw.starts_with("github_pat_")
+        || raw.starts_with("ghp_")
+        || raw.starts_with("gho_")
+        || raw.starts_with("Bearer ")
+        || raw.starts_with("AIza")
+        || (raw.starts_with("sk-") && raw.len() >= 20)
+}
+
 pub(crate) fn project_debug_values(
     character: CharacterId,
     variables: &std::collections::BTreeMap<String, serde_json::Value>,
@@ -244,15 +283,26 @@ pub(crate) fn project_debug_values(
     };
     values
         .into_iter()
-        .map(|(label, value)| CharacterDebugField {
-            label,
-            value: match value {
-                serde_json::Value::String(value) => value,
-                serde_json::Value::Bool(true) => "True".into(),
-                serde_json::Value::Bool(false) => "False".into(),
-                serde_json::Value::Null => "None".into(),
-                other => other.to_string(),
-            },
+        .map(|(label, value)| {
+            let sensitive = sensitive_debug_name(&label)
+                || program
+                    .and_then(|program| program.debug_display().get(&label))
+                    .is_some_and(|name| sensitive_debug_name(name))
+                || sensitive_debug_value(&value);
+            CharacterDebugField {
+                label,
+                value: if sensitive {
+                    "[REDACTED]".into()
+                } else {
+                    match value {
+                        serde_json::Value::String(value) => value,
+                        serde_json::Value::Bool(true) => "True".into(),
+                        serde_json::Value::Bool(false) => "False".into(),
+                        serde_json::Value::Null => "None".into(),
+                        other => other.to_string(),
+                    }
+                },
+            }
         })
         .collect()
 }
@@ -396,6 +446,33 @@ mod debug_display_tests {
         assert!(fields.contains(&CharacterDebugField {
             label: "Доверие".into(),
             value: "30".into()
+        }));
+    }
+
+    #[test]
+    fn debug_display_redacts_credentials_but_not_character_secrets() {
+        let program = PostDslProgram::parse(
+            "DEBUG_DISPLAY\n \"Credential\": api_key\n \"Status\": status\n \"Secret Exposed\": secretExposed\nEND_DEBUG_DISPLAY\n",
+            std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+        let saved = std::collections::BTreeMap::from([
+            ("api_key".into(), json!("top-secret")),
+            ("status".into(), json!("sk-test-01234567890123456789")),
+            ("secretExposed".into(), json!(true)),
+        ]);
+        let fields = project_debug_values(CharacterId::Crazy, &saved, Some(&program));
+        assert!(fields.contains(&CharacterDebugField {
+            label: "Credential".into(),
+            value: "[REDACTED]".into(),
+        }));
+        assert!(fields.contains(&CharacterDebugField {
+            label: "Status".into(),
+            value: "[REDACTED]".into(),
+        }));
+        assert!(fields.contains(&CharacterDebugField {
+            label: "Secret Exposed".into(),
+            value: "True".into(),
         }));
     }
 
