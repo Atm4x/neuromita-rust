@@ -499,8 +499,9 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn reset_rejects_queued_segments_and_late_asr_before_dispatch() {
+    async fn invalidation_rejects_queued_segments_and_late_asr_before_dispatch(
+        control: SpeechControl,
+    ) {
         let delivered = Arc::new(Mutex::new(Vec::new()));
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let first_started = Arc::new(tokio::sync::Notify::new());
@@ -545,7 +546,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), first_started.notified())
             .await
             .unwrap();
-        control_send.send(SpeechControl::Reset).await.unwrap();
+        control_send.send(control).await.unwrap();
         for &frame in &utterance {
             frames_send.send(frame).await.unwrap();
         }
@@ -557,5 +558,19 @@ mod tests {
             .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(&*delivered.lock().unwrap(), &["utterance 1"]);
+    }
+
+    #[tokio::test]
+    async fn reset_rejects_queued_segments_and_late_asr_before_dispatch() {
+        invalidation_rejects_queued_segments_and_late_asr_before_dispatch(SpeechControl::Reset)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn ptt_press_rejects_queued_segments_and_late_asr_before_dispatch() {
+        invalidation_rejects_queued_segments_and_late_asr_before_dispatch(
+            SpeechControl::PushToTalk(true),
+        )
+        .await;
     }
 }
