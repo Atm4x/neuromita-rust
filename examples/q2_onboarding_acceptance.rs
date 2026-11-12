@@ -46,7 +46,7 @@ fn assert_bundled_guide_image(image: &[u8], scale: f32) -> Result<(), String> {
     if image.len() != width * height * 4 {
         return Err("Guide snapshot buffer dimensions do not match the window".into());
     }
-    let step = (4.0 * scale).round().max(1.0) as usize;
+    let step = (2.0 * scale).round().max(1.0) as usize;
     let left = (458.0 * scale).round() as usize;
     let right = (722.0 * scale).round() as usize;
     let top = (195.0 * scale).round() as usize;
