@@ -1,0 +1,62 @@
+name: P1 Cycle 8 exact HEAD source acceptance
+on:
+  push:
+    branches: [bridge/p1-cycle8-exact-head-qa-20261112]
+permissions:
+  contents: read
+jobs:
+  exact-head-acceptance:
+    name: Exact ${{ matrix.label }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: PR434-DSL-PostDSL
+            revision: c806ced4e9d86a9c5846a36659c2c0b59a80f495
+          - label: PR433-Stream-Retry
+            revision: e5f808e81bf682c55f811fc637999968ce419d8a
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      RUSTFLAGS: "-C debuginfo=0"
+    steps:
+      - name: Checkout exact PR HEAD
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.revision }}
+          persist-credentials: false
+      - name: Validate exact checkout SHA
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "${{ matrix.revision }}"
+          git status --porcelain
+      - name: Linux native build and Xvfb dependencies
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y pkg-config libasound2-dev libudev-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb-shape0-dev libxcb-xfixes0-dev libfontconfig1-dev libfreetype6-dev xvfb xauth
+      - name: Pin Rust 1.98.1
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+          rustc +1.98.1 --version
+      - name: Cargo fmt
+        run: cargo +1.98.1 fmt --all -- --check
+      - name: Offline all-target Rust check
+        run: cargo +1.98.1 check --locked --offline --all-targets
+      - name: Full library tests
+        run: cargo +1.98.1 test --locked --offline --lib -- --test-threads=2
+      - name: DSL accepted/failure vertical slice
+        if: matrix.label == 'PR434-DSL-PostDSL'
+        run: |
+          cargo +1.98.1 test --locked --offline --test vertical_slice prompt_nonlocal_set_is_persisted_only_after_accepted_reply -- --test-threads=2
+          cargo +1.98.1 test --locked --offline --lib preview_replay_and_invalid_custom_fields_never_mutate_input_state -- --test-threads=2
+          cargo +1.98.1 test --locked --offline --lib debug_display_redacts_credentials_but_not_character_secrets -- --test-threads=2
+      - name: Preset catalog stream/retry tests
+        if: matrix.label == 'PR433-Stream-Retry'
+        run: cargo +1.98.1 test --locked --offline --lib generation::presets::tests -- --test-threads=2
+      - name: Offline GUI all-target compilation
+        run: cargo +1.98.1 check --locked --offline --features gui --all-targets
+      - name: Executable Xvfb Slint binding tests
+        run: xvfb-run -a cargo +1.98.1 test --locked --offline --features gui --bin neuromita-gui -- --test-threads=1
