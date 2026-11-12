@@ -50,6 +50,8 @@ pub struct PresetView {
     pub temperature: f32,
     pub max_output_tokens: u32,
     pub timeout_ms: u64,
+    pub stream: bool,
+    pub max_retries: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -158,6 +160,15 @@ impl PresetsPresenter {
                         definition.timeout_ms,
                     ),
                 };
+                let (stream, max_retries) = match &record.definition {
+                    PresetDefinition::Unconfigured => (false, 2),
+                    PresetDefinition::OpenAi(definition) => {
+                        (definition.options.stream, definition.options.max_retries)
+                    }
+                    PresetDefinition::Gemini(definition) => {
+                        (definition.options.stream, definition.options.max_retries)
+                    }
+                };
                 let key = self.catalog.editor_key(id);
                 PresetView {
                     api_key: key.as_ref().ok().cloned().flatten(),
@@ -198,6 +209,8 @@ impl PresetsPresenter {
                     temperature,
                     max_output_tokens,
                     timeout_ms,
+                    stream,
+                    max_retries,
                 }
             })
             .collect();
@@ -460,6 +473,28 @@ impl PresetsPresenter {
                     "Возвращает сводки размышлений и не управляет объёмом мышления.",
                 ),
                 editable: false,
+                sent: false,
+            },
+            PresetParameterOption {
+                id: "stream",
+                wire_key: "stream",
+                title: i18n("settings.parameter.stream.title", "Потоковая генерация"),
+                description: i18n(
+                    "settings.parameter.stream.description",
+                    "Показывать безопасный текст ответа по мере генерации.",
+                ),
+                editable: true,
+                sent: false,
+            },
+            PresetParameterOption {
+                id: "max_retries",
+                wire_key: "",
+                title: i18n("settings.parameter.max_retries.title", "Повторы запросов"),
+                description: i18n(
+                    "settings.parameter.max_retries.description",
+                    "Число HTTP retry до начала чтения тела, от 0 до 4.",
+                ),
+                editable: true,
                 sent: false,
             },
             PresetParameterOption {

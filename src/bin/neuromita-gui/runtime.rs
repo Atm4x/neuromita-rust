@@ -1347,7 +1347,15 @@ async fn observe(
             },
             result = releases.changed() => { result.map_err(|_| "Release observation closed")?; },
             result = connections.changed() => { result.map_err(|_| "Connection observation closed")?; },
-            result = requests.changed() => { result.map_err(|_| "Request observation closed")?; },
+            result = requests.changed() => {
+                result.map_err(|_| "Request observation closed")?;
+                let origin = ChatOrigin { character, selection_revision };
+                match presenter.snapshot(character).await {
+                    Ok(snapshot) => publish(Update::Snapshot(origin, Box::new(snapshot))),
+                    Err(error) => publish(Update::ChatError(origin, error.to_string())),
+                }
+                refresh_views = false;
+            },
             result = settings.changed() => { result.map_err(|_| "Settings observation closed")?; },
             result = presets.changed() => { result.map_err(|_| "Preset observation closed")?; },
             result = selection.changed() => { result.map_err(|_| "Timeline observation closed")?; },
@@ -1434,12 +1442,23 @@ async fn character_debug_snapshot(api: &GuiPresenter, character: CharacterId) ->
                 .for_character(character)
                 .prompt_set
                 .as_deref();
-            let name = catalog
-                .resolve_set(character, selected)
-                .map_err(|error| error.to_string())?;
-            catalog
-                .load_post_rules(character, &name)
-                .map_err(|error| error.to_string())?
+            if selected.is_none()
+                && catalog
+                    .list(character)
+                    .map_err(|error| error.to_string())?
+                    .is_empty()
+            {
+                // Match request admission: without an explicit selection and
+                // without any packs, use the built-in character debug fields.
+                None
+            } else {
+                let name = catalog
+                    .resolve_set(character, selected)
+                    .map_err(|error| error.to_string())?;
+                catalog
+                    .load_post_rules(character, &name)
+                    .map_err(|error| error.to_string())?
+            }
         } else {
             None
         };

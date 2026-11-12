@@ -2916,6 +2916,110 @@ async fn generated_character_messages_use_shared_conversation_audience() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn prompt_nonlocal_set_is_persisted_only_after_accepted_reply() {
+    use neuromita::prompts::PromptCatalog;
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let root = std::env::temp_dir().join(format!("neuromita-dsl-set-{}", Uuid::new_v4()));
+    let set = root.join("Crazy/Default");
+    std::fs::create_dir_all(set.join("Main")).unwrap();
+    std::fs::write(set.join("config.json"), r#"{"variables":{"Love":10}}"#).unwrap();
+    std::fs::write(set.join("main_template.txt"), "[<@Main/state.script>]").unwrap();
+    std::fs::write(
+        set.join("Main/state.script"),
+        "SET Love = Love + 2\nRETURN str(Love)\n",
+    )
+    .unwrap();
+    let config = ApplicationConfig::minimal(
+        preset(&server.endpoint),
+        ResponseGenerator::new([
+            Arc::new(GeminiProvider::new().unwrap()) as Arc<dyn GenerationProvider>
+        ])
+        .unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    )
+    .with_prompt_catalog(PromptCatalog::new(&root));
+    let app = ApplicationLifecycle::start(config).await.unwrap();
+
+    let first = app
+        .presenter()
+        .conversation
+        .reply(CharacterId::Crazy, "first".into())
+        .unwrap();
+    let incoming = server.next().await;
+    assert!(incoming.body.to_string().contains("12"));
+    let before = app
+        .character(CharacterId::Crazy)
+        .unwrap()
+        .debug_variables()
+        .await
+        .unwrap();
+    assert!(!before.contains_key("Love"));
+    incoming
+        .respond
+        .send(Reply::Text("first accepted"))
+        .unwrap();
+    assert!(matches!(
+        finished(&first).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    let accepted = app
+        .character(CharacterId::Crazy)
+        .unwrap()
+        .debug_variables()
+        .await
+        .unwrap();
+    assert_eq!(accepted.get("Love"), Some(&serde_json::json!(12)));
+
+    let failed = app
+        .presenter()
+        .conversation
+        .reply(CharacterId::Crazy, "second".into())
+        .unwrap();
+    let incoming = server.next().await;
+    assert!(incoming.body.to_string().contains("14"));
+    incoming.respond.send(Reply::Status(400)).unwrap();
+    assert!(matches!(
+        finished(&failed).await.state,
+        RequestState::Finished(RequestOutcome::TextGenerationFailed(_))
+    ));
+    let after_failed = app
+        .character(CharacterId::Crazy)
+        .unwrap()
+        .debug_variables()
+        .await
+        .unwrap();
+    assert_eq!(after_failed.get("Love"), Some(&serde_json::json!(12)));
+
+    let third = app
+        .presenter()
+        .conversation
+        .reply(CharacterId::Crazy, "third".into())
+        .unwrap();
+    let incoming = server.next().await;
+    assert!(incoming.body.to_string().contains("14"));
+    incoming
+        .respond
+        .send(Reply::Text("third accepted"))
+        .unwrap();
+    assert!(matches!(
+        finished(&third).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    let after_third = app
+        .character(CharacterId::Crazy)
+        .unwrap()
+        .debug_variables()
+        .await
+        .unwrap();
+    assert_eq!(after_third.get("Love"), Some(&serde_json::json!(14)));
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn selected_prompt_post_dsl_persists_only_accepted_changes() {
     use neuromita::prompts::PromptCatalog;
     let _serial = CORE_TEST_MUTEX.lock().await;
