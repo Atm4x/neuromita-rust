@@ -752,6 +752,8 @@ fn settings_render_and_bindings(window: &AppWindow) {
         template_id: "gemini".into(),
         temperature_enabled: true,
         tokens_enabled: true,
+        stream: true,
+        max_retries: "3".into(),
         provider: "google".into(),
         configured: true,
         id: "7".into(),
@@ -867,6 +869,15 @@ fn settings_render_and_bindings(window: &AppWindow) {
     assert!(!settings.get_character_profile_error().is_empty());
     settings.invoke_character_load(0);
     settings.invoke_preset_edit("7".into());
+    assert!(!settings.get_preset_dirty());
+    settings.set_preset_stream(false);
+    assert!(settings.get_preset_dirty());
+    settings.set_preset_stream(true);
+    assert!(!settings.get_preset_dirty());
+    settings.set_preset_max_retries("4".into());
+    assert!(settings.get_preset_dirty());
+    settings.set_preset_max_retries("3".into());
+    assert!(!settings.get_preset_dirty());
     assert_eq!(settings.get_preset_model(), "fixture-model");
     assert_eq!(
         settings.get_preset_request_url(),
@@ -890,6 +901,21 @@ fn settings_render_and_bindings(window: &AppWindow) {
             _
         ))
     ));
+    settings.set_preset_stream(false);
+    settings.set_preset_max_retries("4".into());
+    settings.invoke_preset_save();
+    {
+        let captured = commands.borrow();
+        let Some(super::super::runtime::Command::UpdatePreset(_, edit)) = captured.last() else {
+            panic!("expected preset update");
+        };
+        let connection = edit
+            .connection
+            .as_ref()
+            .expect("expected configured preset");
+        assert!(!connection.stream);
+        assert_eq!(connection.max_retries, 4);
+    }
     settings.set_preset_temperature("invalid".into());
     let count = commands.borrow().len();
     settings.invoke_preset_save();
@@ -897,6 +923,13 @@ fn settings_render_and_bindings(window: &AppWindow) {
     assert!(!settings.get_settings_error().is_empty());
     settings.set_settings_error("".into());
     settings.set_preset_temperature("0.7".into());
+    settings.set_preset_max_retries("5".into());
+    let count = commands.borrow().len();
+    settings.invoke_preset_save();
+    assert_eq!(commands.borrow().len(), count);
+    assert!(!settings.get_settings_error().is_empty());
+    settings.set_settings_error("".into());
+    settings.set_preset_max_retries("3".into());
     settings.invoke_preset_edit("7".into());
     super::super::settings::saved(window, None);
     assert_eq!(settings.get_preset_edit_id(), "7");
