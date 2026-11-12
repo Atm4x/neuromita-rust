@@ -1,4 +1,6 @@
-use std::{cell::RefCell, collections::HashSet, error::Error, path::PathBuf, rc::Rc, time::Duration};
+use std::{
+    cell::RefCell, collections::HashSet, error::Error, path::PathBuf, rc::Rc, time::Duration,
+};
 
 use slint::{ComponentHandle, ModelRc, StyledText, VecModel};
 
@@ -56,7 +58,10 @@ fn assert_bundled_guide_image(image: &[u8], scale: f32) -> Result<(), String> {
             distinct.insert(&image[offset..offset + 3]);
         }
     }
-    eprintln!("Bundled Guide image distinct sampled colors: {}", distinct.len());
+    eprintln!(
+        "Bundled Guide image distinct sampled colors: {}",
+        distinct.len()
+    );
     if distinct.len() < 80 {
         return Err(format!(
             "Bundled Guide screenshot appears missing: only {} sampled colors",
