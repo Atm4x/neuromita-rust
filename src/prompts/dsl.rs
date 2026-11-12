@@ -19,6 +19,7 @@ pub(super) struct Interpreter {
     root: PathBuf,
     base: PathBuf,
     vars: BTreeMap<String, Value>,
+    variable_updates: BTreeMap<String, Value>,
     local_vars: BTreeMap<String, Value>,
     declared_local_vars: BTreeSet<String>,
     static_infos: Vec<String>,
@@ -45,6 +46,7 @@ impl Interpreter {
             root: root.canonicalize()?,
             base: base.canonicalize()?,
             vars,
+            variable_updates: BTreeMap::new(),
             local_vars: BTreeMap::new(),
             declared_local_vars: BTreeSet::new(),
             static_infos: Vec::new(),
@@ -65,6 +67,7 @@ impl Interpreter {
             root,
             base,
             vars,
+            variable_updates: BTreeMap::new(),
             local_vars: BTreeMap::new(),
             declared_local_vars: BTreeSet::new(),
             static_infos: Vec::new(),
@@ -99,6 +102,10 @@ impl Interpreter {
 
     pub fn declarations(&self) -> Vec<PromptInitializationDeclaration> {
         self.declarations.clone()
+    }
+
+    pub fn variable_updates(&self) -> BTreeMap<String, Value> {
+        self.variable_updates.clone()
     }
 
     fn resolve(&self, file: &str, parent: Option<&Path>) -> Result<PathBuf, PromptError> {
@@ -518,7 +525,8 @@ impl Interpreter {
                                     self.declared_local_vars.insert(name.into());
                                 }
                             } else {
-                                self.vars.insert(name.into(), value);
+                                self.vars.insert(name.into(), value.clone());
+                                self.variable_updates.insert(name.into(), value);
                             }
                         }
                     }

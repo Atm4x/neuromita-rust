@@ -1,4 +1,6 @@
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
+
+use serde_json::Value;
 
 use thiserror::Error;
 
@@ -27,6 +29,7 @@ pub(crate) struct PreparedCharacterTurn {
     pub context: CharacterContext,
     pub prompt: Option<PreparedPrompt>,
     pub post_dsl: Option<PostDslProgram>,
+    pub variable_updates: BTreeMap<String, Value>,
 }
 
 #[derive(Clone, Default)]
@@ -40,6 +43,11 @@ impl PromptPreparation {
     /// Builds a character-owned context, applies declarative seed commands via
     /// the character's Timeline owner, and renders the provider-neutral prompt.
     /// The catalog never mutates a character or stores canonical memory.
+    // The request-admission tuple must remain explicit at this owner boundary.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "keep typed request admission explicit"
+    )]
     pub(crate) async fn prepare(
         &self,
         character: &CharacterHandle,
@@ -60,6 +68,7 @@ impl PromptPreparation {
                 context,
                 prompt: None,
                 post_dsl: None,
+                variable_updates: BTreeMap::new(),
             });
         };
         let variables = context.variables.clone();
@@ -85,10 +94,15 @@ impl PromptPreparation {
                 .await?;
             context = updated;
         }
+        // Stage nonlocal SET in the request snapshot for LLM and PostDSL.
+        // Only accepted replies persist it through the Timeline owner.
+        let variable_updates = rendered.variable_updates.clone();
+        context.variables.extend(variable_updates.clone());
         Ok(PreparedCharacterTurn {
             context,
             prompt: Some(convert(rendered)),
             post_dsl,
+            variable_updates,
         })
     }
 }
@@ -318,6 +332,84 @@ mod tests {
             .await;
         assert!(matches!(result, Err(PromptPreparationError::Catalog(_))));
         assert!(character.memories().await.unwrap().records().is_empty());
+        stop.cancel();
+        for task in tasks {
+            task.await.unwrap();
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn nonlocal_set_is_staged_but_not_committed_before_acceptance() {
+        let root = std::env::temp_dir().join(format!("neuro-set-{}", uuid::Uuid::new_v4()));
+        let set = root.join("Crazy/Default");
+        fs::create_dir_all(&set).unwrap();
+        fs::write(set.join("config.json"), r#"{"variables":{"Love":0}}"#).unwrap();
+        fs::write(set.join("main_template.txt"), "[<init.script>]").unwrap();
+        fs::write(set.join("init.script"), "SET Love = 8\nRETURN str(Love)\n").unwrap();
+        fs::create_dir_all(set.join("PostScripts")).unwrap();
+        fs::write(
+            set.join("PostScripts/main_rules.postscript"),
+            "RULE love\n MATCH FIELD \"love_change\"\n ACTIONS\n  SET Love = Love + love_change\n END_ACTIONS\nEND_RULE\n",
+        )
+        .unwrap();
+        let timeline = Arc::new(Mutex::new(SessionTimeline::new()));
+        let stop = CancellationToken::new();
+        let (registry, tasks) = CharacterRegistry::spawn(Arc::clone(&timeline), stop.clone(), 8);
+        let character = registry.get(CharacterId::Crazy).unwrap();
+        let admission = {
+            let timeline = timeline.lock().unwrap();
+            timeline
+                .admission(CharacterId::Crazy, timeline.selection())
+                .unwrap()
+        };
+        let initial_anchor = timeline.lock().unwrap().anchor();
+        let prepared = PromptPreparation::new()
+            .prepare(
+                &character,
+                RequestId::new(),
+                "".into(),
+                TurnIntent::Initiate,
+                ContextPosition::Latest,
+                admission,
+                PromptCatalog::new(&root)
+                    .capture(CharacterId::Crazy, None)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            prepared.variable_updates.get("Love"),
+            Some(&serde_json::json!(8))
+        );
+        assert_eq!(
+            prepared.context.variables.get("Love"),
+            Some(&serde_json::json!(8))
+        );
+        assert_eq!(
+            prepared.prompt.as_ref().unwrap().stable.as_ref(),
+            &[Arc::from("8")]
+        );
+        let mut response = crate::generation::StructuredResponse::spoken("Hello");
+        response.custom_fields = Some(serde_json::Map::from_iter([(
+            "love_change".into(),
+            serde_json::json!(1),
+        )]));
+        let applied = prepared
+            .post_dsl
+            .as_ref()
+            .unwrap()
+            .apply(response, &prepared.context.variables)
+            .unwrap();
+        assert_eq!(applied.variables["Love"], serde_json::json!(9));
+        assert_eq!(timeline.lock().unwrap().anchor(), initial_anchor);
+        assert!(
+            !character
+                .debug_variables()
+                .await
+                .unwrap()
+                .contains_key("Love")
+        );
         stop.cancel();
         for task in tasks {
             task.await.unwrap();

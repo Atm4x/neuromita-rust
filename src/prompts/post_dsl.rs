@@ -86,13 +86,13 @@ impl CustomParam {
         };
         if value.is_number() {
             value = bounded(value, self.change_min, self.change_max)?;
-            if self.op.as_deref() == Some("add") {
-                if let Some(max) = self.max_change {
-                    if !max.is_finite() || max < 0.0 {
-                        return Err(error("invalid max_change"));
-                    }
-                    value = bounded(value, Some(-max), Some(max))?;
+            if self.op.as_deref() == Some("add")
+                && let Some(max) = self.max_change
+            {
+                if !max.is_finite() || max < 0.0 {
+                    return Err(error("invalid max_change"));
                 }
+                value = bounded(value, Some(-max), Some(max))?;
             }
         }
         let current = vars.get(&self.name).cloned().unwrap_or(Value::from(0));
@@ -382,12 +382,14 @@ impl PostDslProgram {
                                 rule,
                                 needle,
                                 BTreeMap::new(),
-                                &mut vars,
-                                &mut locals,
-                                &mut declared,
-                                &mut updates,
-                                &mut logs,
-                                &mut remaining_matches,
+                                RuleRunContext {
+                                    vars: &mut vars,
+                                    locals: &mut locals,
+                                    declared: &mut declared,
+                                    updates: &mut updates,
+                                    logs: &mut logs,
+                                    remaining_matches: &mut remaining_matches,
+                                },
                             )?;
                             output.push_str(&replacement);
                             remaining = &remaining[pos + needle.len()..];
@@ -417,12 +419,14 @@ impl PostDslProgram {
                                 rule,
                                 m.as_str(),
                                 captured,
-                                &mut vars,
-                                &mut locals,
-                                &mut declared,
-                                &mut updates,
-                                &mut logs,
-                                &mut remaining_matches,
+                                RuleRunContext {
+                                    vars: &mut vars,
+                                    locals: &mut locals,
+                                    declared: &mut declared,
+                                    updates: &mut updates,
+                                    logs: &mut logs,
+                                    remaining_matches: &mut remaining_matches,
+                                },
                             )?);
                             last = m.end();
                         }
@@ -450,21 +454,23 @@ impl PostDslProgram {
                 }
             }
             for rule in &self.rules {
-                if let Matcher::Field(name) = &rule.matcher {
-                    if let Some(value) = fields.get(name) {
-                        matched.insert(name.as_str());
-                        run(
-                            rule,
-                            "",
-                            BTreeMap::from([(name.clone(), value.clone())]),
-                            &mut vars,
-                            &mut locals,
-                            &mut declared,
-                            &mut updates,
-                            &mut logs,
-                            &mut remaining_matches,
-                        )?;
-                    }
+                if let Matcher::Field(name) = &rule.matcher
+                    && let Some(value) = fields.get(name)
+                {
+                    matched.insert(name.as_str());
+                    run(
+                        rule,
+                        "",
+                        BTreeMap::from([(name.clone(), value.clone())]),
+                        RuleRunContext {
+                            vars: &mut vars,
+                            locals: &mut locals,
+                            declared: &mut declared,
+                            updates: &mut updates,
+                            logs: &mut logs,
+                            remaining_matches: &mut remaining_matches,
+                        },
+                    )?;
                 }
             }
             if let Some(name) = fields.keys().find(|name| !matched.contains(name.as_str())) {
@@ -479,17 +485,31 @@ impl PostDslProgram {
     }
 }
 
+// Non-owning state for one PostDSL match; all updates remain in the
+// existing per-request state and are returned only after full evaluation.
+struct RuleRunContext<'a> {
+    vars: &'a mut BTreeMap<String, Value>,
+    locals: &'a mut BTreeMap<String, Value>,
+    declared: &'a mut BTreeSet<String>,
+    updates: &'a mut BTreeMap<String, Value>,
+    logs: &'a mut Vec<String>,
+    remaining_matches: &'a mut usize,
+}
+
 fn run(
     rule: &Rule,
     original: &str,
     captured: BTreeMap<String, Value>,
-    vars: &mut BTreeMap<String, Value>,
-    locals: &mut BTreeMap<String, Value>,
-    declared: &mut BTreeSet<String>,
-    updates: &mut BTreeMap<String, Value>,
-    logs: &mut Vec<String>,
-    remaining_matches: &mut usize,
+    state: RuleRunContext<'_>,
 ) -> Result<String, PromptError> {
+    let RuleRunContext {
+        vars,
+        locals,
+        declared,
+        updates,
+        logs,
+        remaining_matches,
+    } = state;
     if *remaining_matches == 0 {
         return Err(error("post-DSL match budget exceeded"));
     }
@@ -801,6 +821,31 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn preview_replay_and_invalid_custom_fields_never_mutate_input_state() {
+        let program = PostDslProgram::parse(
+            "RULE change\n MATCH REGEX \"change: ([+-]?[0-9]+)\" CAPTURE (amount)\n ACTIONS\n SET LOCAL delta = int(amount)\n SET Love = Love + delta\n REMOVE_MATCH\n END_ACTIONS\nEND_RULE\n",
+            BTreeMap::new(),
+        )
+        .unwrap();
+        let character_state = BTreeMap::from([("Love".into(), Value::from(7))]);
+        let source = StructuredResponse::spoken("change: +2");
+        let preview = program.apply(source.clone(), &character_state).unwrap();
+        let replay = program.apply(source.clone(), &character_state).unwrap();
+        assert_eq!(preview.variables, replay.variables);
+        assert_eq!(preview.response.full_text(), replay.response.full_text());
+        assert_eq!(preview.variables["Love"].as_i64(), Some(9));
+        assert_eq!(character_state["Love"], Value::from(7));
+
+        let mut invalid = source;
+        invalid.custom_fields = Some(serde_json::Map::from_iter([(
+            "unsupported_field".into(),
+            Value::Bool(true),
+        )]));
+        assert!(program.apply(invalid, &character_state).is_err());
+        assert_eq!(character_state["Love"], Value::from(7));
     }
 
     #[test]
