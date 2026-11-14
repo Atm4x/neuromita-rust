@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+"""Explicit, opt-in Telethon user-session bridge for NeuroMita.
+
+Protocol: newline-delimited UTF-8 JSON request/response on stdin/stdout.
+Install Telethon separately, never supply a Bot API token. stderr is for logs.
+The host owns starting/stopping this process and must protect its session file.
+"""
+import asyncio
+import base64
+import json
+import os
+import sys
+
+try:
+    from telethon import TelegramClient
+    from telethon.errors import (
+        PhoneCodeInvalidError, PhoneCodeExpiredError,
+        SessionPasswordNeededError, PasswordHashInvalidError,
+    )
+except ImportError:
+    print(json.dumps({"ok": False, "error": "telethon_not_installed"}), flush=True)
+    sys.exit(2)
+
+client = None
+phone = None
+phone_code_hash = None
+authorized = False
+
+
+async def handle(req):
+    global client, phone, phone_code_hash, authorized
+    op = req.get("op")
+    if op == "connect":
+        if client is not None:
+            await client.disconnect()
+        # A reconnect must never reuse a code hash or authorization state from
+        # the previous phone/account, including after a failed connection.
+        client = None
+        phone = None
+        phone_code_hash = None
+        authorized = False
+        api_id = int(req["api_id"])
+        api_hash = str(req["api_hash"])
+        requested_phone = str(req["phone"])
+        session = str(req["session"])
+        if not (api_id > 0 and api_hash and requested_phone and session):
+            raise ValueError("invalid_credentials")
+        if os.name == "posix":
+            os.umask(0o077)
+        candidate = TelegramClient(session, api_id, api_hash)
+        try:
+            await asyncio.wait_for(candidate.connect(), 30)
+            is_authorized = bool(await candidate.is_user_authorized())
+        except Exception:
+            await candidate.disconnect()
+            raise
+        client = candidate
+        phone = requested_phone
+        authorized = is_authorized
+        return {"authorized": authorized}
+    if client is None:
+        raise RuntimeError("not_connected")
+    if op == "request_code":
+        result = await client.send_code_request(phone)
+        phone_code_hash = result.phone_code_hash
+        return {"requested": True}
+    if op == "sign_in":
+        if not phone_code_hash:
+            raise RuntimeError("code_not_requested")
+        try:
+            await client.sign_in(phone=phone, code=str(req["code"]), phone_code_hash=phone_code_hash)
+        except PhoneCodeInvalidError:
+            raise RuntimeError("invalid_code") from None
+        except PhoneCodeExpiredError:
+            phone_code_hash = None
+            raise RuntimeError("expired_code") from None
+        except SessionPasswordNeededError:
+            return {"password_required": True}
+        authorized = await client.is_user_authorized()
+        return {"authorized": authorized}
+    if op == "password":
+        try:
+            await client.sign_in(password=str(req["password"]))
+        except PasswordHashInvalidError:
+            raise RuntimeError("invalid_password") from None
+        authorized = await client.is_user_authorized()
+        return {"authorized": authorized}
+    if op == "status":
+        authorized = bool(await client.is_user_authorized())
+        return {"authorized": authorized, "connected": client.is_connected()}
+    if op == "disconnect":
+        try:
+            await client.disconnect()
+        finally:
+            client = None
+            phone = None
+            phone_code_hash = None
+            authorized = False
+        return {"disconnected": True}
+    if not authorized or not client.is_connected():
+        raise RuntimeError("unauthorized")
+    peer = str(req["peer"])
+    if op == "latest":
+        messages = await client.get_messages(peer, limit=1)
+        return {"id": messages[0].id if messages else 0}
+    if op == "send":
+        message = await client.send_message(peer, str(req["text"]))
+        return {"id": message.id}
+    if op == "recent":
+        after = int(req["after"])
+        messages = await client.get_messages(peer, limit=100, min_id=after)
+        rows = []
+        for msg in messages:
+            kind = None
+            if msg.voice:
+                kind = "voice_ogg"
+            elif msg.audio and getattr(msg.file, "mime_type", None) == "audio/mpeg":
+                kind = "mp3"
+            rows.append({
+                "id": msg.id,
+                "peer": peer,
+                "outgoing": bool(msg.out),
+                "reply_to_id": getattr(msg, "reply_to_msg_id", None),
+                "kind": kind,
+            })
+        return {"messages": rows}
+    if op == "download":
+        message = await client.get_messages(peer, ids=int(req["id"]))
+        if message is None or not message.media:
+            raise RuntimeError("missing_media")
+        size = int(getattr(message.file, "size", 0) or 0)
+        limit = int(req["limit"])
+        # Reject unknown sizes rather than downloading an unbounded payload
+        # into Python memory before checking its length.
+        if size <= 0 or limit <= 0 or limit > 32 * 1024 * 1024 or size > limit:
+            raise RuntimeError("media_too_large")
+        data = await client.download_media(message, file=bytes)
+        if not isinstance(data, bytes) or len(data) > limit:
+            raise RuntimeError("media_too_large")
+        return {"data": base64.b64encode(data).decode("ascii")}
+    raise ValueError("unknown_operation")
+
+
+async def respond(line):
+    """Handle one framed RPC; testable with a fake Telethon client."""
+    request_id = None
+    try:
+        req = json.loads(line)
+        request_id = req.get("request_id") if isinstance(req, dict) else None
+        if not isinstance(request_id, int) or isinstance(request_id, bool) or request_id < 1:
+            request_id = None
+            raise ValueError("invalid_request_id")
+        result = await handle(req)
+        return {"ok": True, "request_id": request_id, "result": result}
+    except Exception as exc:
+        # Never echo credentials, code, password, phone or session paths.
+        known = {
+            "invalid_credentials", "not_connected", "code_not_requested",
+            "invalid_code", "expired_code", "invalid_password",
+            "unauthorized", "missing_media", "media_too_large",
+            "unknown_operation",
+        }
+        label = str(exc)
+        return {
+            "ok": False, "request_id": request_id,
+            "error": label if label in known else "telegram_failure",
+        }
+
+
+async def main():
+    while True:
+        line = await asyncio.to_thread(sys.stdin.buffer.readline, 16 * 1024 + 1)
+        if not line:
+            break
+        if len(line) > 16 * 1024:
+            # Discard the entire invalid frame so the following request is not
+            # interpreted as the continuation of its credential payload.
+            while not line.endswith(b"\n"):
+                line = await asyncio.to_thread(sys.stdin.buffer.readline, 16 * 1024 + 1)
+                if not line:
+                    break
+            output = {"ok": False, "request_id": None, "error": "frame_too_large"}
+        else:
+            output = await respond(line)
+        print(json.dumps(output, ensure_ascii=False), flush=True)
+    if client is not None:
+        await client.disconnect()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

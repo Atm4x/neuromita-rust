@@ -127,6 +127,26 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
         }
     });
     let weak = window.as_weak();
+    let send = dispatch.clone();
+    ui.on_telegram_connect(move || {
+        if let Some(window) = weak.upgrade() {
+            let ui = window.global::<VoiceUi>();
+            send(Command::TelegramConnect {
+                api_id: ui.get_telegram_api_id().into(),
+                api_hash: ui.get_telegram_api_hash().into(),
+                phone: ui.get_telegram_phone().into(),
+            });
+        }
+    });
+    let send = dispatch.clone();
+    ui.on_telegram_submit_code(move |code| send(Command::TelegramCode(code.into())));
+    let send = dispatch.clone();
+    ui.on_telegram_submit_password(move |password| {
+        send(Command::TelegramPassword(password.into()));
+    });
+    let send = dispatch.clone();
+    ui.on_telegram_disconnect(move || send(Command::TelegramDisconnect));
+    let weak = window.as_weak();
     ui.on_toggle_enabled(move |_| {
         if let Some(window) = weak.upgrade() {
             window.global::<VoiceUi>().invoke_persist();

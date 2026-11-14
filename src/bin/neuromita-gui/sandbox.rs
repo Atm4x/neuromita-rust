@@ -629,6 +629,16 @@ fn apply_with_catalog(
                     .set_settings_error(error.into());
             }
         }
+        Update::TelegramAuth { phase, status } => {
+            let ui = window.global::<super::view::VoiceUi>();
+            ui.set_telegram_auth_phase(phase);
+            ui.set_telegram_status(status.into());
+            if phase == 3 {
+                ui.set_telegram_api_hash("".into());
+                ui.set_telegram_code("".into());
+                ui.set_telegram_password("".into());
+            }
+        }
         Update::RuntimeStatus(snapshot) => {
             super::voice::runtime_status(window, &snapshot);
             super::asr::runtime_status(window, &snapshot);
