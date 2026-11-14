@@ -2098,6 +2098,51 @@ async fn agent_ipc_client_waits_for_real_core_terminal_success() {
 }
 
 #[tokio::test]
+async fn optional_http_gateway_rejects_untrusted_clients_and_probes_real_core() {
+    let mut fixture = Fixture::start(|_| {}).await;
+    let core = fixture.app.server().address();
+    let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = reserved.local_addr().unwrap();
+    drop(reserved);
+    let token = "gateway-test-secret-12345678901234567890";
+    let binary = env!("CARGO_BIN_EXE_neuromita-agent-http");
+    let mut gateway = tokio::process::Command::new(binary)
+        .args(["--listen", &address.to_string(), "--core", &core.to_string()])
+        .env("NEUROMITA_AGENT_HTTP_TOKEN", token)
+        .spawn()
+        .unwrap();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .unwrap();
+    let url = format!("http://{address}/v1/presenter/chat");
+    let mut ready = false;
+    for _ in 0..50 {
+        if let Ok(response) = client.get(&url).send().await {
+            assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+    }
+    assert!(ready, "HTTP gateway did not bind");
+    let response = client.get(&url).bearer_auth(token).send().await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let value = response.json::<Value>().await.unwrap();
+    assert_eq!(value["snapshot"]["surface"], "chat");
+    assert_eq!(value["snapshot"]["source"], "gui_presenter_watch");
+    let response = client
+        .post(format!("http://{address}/v1/commands"))
+        .bearer_auth(token)
+        .json(&json!({"command":"initiate","character":"Crazy"}))
+        .send().await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+    assert!(fixture.calls.try_recv().is_err());
+    gateway.kill().await.unwrap();
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
 async fn agent_ipc_binary_executes_jsonl_against_running_core() {
     let mut fixture = Fixture::start(|_| {}).await;
     let address = fixture.app.server().address().to_string();
