@@ -2053,3 +2053,54 @@ async fn agent_ipc_client_waits_for_real_core_terminal_success() {
     bounded(task).await.unwrap().unwrap();
     fixture.shutdown().await;
 }
+
+#[tokio::test]
+async fn agent_ipc_binary_executes_jsonl_against_running_core() {
+    let mut fixture = Fixture::start(|_| {}).await;
+    let address = fixture.app.server().address().to_string();
+    let cli = env!("CARGO_BIN_EXE_neuromita-agent");
+    let script = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/agent_ipc_smoke.jsonl");
+    let output = bounded(
+        tokio::process::Command::new(cli)
+            .args(["--addr", address.as_str(), "batch", script])
+            .output(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "CLI failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 4, "one JSONL response per probe");
+    assert_eq!(rows[0]["type"], "pong");
+    assert_eq!(rows[1]["type"], "server_status");
+    assert_eq!(rows[2]["snapshot"]["selection_matches_head"], true);
+    assert_eq!(
+        rows[3]["snapshot"]["ownership"],
+        "connection_local_receipts_only"
+    );
+    assert!(rows.iter().all(|row| row["command_id"].is_string()));
+
+    let denied = bounded(
+        tokio::process::Command::new(cli)
+            .args([
+                "--addr",
+                address.as_str(),
+                "call",
+                r#"{"command":"initiate","character":"Crazy"}"#,
+            ])
+            .output(),
+    )
+    .await
+    .unwrap();
+    assert!(!denied.status.success());
+    assert!(String::from_utf8_lossy(&denied.stderr).contains("--allow-write"));
+    assert!(fixture.calls.try_recv().is_err());
+    fixture.shutdown().await;
+}
