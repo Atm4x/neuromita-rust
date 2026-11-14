@@ -207,6 +207,46 @@ struct Client {
     timeout: Duration,
 }
 
+/// Send one correlated command to the running LocalControl server on loopback.
+/// The caller owns command admission. The result is the Core's response frame.
+pub async fn call_local_control(
+    address: SocketAddr,
+    timeout_limit: Duration,
+    mut command: Value,
+) -> Result<Value, AgentError> {
+    if !address.ip().is_loopback() {
+        return Err(AgentError::Usage("LocalControl is loopback-only".into()));
+    }
+    let id = command_id(&mut command)?;
+    let deadline = Instant::now() + timeout_limit;
+    timeout_at(deadline, async {
+        let mut client = Client::connect(address, timeout_limit).await?;
+        client.send(&command).await?;
+        client.response(id, deadline, None).await
+    })
+    .await
+    .map_err(|_| AgentError::Timeout)?
+}
+
+fn command_id(command: &mut Value) -> Result<Uuid, AgentError> {
+    let object = command
+        .as_object_mut()
+        .ok_or_else(|| AgentError::Protocol("command must be a JSON object".into()))?;
+    match object.get("command_id") {
+        Some(Value::String(id)) => {
+            Uuid::parse_str(id).map_err(|_| AgentError::Protocol("invalid command_id".into()))
+        }
+        Some(_) => Err(AgentError::Protocol(
+            "command_id must be UUID string".into(),
+        )),
+        None => {
+            let id = Uuid::new_v4();
+            object.insert("command_id".into(), json!(id));
+            Ok(id)
+        }
+    }
+}
+
 impl Client {
     async fn connect(address: SocketAddr, timeout_limit: Duration) -> Result<Self, AgentError> {
         let stream = timeout(timeout_limit, TcpStream::connect(address))
@@ -278,7 +318,7 @@ impl Client {
     async fn read_until(
         &mut self,
         deadline: Instant,
-        opts: &Options,
+        opts: Option<&Options>,
         predicate: impl Fn(&Value) -> bool,
     ) -> Result<Value, AgentError> {
         timeout_at(deadline, async {
@@ -287,7 +327,9 @@ impl Client {
                 if predicate(&frame) {
                     return Ok(frame);
                 }
-                if opts.show_events && frame["type"] != "settings" {
+                if let Some(opts) = opts.filter(|opts| opts.show_events)
+                    && frame["type"] != "settings"
+                {
                     emit(&frame, opts.include_private)?;
                 }
             }
@@ -300,7 +342,7 @@ impl Client {
         &mut self,
         id: Uuid,
         deadline: Instant,
-        opts: &Options,
+        opts: Option<&Options>,
     ) -> Result<Value, AgentError> {
         let expected_id = id.to_string();
         self.read_until(deadline, opts, |frame| frame["command_id"] == expected_id)
@@ -313,7 +355,7 @@ impl Client {
         deadline: Instant,
         opts: &Options,
     ) -> Result<Value, AgentError> {
-        self.read_until(deadline, opts, |frame| {
+        self.read_until(deadline, Some(opts), |frame| {
             frame["type"] == "request_status"
                 && frame["request_id"] == *request_id
                 && matches!(frame["state"].as_str(), Some("finished" | "cancelled"))
@@ -346,25 +388,12 @@ impl Client {
         if !is_read_only(&name) && !opts.allow_write {
             return Err(AgentError::WriteDenied(name));
         }
-        let id = match object.get("command_id") {
-            Some(Value::String(id)) => Uuid::parse_str(id)
-                .map_err(|_| AgentError::Protocol("invalid command_id".into()))?,
-            Some(_) => {
-                return Err(AgentError::Protocol(
-                    "command_id must be UUID string".into(),
-                ));
-            }
-            None => {
-                let id = Uuid::new_v4();
-                object.insert("command_id".into(), json!(id));
-                id
-            }
-        };
+        let id = command_id(&mut command)?;
         let deadline = Instant::now() + self.timeout;
         timeout_at(deadline, self.send(&command))
             .await
             .map_err(|_| AgentError::Timeout)??;
-        let response = self.response(id, deadline, opts).await?;
+        let response = self.response(id, deadline, Some(opts)).await?;
         if let Some(expected) = expect {
             if !is_subset(&expected, &response) {
                 return Err(AgentError::Assertion {

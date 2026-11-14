@@ -119,3 +119,26 @@ The gateway authenticates **its own** requests, but the underlying Core
 LocalControl loopback socket does not yet have server-side authentication.
 Do not bind it on a remote interface or claim this is a secure local-user
 boundary. Use an isolated disposable data root for mutation acceptance.
+
+## MCP over stdio
+
+Build the optional MCP executable with `cargo build --locked --offline --features mcp --bin neuromita-agent-mcp`.
+Configure your MCP client to start it over stdio. Supply the actual LocalControl
+loopback address of the running NeuroMita instance in `--core`.
+
+```json
+{
+  "mcpServers": {
+    "neuromita": {
+      "command": "C:/path/to/neuromita-agent-mcp.exe",
+      "args": ["--core", "127.0.0.1:8765"]
+    }
+  }
+}
+```
+
+`inspect_core` calls `debug_inspect`. `inspect_presenter` calls
+`presenter_inspect`; the `chat` surface requires a canonical `character` ID.
+Both tools are read-only and return the correlated LocalControl frame as
+structured MCP output. The executable uses the Rust MCP SDK and shares the TCP
+client with the CLI and HTTP gateway.

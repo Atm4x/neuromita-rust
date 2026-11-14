@@ -6,6 +6,9 @@ on:
       - 'src/agent_ipc.rs'
       - 'src/bin/neuromita-agent.rs'
       - 'src/bin/neuromita-agent-http.rs'
+      - 'src/bin/neuromita-agent-mcp.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - 'src/app.rs'
       - 'src/runtime.rs'
       - 'src/presentation/runtime.rs'
@@ -32,15 +35,16 @@ jobs:
           toolchain: '1.100.0'
           components: rustfmt
       - name: Formatting
-        run: cargo fmt --all -- --check
-      - name: IPC and HTTP checks
+        run: cargo fmt -p neuromita -- --check
+      - name: IPC, HTTP and MCP checks
         env:
           CARGO_BUILD_JOBS: '2'
           CARGO_INCREMENTAL: '0'
         run: |
-          cargo check --locked --offline --all-targets
+          cargo check --locked --offline --features mcp --all-targets
           cargo test --locked --offline --bin neuromita-agent-http -- --test-threads=1
           cargo test --locked --offline --lib agent_ipc::tests -- --test-threads=1
           cargo test --locked --offline --test local_control presenter_ipc_projects_live_gui_presenters_without_private_payloads -- --test-threads=1
           cargo test --locked --offline --test local_control optional_http_gateway_rejects_untrusted_clients_and_probes_real_core -- --test-threads=1
           cargo test --locked --offline --test local_control agent_ipc_binary_executes_jsonl_against_running_core -- --test-threads=1
+          cargo test --locked --offline --features mcp --test local_control mcp_stdio_probes_the_same_running_core -- --test-threads=1

@@ -2111,6 +2111,75 @@ async fn optional_http_gateway_rejects_untrusted_clients_and_probes_real_core() 
     fixture.shutdown().await;
 }
 
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn mcp_stdio_probes_the_same_running_core() {
+    let fixture = Fixture::start(|_| {}).await;
+    let mut process = tokio::process::Command::new(env!("CARGO_BIN_EXE_neuromita-agent-mcp"))
+        .args(["--core", &fixture.app.server().address().to_string()])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut input = process.stdin.take().unwrap();
+    let mut output = BufReader::new(process.stdout.take().unwrap()).lines();
+
+    for (id, method, params) in [
+        (
+            Some(1),
+            "initialize",
+            json!({
+                "protocolVersion": "2025-11-25", "capabilities": {},
+                "clientInfo": {"name": "local-control-test", "version": "1"}
+            }),
+        ),
+        (None, "notifications/initialized", json!({})),
+        (Some(2), "tools/list", json!({})),
+        (
+            Some(3),
+            "tools/call",
+            json!({"name":"inspect_presenter",
+            "arguments":{"surface":"chat","character":"Crazy"}}),
+        ),
+        (
+            Some(4),
+            "tools/call",
+            json!({"name":"inspect_core",
+            "arguments":{"scope":"timeline"}}),
+        ),
+    ] {
+        let mut message = json!({"jsonrpc":"2.0","method":method,"params":params});
+        if let Some(id) = id {
+            message["id"] = json!(id);
+        }
+        bounded(input.write_all(format!("{message}\n").as_bytes()))
+            .await
+            .unwrap();
+        if let Some(id) = id {
+            let line = bounded(output.next_line()).await.unwrap().unwrap();
+            let response: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(response["id"], id);
+            let result = &response["result"];
+            match id {
+                1 => assert_eq!(result["serverInfo"]["name"], "neuromita"),
+                2 => assert_eq!(result["tools"].as_array().unwrap().len(), 2),
+                3 => {
+                    let frame = &result["structuredContent"];
+                    assert_eq!(frame["type"], "presenter_inspect");
+                    assert_eq!(frame["snapshot"]["character"], "Crazy");
+                }
+                4 => assert_eq!(result["structuredContent"]["type"], "debug_inspect"),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    drop(input);
+    assert!(bounded(process.wait()).await.unwrap().success());
+    fixture.shutdown().await;
+}
+
 #[tokio::test]
 async fn agent_ipc_binary_executes_jsonl_against_running_core() {
     let mut fixture = Fixture::start(|_| {}).await;

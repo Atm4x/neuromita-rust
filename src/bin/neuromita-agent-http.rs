@@ -1,17 +1,16 @@
 use std::{env, io, net::SocketAddr, sync::Arc, time::Duration};
 
+use neuromita::agent_ipc::call_local_control;
 use serde_json::{Value, json};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    net::{TcpListener, TcpStream, tcp::OwnedReadHalf},
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
     sync::Semaphore,
     time::timeout,
 };
-use uuid::Uuid;
 
 const MAX_HEADERS: usize = 16 * 1024;
 const MAX_BODY: usize = 64 * 1024;
-const MAX_FRAME: usize = 1024 * 1024;
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(6);
 
 struct Options {
@@ -75,7 +74,6 @@ struct HttpRequest {
     path: String,
     auth: String,
     host: String,
-    content_type: Option<String>,
     body: Vec<u8>,
 }
 
@@ -175,7 +173,6 @@ async fn read_request(stream: &mut TcpStream) -> io::Result<HttpRequest> {
         path,
         auth: auth.unwrap_or_default(),
         host: host.unwrap_or_default(),
-        content_type,
         body,
     })
 }
@@ -248,51 +245,6 @@ fn admitted_post(value: Value, allow_write: bool) -> Result<Value, (u16, &'stati
     Ok(value)
 }
 
-async fn read_frame(reader: &mut BufReader<OwnedReadHalf>) -> io::Result<Value> {
-    let mut raw = Vec::new();
-    loop {
-        let buffer = reader.fill_buf().await?;
-        if buffer.is_empty() {
-            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
-        }
-        let newline = buffer.iter().position(|byte| *byte == b'\n');
-        let take = newline.map_or(buffer.len(), |index| index + 1);
-        if raw.len() + take > MAX_FRAME {
-            return Err(invalid("Core frame exceeds gateway safety bound"));
-        }
-        raw.extend_from_slice(&buffer[..take]);
-        reader.consume(take);
-        if newline.is_some() {
-            return serde_json::from_slice::<Value>(&raw).map_err(io::Error::other);
-        }
-    }
-}
-
-async fn core_call(address: SocketAddr, mut command: Value) -> io::Result<Value> {
-    let mut id = Uuid::new_v4();
-    if let Some(provided) = command.get("command_id") {
-        id = serde_json::from_value(provided.clone()).map_err(|_| invalid("invalid command_id"))?;
-    } else {
-        command["command_id"] = json!(id);
-    }
-    let core = TcpStream::connect(address).await?;
-    let (read, mut write) = core.into_split();
-    let mut reader = BufReader::new(read);
-    let hello = read_frame(&mut reader).await?;
-    if hello["type"] != "connected" {
-        return Err(invalid("Core handshake missing"));
-    }
-    let mut line = serde_json::to_vec(&command).map_err(io::Error::other)?;
-    line.push(b'\n');
-    write.write_all(&line).await?;
-    loop {
-        let response = read_frame(&mut reader).await?;
-        if response["command_id"] == json!(id) {
-            return Ok(response);
-        }
-    }
-}
-
 fn body_error(message: &str) -> Value {
     json!({"type":"error","error":message})
 }
@@ -340,7 +292,9 @@ async fn handle(
             }
             _ => return Err((404, "unknown endpoint")),
         };
-        let response = core_call(core, command).await.map_err(|_| (502, "Core unavailable or invalid response"))?;
+        let response = call_local_control(core, OPERATION_TIMEOUT, command)
+            .await
+            .map_err(|_| (502, "Core unavailable or invalid response"))?;
         Ok::<Value, (u16, &str)>(response)
     }).await;
     let (status, response) = match result {
