@@ -2296,6 +2296,41 @@ async fn local_control_presets_inspect_and_select_use_real_catalog_and_revision(
 }
 
 #[tokio::test]
+async fn presenter_admin_preset_revision_and_native_service_boundary() {
+    let fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+    let mut presets = command("presenter_inspect");
+    presets["surface"] = json!("presets");
+    client.send(presets.clone()).await;
+    let snapshot = client
+        .until(|r| r["command_id"] == presets["command_id"])
+        .await;
+    assert_eq!(snapshot["type"], "presenter_inspect", "{snapshot}");
+    assert_eq!(snapshot["snapshot"]["source"], "presets_presenter");
+    assert!(snapshot["snapshot"]["revision"].is_u64());
+    assert!(snapshot["snapshot"].to_string().find("api_key").is_none());
+
+    let mut native = command("presenter_admin_read");
+    native["query"] = json!({"query":"native_models","refresh":false});
+    client.send(native.clone()).await;
+    let response = client
+        .until(|r| r["command_id"] == native["command_id"])
+        .await;
+    assert_eq!(response["type"], "error");
+    assert_eq!(response["code"], "invalid_value");
+
+    let mut refresh = command("presenter_action");
+    refresh["action"] = json!({"action":"native_refresh"});
+    client.send(refresh.clone()).await;
+    let response = client
+        .until(|r| r["command_id"] == refresh["command_id"])
+        .await;
+    assert_eq!(response["type"], "error");
+    assert_eq!(response["code"], "invalid_value");
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
 async fn agent_scenario_retains_cancel_and_replay_ownership_in_one_connection() {
     use neuromita::agent_ipc::{AgentError, run_local_control_scenario};
     let fixture = Fixture::start(|_| {}).await;

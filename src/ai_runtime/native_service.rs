@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -19,7 +19,7 @@ use super::{
     native_download_operation::{
         NativeDownloadEvent, NativeDownloadOperation, NativeDownloadSelection,
     },
-    native_https::NativeHttpsOrigin,
+    native_https::{NativeHttpsOrigin, NativeTransferPhase},
     native_model::{NativeBackend, NativeModelSnapshot},
     native_revisions::{NativeRevisionOverview, NativeRevisionStore},
     native_speech::NativeSpeechKind,
@@ -35,12 +35,36 @@ struct NativeState {
     claims: HashMap<NativeSpeechKind, WorkerClaim>,
 }
 
+#[derive(Clone, Debug)]
+pub struct NativeDownloadStatus {
+    pub revision: u64,
+    pub operation_id: Option<Uuid>,
+    pub phase: &'static str,
+    pub transferred_bytes: u64,
+    pub planned_bytes: Option<u64>,
+    pub succeeded: Option<bool>,
+}
+
+impl Default for NativeDownloadStatus {
+    fn default() -> Self {
+        Self {
+            revision: 0,
+            operation_id: None,
+            phase: "idle",
+            transferred_bytes: 0,
+            planned_bytes: None,
+            succeeded: None,
+        }
+    }
+}
+
 pub struct AiHubNativeService {
     root: PathBuf,
     state: Mutex<NativeState>,
     stop: CancellationToken,
     registry: Arc<ServiceWorkerRegistry>,
     installation: Arc<InstallationOwner>,
+    download_status: watch::Sender<NativeDownloadStatus>,
 }
 
 pub fn native_download_configured() -> bool {
@@ -121,6 +145,7 @@ impl AiHubNativeService {
         registry: Arc<ServiceWorkerRegistry>,
         installation: Arc<InstallationOwner>,
     ) -> Arc<Self> {
+        let (download_status, _) = watch::channel(NativeDownloadStatus::default());
         Arc::new(Self {
             root,
             state: Mutex::new(NativeState {
@@ -132,7 +157,16 @@ impl AiHubNativeService {
             stop: CancellationToken::new(),
             registry,
             installation,
+            download_status,
         })
+    }
+
+    pub fn download_snapshot(&self) -> NativeDownloadStatus {
+        self.download_status.borrow().clone()
+    }
+
+    pub fn observe_download(&self) -> watch::Receiver<NativeDownloadStatus> {
+        self.download_status.subscribe()
     }
 
     pub async fn snapshot(&self) -> Result<NativeWorkflowSnapshot, String> {
@@ -580,6 +614,7 @@ impl AiHubNativeService {
                 component: "package".into(),
             })
             .map_err(|error| error.to_string())?;
+        let (inner_events, mut inner_receiver) = mpsc::unbounded_channel();
         let operation = NativeDownloadOperation::start_with_cancellation(
             NativeRevisionStore::new(revisions, runtime),
             trust,
@@ -587,7 +622,7 @@ impl AiHubNativeService {
             request,
             staging,
             Duration::from_secs(3600),
-            events,
+            inner_events,
             permit.cancellation().clone(),
             permit.operation(),
         )
@@ -595,6 +630,51 @@ impl AiHubNativeService {
         let id = operation.id();
         state.installation = Some(permit);
         state.download = Some(operation);
+        self.download_status.send_replace(NativeDownloadStatus {
+            revision: self.download_status.borrow().revision.saturating_add(1),
+            operation_id: Some(id),
+            phase: "starting",
+            transferred_bytes: 0,
+            planned_bytes: None,
+            succeeded: None,
+        });
+        let updates = self.download_status.clone();
+        tokio::spawn(async move {
+            while let Some(event) = inner_receiver.recv().await {
+                let terminal = matches!(event, NativeDownloadEvent::Finished { .. });
+                let snapshot = match &event {
+                    NativeDownloadEvent::Progress { id, progress } => NativeDownloadStatus {
+                        revision: updates.borrow().revision.saturating_add(1),
+                        operation_id: Some(*id),
+                        phase: match progress.phase {
+                            NativeTransferPhase::Manifest => "manifest",
+                            NativeTransferPhase::Downloading => "downloading",
+                            NativeTransferPhase::Publishing => "publishing",
+                        },
+                        transferred_bytes: progress.transferred_bytes,
+                        planned_bytes: progress.planned_bytes,
+                        succeeded: None,
+                    },
+                    NativeDownloadEvent::Finished { id, result } => NativeDownloadStatus {
+                        revision: updates.borrow().revision.saturating_add(1),
+                        operation_id: Some(*id),
+                        phase: if result.is_ok() {
+                            "transfer_completed"
+                        } else {
+                            "transfer_failed"
+                        },
+                        transferred_bytes: updates.borrow().transferred_bytes,
+                        planned_bytes: updates.borrow().planned_bytes,
+                        succeeded: None,
+                    },
+                };
+                updates.send_replace(snapshot);
+                let _ = events.send(event);
+                if terminal {
+                    break;
+                }
+            }
+        });
         Ok(id)
     }
 
@@ -605,6 +685,10 @@ impl AiHubNativeService {
                 self.installation.cancel(permit.operation());
             }
             operation.cancel();
+            let mut status = self.download_status.borrow().clone();
+            status.phase = "cancel_requested";
+            status.revision = status.revision.saturating_add(1);
+            self.download_status.send_replace(status);
             true
         } else {
             false
@@ -625,13 +709,22 @@ impl AiHubNativeService {
         } else {
             false
         };
-        if let Some(permit) = state.installation.take() {
+        let finalized = if let Some(permit) = state.installation.take() {
             if succeeded {
-                permit.complete().map_err(|error| error.to_string())?;
+                permit.complete().map_err(|error| error.to_string())
             } else {
-                permit.fail().map_err(|error| error.to_string())?;
+                permit.fail().map_err(|error| error.to_string())
             }
-        }
+        } else {
+            Ok(())
+        };
+        let installed = succeeded && finalized.is_ok();
+        let mut status = self.download_status.borrow().clone();
+        status.phase = if installed { "installed" } else { "failed" };
+        status.succeeded = Some(installed);
+        status.revision = status.revision.saturating_add(1);
+        self.download_status.send_replace(status);
+        finalized?;
         Ok(true)
     }
 

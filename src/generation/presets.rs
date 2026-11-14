@@ -828,7 +828,24 @@ impl PresetCatalog {
         id: PresetId,
         edit: PresetConnectionEdit,
     ) -> Result<(), PresetCatalogError> {
+        self.update_connection_checked(id, None, edit)
+    }
+
+    pub fn update_connection_checked(
+        &self,
+        id: PresetId,
+        expected_revision: Option<u64>,
+        edit: PresetConnectionEdit,
+    ) -> Result<(), PresetCatalogError> {
         let mut state = self.state.write().expect("preset catalog poisoned");
+        if let Some(expected) = expected_revision {
+            if state.revision != expected {
+                return Err(PresetCatalogError::Invalid(format!(
+                    "preset catalog revision conflict: expected {expected}, actual {}",
+                    state.revision
+                )));
+            }
+        }
         if state.runtime.contains_key(&id) {
             return Err(PresetCatalogError::RuntimeOnly(id));
         }

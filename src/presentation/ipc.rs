@@ -71,6 +71,45 @@ pub(crate) enum PresenterAction {
     PresetDelete {
         preset_id: u32,
     },
+    NativeRefresh {},
+    NativeSelect {
+        model_id: String,
+        manifest_sha256: String,
+        backend: crate::ai_runtime::native_model::NativeBackend,
+    },
+    NativeActivate {
+        model_id: String,
+        service: crate::ai_runtime::native_speech::NativeSpeechKind,
+        revision: String,
+    },
+    NativeStop {
+        model_id: String,
+        service: crate::ai_runtime::native_speech::NativeSpeechKind,
+        revision: String,
+    },
+    NativeInstall {
+        model_id: String,
+        manifest_sha256: String,
+        backend: crate::ai_runtime::native_model::NativeBackend,
+    },
+    NativeCancelInstall {},
+    PresetUpdateConnection {
+        preset_id: u32,
+        expected_revision: u64,
+        name: String,
+        template_id: String,
+        endpoint: String,
+        model: String,
+        temperature: f32,
+        max_output_tokens: u32,
+        timeout_ms: u64,
+        stream: bool,
+        max_retries: u8,
+        send_temperature: bool,
+        send_max_output_tokens: bool,
+        #[serde(default)]
+        api_key: Option<String>,
+    },
 }
 
 impl PresenterAction {
@@ -115,6 +154,8 @@ pub(crate) struct PresenterProbe {
     preset_selection: super::PresetsSettingsPresenter,
     pub(super) settings: std::sync::Arc<super::SettingsPresenter>,
     pub(super) characters: super::CharactersPresenter,
+    pub(super) native:
+        Option<std::sync::Arc<crate::ai_runtime::native_service::AiHubNativeService>>,
 }
 
 impl PresenterProbe {
@@ -131,6 +172,7 @@ impl PresenterProbe {
         preset_selection: super::PresetsSettingsPresenter,
         settings: std::sync::Arc<super::SettingsPresenter>,
         characters: super::CharactersPresenter,
+        native: Option<std::sync::Arc<crate::ai_runtime::native_service::AiHubNativeService>>,
     ) -> Self {
         Self {
             chat,
@@ -145,6 +187,7 @@ impl PresenterProbe {
             preset_selection,
             settings,
             characters,
+            native,
         }
     }
 
@@ -321,6 +364,186 @@ impl PresenterProbe {
                     .delete(crate::generation::PresetId(preset_id))
                     .map_err(|e| e.to_string())?;
                 json!({"action":"preset_delete","preset_id":preset_id})
+            }
+            NativeRefresh {} => {
+                let native = self
+                    .native
+                    .as_ref()
+                    .ok_or("native AI Hub is not configured")?;
+                let snapshot = native.refresh().await?;
+                json!({"action":"native_refresh","revision_count":snapshot.inventory.revisions.len(),
+                    "selection_count":snapshot.inventory.selections.len()})
+            }
+            NativeSelect {
+                model_id,
+                manifest_sha256,
+                backend,
+            } => {
+                let native = self
+                    .native
+                    .as_ref()
+                    .ok_or("native AI Hub is not configured")?;
+                native.select(&model_id, &manifest_sha256, backend).await?;
+                json!({"action":"native_select","model_id":model_id,"backend":backend.as_str(),
+                    "manifest_sha256":manifest_sha256})
+            }
+            NativeActivate {
+                model_id,
+                service,
+                revision,
+            } => {
+                let native = self
+                    .native
+                    .as_ref()
+                    .ok_or("native AI Hub is not configured")?;
+                let worker = native
+                    .activate_exact_for_service(service, &model_id, &revision)
+                    .await?;
+                json!({"action":"native_activate","model_id":worker.model_id,
+                    "session_id":worker.session_id,"phase":format!("{:?}",worker.phase),
+                    "service":service})
+            }
+            NativeStop {
+                model_id,
+                service,
+                revision,
+            } => {
+                let native = self
+                    .native
+                    .as_ref()
+                    .ok_or("native AI Hub is not configured")?;
+                native
+                    .deactivate_exact_for_service(service, &model_id, &revision)
+                    .await?;
+                json!({"action":"native_stop","model_id":model_id,"service":service})
+            }
+            NativeInstall {
+                model_id,
+                manifest_sha256,
+                backend,
+            } => {
+                let native = self
+                    .native
+                    .as_ref()
+                    .ok_or("native AI Hub is not configured")?;
+                let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+                let operation_id = native
+                    .start_download(
+                        crate::ai_runtime::native_download_operation::NativeDownloadSelection {
+                            model_id: model_id.clone(),
+                            manifest_sha256: manifest_sha256.clone(),
+                            backend,
+                        },
+                        sender,
+                    )
+                    .await?;
+                let owner = std::sync::Arc::clone(native);
+                tokio::spawn(async move {
+                    while let Some(event) = events.recv().await {
+                        if let crate::ai_runtime::native_download_operation::NativeDownloadEvent::Finished { id, .. } = event {
+                            let _ = owner.finish_download(id).await;
+                            break;
+                        }
+                    }
+                });
+                json!({"action":"native_install","operation_id":operation_id,
+                    "model_id":model_id,"manifest_sha256":manifest_sha256,"backend":backend.as_str(),
+                    "accepted":true})
+            }
+            NativeCancelInstall {} => {
+                let native = self
+                    .native
+                    .as_ref()
+                    .ok_or("native AI Hub is not configured")?;
+                let requested = native.cancel_download().await;
+                json!({"action":"native_cancel_install","cancel_requested":requested})
+            }
+            PresetUpdateConnection {
+                preset_id,
+                expected_revision,
+                name,
+                template_id,
+                endpoint,
+                model,
+                temperature,
+                max_output_tokens,
+                timeout_ms,
+                stream,
+                max_retries,
+                send_temperature,
+                send_max_output_tokens,
+                api_key,
+            } => {
+                use crate::generation::{
+                    PresetConnectionEdit, PresetDefinition, PresetGenerationEdit, PresetId,
+                    PresetProtocol, SecretKey,
+                };
+                if name.trim().is_empty()
+                    || name.len() > 256
+                    || endpoint.len() > 2048
+                    || model.len() > 256
+                    || template_id.len() > 64
+                    || max_retries > 4
+                    || api_key
+                        .as_ref()
+                        .is_some_and(|key| key.len() > 16384 || key.is_empty())
+                {
+                    return Err("invalid API preset connection parameters".into());
+                }
+                let connection = if template_id.is_empty() {
+                    if api_key.is_some() {
+                        return Err("unconfigured preset cannot accept API key".into());
+                    }
+                    None
+                } else {
+                    let template = super::PresetsPresenter::template(&template_id)
+                        .map_err(|e| e.to_string())?;
+                    let existing_credential = self
+                        .presets
+                        .list()
+                        .into_iter()
+                        .find(|(id, _)| id.0 == preset_id)
+                        .and_then(|(_, record)| match record.definition {
+                            PresetDefinition::Gemini(config)
+                                if template.protocol == PresetProtocol::Gemini =>
+                            {
+                                Some(config.credential)
+                            }
+                            PresetDefinition::OpenAi(config)
+                                if template.protocol == PresetProtocol::OpenAi(config.protocol) =>
+                            {
+                                config.credential
+                            }
+                            _ => None,
+                        });
+                    Some(PresetGenerationEdit {
+                        protocol: template.protocol,
+                        send_temperature,
+                        send_max_output_tokens,
+                        stream,
+                        max_retries,
+                        endpoint,
+                        model,
+                        credential: existing_credential.or(Some(template.credential)),
+                        temperature,
+                        max_output_tokens,
+                        timeout_ms,
+                    })
+                };
+                self.presets
+                    .update_connection_checked(
+                        PresetId(preset_id),
+                        expected_revision,
+                        PresetConnectionEdit {
+                            name,
+                            connection,
+                            key: api_key.map(SecretKey::new),
+                        },
+                    )
+                    .map_err(|e| e.to_string())?;
+                let revision = self.presets.snapshot().revision;
+                json!({"action":"preset_update_connection","preset_id":preset_id,
+                    "revision":revision,"credential_secret_returned":false})
             }
         };
         Ok(PresenterActionResult::Snapshot(json!({
@@ -507,16 +730,22 @@ impl PresenterProbe {
                 if character.is_some() {
                     return Err("presets does not accept character");
                 }
-                let records = self
-                    .presets
-                    .list()
-                    .into_iter()
-                    .take(256)
-                    .map(|(id, record)| json!({"id":id.0,"name":record.name}))
+                let view = self.presets.snapshot();
+                let revision = view.revision;
+                let records = view.records.iter().take(256)
+                    .map(|record| json!({"id":record.id.0,"name":record.name,
+                        "configured":record.configured,"template_id":record.template_id,
+                        "model":record.model,"endpoint":record.endpoint,
+                        "temperature":record.temperature,"max_output_tokens":record.max_output_tokens,
+                        "timeout_ms":record.timeout_ms,"stream":record.stream,
+                        "max_retries":record.max_retries,"send_temperature":record.send_temperature,
+                        "send_max_output_tokens":record.send_max_output_tokens,
+                        "credential_present":record.api_key.as_ref().is_some_and(|key| !key.expose().is_empty()),
+                        "credential_error_present":record.credential_error.is_some()}))
                     .collect::<Vec<_>>();
                 Ok(
                     json!({"schema_version":1,"surface":"presets","source":"presets_presenter",
-                    "active_preset_id":self.preset_selection.active.get().0,"records":records,
+                    "active_preset_id":self.preset_selection.active.get().0,"revision":revision,"records":records,
                     "privacy":"no provider credentials or prompt templates"}),
                 )
             }

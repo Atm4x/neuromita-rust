@@ -1470,6 +1470,7 @@ impl ApplicationLifecycle {
                 settings_presenter.presets.clone(),
                 Arc::clone(&settings_presenter),
                 CharactersPresenter::new(bindings.characters.clone()),
+                ai_hub_native.clone(),
             )),
         )));
         let stop = CancellationToken::new();

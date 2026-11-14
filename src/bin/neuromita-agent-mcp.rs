@@ -149,14 +149,27 @@ impl ServerHandler for NeuroMita {
                 ])
             ).with_annotations(ToolAnnotations::new().read_only(false)),
             Tool::new("presenter_presets",
-                "Manage the real PresetsPresenter catalog: select existing, create unconfigured, move or delete. Use inspect_presenter(surface=presets) for names/IDs. Requires --allow-write.",
+                "Manage the real PresetsPresenter catalog: select, create, move, delete, or update_connection with mandatory revision fence. API key requires --allow-content. Requires --allow-write.",
                 serde_json::Map::from_iter([
                     ("type".into(),json!("object")),("additionalProperties".into(),json!(false)),
                     ("required".into(),json!(["action"])),
                     ("properties".into(),json!({
-                        "action":{"type":"string","enum":["select","create_unconfigured","move","delete"]},
+                        "action":{"type":"string","enum":["select","create_unconfigured","move","delete","update_connection"]},
                         "preset_id":{"type":"integer","minimum":0,"maximum":4294967295_u64},
-                        "step":{"type":"integer","enum":[-1,1]}
+                        "step":{"type":"integer","enum":[-1,1]},
+                        "expected_revision":{"type":"integer","minimum":0},
+                        "name":{"type":"string","minLength":1,"maxLength":256},
+                        "template_id":{"type":"string","maxLength":64},
+                        "endpoint":{"type":"string","maxLength":2048},
+                        "model":{"type":"string","maxLength":256},
+                        "temperature":{"type":"number","minimum":0,"maximum":2},
+                        "max_output_tokens":{"type":"integer","minimum":1,"maximum":1000000},
+                        "timeout_ms":{"type":"integer","minimum":1,"maximum":600000},
+                        "stream":{"type":"boolean"},
+                        "max_retries":{"type":"integer","minimum":0,"maximum":4},
+                        "send_temperature":{"type":"boolean"},
+                        "send_max_output_tokens":{"type":"boolean"},
+                        "api_key":{"type":"string","minLength":1,"maxLength":16384}
                     })),
                 ])
             ).with_annotations(ToolAnnotations::new().read_only(false)),
@@ -168,9 +181,22 @@ impl ServerHandler for NeuroMita {
                     ("properties".into(),json!({"surface":{"type":"string","enum":["releases","ai_runtime"]}})),
                 ])
             ).with_annotations(ToolAnnotations::new().read_only(false)),
+            inspection_tool("presenter_native_inventory",
+                "Read exact native model revisions, selections and worker state from the same AI Hub service used by GUI.",
+                &[],json!({"refresh":{"type":"boolean"}})),
+            admin_write_tool("presenter_native",
+                "Execute native AI Hub operations through the application's existing native service. Requires --allow-write.",
+                &["action"],json!({
+                    "action":{"type":"string","enum":["refresh","select","activate","stop","install","cancel_install"]},
+                    "model_id":{"type":"string","maxLength":256},
+                    "manifest_sha256":{"type":"string","minLength":64,"maxLength":64},
+                    "revision":{"type":"string","minLength":64,"maxLength":64},
+                    "backend":{"type":"string","enum":["cpu","cuda","wgpu","onnx"]},
+                    "service":{"type":"string","enum":["tts","asr"]}
+                })),
             inspection_tool("presenter_wait",
                 "Wait for an actual Settings/Chat/CharacterMemory observer change (no polling). Timeout max 30s.",
-                &["target"],json!({"target":{"type":"string","enum":["settings","chat","memory"]},
+                &["target"],json!({"target":{"type":"string","enum":["settings","chat","memory","native_download"]},
                     "character":{"type":"string"},"after_revision":{"type":"integer","minimum":0},
                     "after_version":{"type":"string","minLength":64,"maxLength":64},
                     "timeout_ms":{"type":"integer","minimum":1,"maximum":30000}})),
@@ -281,6 +307,7 @@ impl ServerHandler for NeuroMita {
                 | "presenter_memory_edit"
                 | "presenter_conversation_edit"
                 | "presenter_retry_failed"
+                | "presenter_native"
         ) && !self.allow_write
         {
             return Err(ErrorData::invalid_params(
@@ -367,6 +394,15 @@ impl ServerHandler for NeuroMita {
             };
             return Ok(result.into());
         }
+        if request.name == "presenter_presets"
+            && args.get("api_key").is_some()
+            && !self.allow_content
+        {
+            return Err(ErrorData::invalid_params(
+                "setting a credential through MCP requires --allow-content",
+                None,
+            ));
+        }
         if request.name == "run_scenario" {
             if args.len() != 1 || !args.contains_key("steps") {
                 return Err(ErrorData::invalid_params("expected only steps", None));
@@ -378,8 +414,11 @@ impl ServerHandler for NeuroMita {
                 .clone();
             if !self.allow_content
                 && steps.iter().any(|step| {
-                    (step.get("command").and_then(Value::as_str) == Some("presenter_conversation")
-                        && step.get("include_content") == Some(&Value::Bool(true)))
+                    (step.get("command").and_then(Value::as_str) == Some("presenter_action")
+                        && step.get("action").and_then(|a| a.get("api_key")).is_some())
+                        || (step.get("command").and_then(Value::as_str)
+                            == Some("presenter_conversation")
+                            && step.get("include_content") == Some(&Value::Bool(true)))
                         || (step.get("command").and_then(Value::as_str)
                             == Some("presenter_admin_read")
                             && step.get("query").and_then(|q| q.get("include_content"))
@@ -502,6 +541,7 @@ fn command_for_tool(name: &str, mut args: Map<String, Value>) -> Result<Value, E
                     | "audio_input"
                     | "voice"
                     | "guide"
+                    | "presets"
             ) {
                 return Err(ErrorData::invalid_params("unknown presenter surface", None));
             }
@@ -723,12 +763,35 @@ fn command_for_tool(name: &str, mut args: Map<String, Value>) -> Result<Value, E
                 .ok_or_else(|| ErrorData::invalid_params("volume must be 0..100", None))?;
             json!({"command":"presenter_action","action":{"action":"voice_set_volume","volume":volume}})
         }
+        "presenter_native_inventory" => {
+            let refresh = args.remove("refresh").map_or(Ok(false), |v| {
+                v.as_bool()
+                    .ok_or_else(|| ErrorData::invalid_params("refresh must be boolean", None))
+            })?;
+            json!({"command":"presenter_admin_read","query":{"query":"native_models","refresh":refresh}})
+        }
+        "presenter_native" => {
+            let action = string(&mut args, "action")?;
+            let mut payload = json!({"action":format!("native_{action}")});
+            let required: &[&str] = match action.as_str() {
+                "refresh" | "cancel_install" => &[],
+                "select" | "install" => &["model_id", "manifest_sha256", "backend"],
+                "activate" | "stop" => &["model_id", "service", "revision"],
+                _ => return Err(ErrorData::invalid_params("unknown native operation", None)),
+            };
+            for key in required {
+                payload[*key] = args
+                    .remove(*key)
+                    .ok_or_else(|| ErrorData::invalid_params(format!("missing {key}"), None))?;
+            }
+            json!({"command":"presenter_action","action":payload})
+        }
         "presenter_presets" => {
             let action = string(&mut args, "action")?;
             let mut payload = json!({"action":format!("preset_{action}")});
             match action.as_str() {
                 "create_unconfigured" => {}
-                "select" | "move" | "delete" => {
+                "select" | "move" | "delete" | "update_connection" => {
                     let id = args
                         .remove("preset_id")
                         .and_then(|v| v.as_u64())
@@ -744,6 +807,30 @@ fn command_for_tool(name: &str, mut args: Map<String, Value>) -> Result<Value, E
                                 ErrorData::invalid_params("step must be -1 or 1", None)
                             })?;
                         payload["step"] = json!(step);
+                    }
+                    if action == "update_connection" {
+                        for name in [
+                            "expected_revision",
+                            "name",
+                            "template_id",
+                            "endpoint",
+                            "model",
+                            "temperature",
+                            "max_output_tokens",
+                            "timeout_ms",
+                            "stream",
+                            "max_retries",
+                            "send_temperature",
+                            "send_max_output_tokens",
+                        ] {
+                            let value = args.remove(name).ok_or_else(|| {
+                                ErrorData::invalid_params(format!("missing {name}"), None)
+                            })?;
+                            payload[name] = value;
+                        }
+                        if let Some(key) = args.remove("api_key") {
+                            payload["api_key"] = key;
+                        }
                     }
                 }
                 _ => {
@@ -992,6 +1079,51 @@ mod tests {
         .unwrap();
         assert_eq!(conversation["command"], "presenter_conversation");
         assert_eq!(conversation["include_content"], false);
+        let update = command_for_tool("presenter_presets", args(json!({
+            "action":"update_connection", "preset_id":42, "expected_revision":7,
+            "name":"Demo", "template_id":"openai", "endpoint":"https://api.openai.com/v1/responses",
+            "model":"gpt-test", "temperature":0.7, "max_output_tokens":1000,
+            "timeout_ms":60000, "stream":true, "max_retries":2,
+            "send_temperature":true, "send_max_output_tokens":true
+        }))).unwrap();
+        assert_eq!(update["action"]["action"], "preset_update_connection");
+        assert_eq!(update["action"]["expected_revision"], 7);
+        assert!(update["action"].get("api_key").is_none());
+        assert!(command_for_tool("inspect_presenter", args(json!({"surface":"presets"}))).is_ok());
+        let inventory =
+            command_for_tool("presenter_native_inventory", args(json!({"refresh":true}))).unwrap();
+        assert_eq!(inventory["command"], "presenter_admin_read");
+        assert_eq!(inventory["query"]["query"], "native_models");
+        assert_eq!(inventory["query"]["refresh"], true);
+        for action in ["refresh", "cancel_install"] {
+            let command =
+                command_for_tool("presenter_native", args(json!({"action":action}))).unwrap();
+            assert_eq!(command["action"]["action"], format!("native_{action}"));
+        }
+        for action in ["select", "install"] {
+            let command=command_for_tool("presenter_native",args(json!({
+                "action":action,"model_id":"voice","manifest_sha256":"a".repeat(64),"backend":"cuda"
+            }))).unwrap();
+            assert_eq!(command["action"]["backend"], "cuda");
+        }
+        for action in ["activate", "stop"] {
+            let command = command_for_tool(
+                "presenter_native",
+                args(json!({
+                    "action":action,"model_id":"voice","revision":"a".repeat(64),"service":"tts"
+                })),
+            )
+            .unwrap();
+            assert_eq!(command["action"]["service"], "tts");
+        }
+        assert!(
+            command_for_tool(
+                "presenter_native",
+                args(json!({"action":"activate", "model_id":"voice"}))
+            )
+            .is_err()
+        );
+        assert!(command_for_tool("presenter_native", args(json!({"action":"invalid"}))).is_err());
         let speech =
             command_for_tool("inspect_presenter", args(json!({"surface":"speech"}))).unwrap();
         assert_eq!(speech["surface"], "speech");

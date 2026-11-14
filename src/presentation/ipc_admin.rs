@@ -20,6 +20,10 @@ use crate::{
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "query", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum PresenterRead {
+    NativeModels {
+        #[serde(default)]
+        refresh: bool,
+    },
     Settings {
         area: SettingsArea,
         #[serde(default)]
@@ -84,6 +88,7 @@ pub(crate) enum WaitTarget {
     Settings,
     Chat,
     Memory,
+    NativeDownload,
 }
 
 fn default_limit() -> usize {
@@ -298,6 +303,62 @@ fn messages_json(
 impl PresenterProbe {
     pub(crate) async fn admin_read(&self, query: PresenterRead) -> Result<Value, String> {
         match query {
+            PresenterRead::NativeModels { refresh } => {
+                let native = self
+                    .native
+                    .as_ref()
+                    .ok_or("native AI Hub is not configured")?;
+                let snapshot = if refresh {
+                    native.refresh().await?
+                } else {
+                    native.snapshot().await?
+                };
+                let transfer = native.download_snapshot();
+                let authorized = native.authorized_releases();
+                let authorized_error = authorized.is_err();
+                let digest = |bytes: &[u8; 32]| -> String {
+                    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+                };
+                let approved_releases = authorized
+                    .unwrap_or_default()
+                    .into_iter()
+                    .take(256)
+                    .map(|r| {
+                        json!({"model_id":r.model_id,"manifest_sha256":digest(&r.manifest_sha256),
+                        "publisher_id":r.publisher_id})
+                    })
+                    .collect::<Vec<_>>();
+                let revisions = snapshot.inventory.revisions.iter().take(256).map(|r| {
+                    json!({"model_id":r.model_id,"name":r.display_name,"package_version":r.package_version,
+                        "manifest_sha256":digest(&r.manifest_sha256),
+                        "backends":r.backends.iter().map(|b| b.as_str()).collect::<Vec<_>>(),
+                        "services":r.speech_services})
+                }).collect::<Vec<_>>();
+                let selections = snapshot.inventory.selections.iter().take(256).map(|s| {
+                    json!({"model_id":s.choice.model_id,"manifest_sha256":digest(&s.choice.manifest_sha256),
+                        "backend":s.choice.backend.as_str(),"state":format!("{:?}",s.manifest_state)})
+                }).collect::<Vec<_>>();
+                let active = snapshot
+                    .service_workers
+                    .iter()
+                    .map(|s| {
+                        json!({"service":s.service,"model_id":s.choice.model_id,
+                        "manifest_sha256":digest(&s.choice.manifest_sha256),
+                        "backend":s.choice.backend.as_str(),
+                        "worker":s.worker.as_ref().map(|w|json!({"session_id":w.session_id,
+                            "phase":format!("{:?}",w.phase),"failed":w.last_failure.is_some()}))})
+                    })
+                    .collect::<Vec<_>>();
+                Ok(
+                    json!({"source":"ai_hub_native_service","revision_count":snapshot.inventory.revisions.len(),
+                    "revisions":revisions,"selections":selections,"active_service_workers":active,
+                    "authorized_releases":approved_releases,"authorized_catalog_error":authorized_error,
+                    "download":{"revision":transfer.revision,"operation_id":transfer.operation_id,"phase":transfer.phase,
+                        "transferred_bytes":transfer.transferred_bytes,"planned_bytes":transfer.planned_bytes,
+                        "succeeded":transfer.succeeded},
+                    "native_configured":true,"evidence_level":"application_owner_snapshot"}),
+                )
+            }
             PresenterRead::Wait {
                 target,
                 character,
@@ -310,6 +371,40 @@ impl PresenterProbe {
                 }
                 let deadline = std::time::Duration::from_millis(timeout_ms);
                 match target {
+                    WaitTarget::NativeDownload => {
+                        if character.is_some()
+                            || after_version.is_some()
+                            || after_revision.is_none()
+                        {
+                            return Err("native_download wait needs after_revision without character/version".into());
+                        }
+                        let native = self
+                            .native
+                            .as_ref()
+                            .ok_or("native AI Hub is not configured")?;
+                        let mut watch = native.observe_download();
+                        let threshold = after_revision.expect("validated");
+                        let wait = async {
+                            loop {
+                                let state = watch.borrow_and_update().clone();
+                                if state.revision != threshold {
+                                    return Ok::<_, String>(json!({"changed":true,
+                                        "revision":state.revision,"phase":state.phase,
+                                        "operation_id":state.operation_id,"succeeded":state.succeeded}));
+                                }
+                                watch
+                                    .changed()
+                                    .await
+                                    .map_err(|_| "native download observer stopped".to_string())?;
+                            }
+                        };
+                        match tokio::time::timeout(deadline, wait).await {
+                            Ok(result) => result,
+                            Err(_) => Ok(
+                                json!({"changed":false,"timed_out":true,"target":"native_download"}),
+                            ),
+                        }
+                    }
                     WaitTarget::Settings => {
                         if character.is_some()
                             || after_version.is_some()
