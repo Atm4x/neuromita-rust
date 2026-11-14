@@ -25,6 +25,7 @@ pub(crate) struct ApiBindings {
     pub(crate) settings: Arc<SettingsOwner>,
     pub(crate) presets: Arc<PresetCatalog>,
     pub(crate) games: Arc<GamePolicy>,
+    pub(crate) game_link: Option<crate::game_link::GameLinkHandle>,
     pub(crate) reminders: Arc<crate::reminders::RemindersHandle>,
 }
 

@@ -373,6 +373,7 @@ async fn discovery_matches_executable_commands_and_all_control_replies_are_corre
         "methods",
         "server_status",
         "presenter_inspect",
+        "game_link_inspect",
         "debug_inspect",
         "publish_message",
         "reply",
@@ -1499,6 +1500,54 @@ async fn game_link_audio_chunks_delivery_ack_and_ptt_survive_resume() {
     let ack_id = Uuid::new_v4();
     game.send(json!({"command_id":ack_id,"command":"acknowledge_result","request_id":request,"event_id":event,"applied":true})).await;
     assert_eq!(game.until("result_acknowledged").await["applied"], true);
+    let mut inspector = fixture.connect().await;
+    let mut inspect = command("game_link_inspect");
+    inspect["session_id"] = json!(session);
+    inspect["request_id"] = json!(request);
+    inspector.send(inspect.clone()).await;
+    let result = inspector
+        .until(|frame| frame["command_id"] == inspect["command_id"])
+        .await;
+    assert_eq!(result["type"], "game_link_inspect");
+    assert_eq!(
+        result["snapshot"]["source"],
+        "game_link_protocol_session_owner"
+    );
+    assert_eq!(result["snapshot"]["session"]["observed"], true);
+    assert_eq!(result["snapshot"]["session"]["delivery_acks"], 1);
+    assert_eq!(result["snapshot"]["session"]["resume_count"], 0);
+    assert_eq!(result["snapshot"]["request"]["request_id"], json!(request));
+    assert_eq!(result["snapshot"]["request"]["phase"], "finished");
+    assert_eq!(result["snapshot"]["request"]["event_id"], json!(event));
+    assert_eq!(
+        result["snapshot"]["request"]["delivery_ack"]["applied"],
+        true
+    );
+    assert_eq!(result["snapshot"]["request"]["playback_phase"], "completed");
+    assert_eq!(result["snapshot"]["full_stack_e2e_verified"], false);
+    assert!(!result.to_string().contains("audio output"));
+    assert!(!result.to_string().contains("RIFF-fixture-wave"));
+    assert!(!result.to_string().contains(token.to_string().as_str()));
+
+    let mut no_session = command("game_link_inspect");
+    no_session["request_id"] = json!(request);
+    inspector.send(no_session.clone()).await;
+    let invalid = inspector
+        .until(|frame| frame["command_id"] == no_session["command_id"])
+        .await;
+    assert_eq!(invalid["type"], "error");
+    assert_eq!(invalid["code"], "invalid_value");
+
+    let mut cross = command("game_link_inspect");
+    cross["session_id"] = json!(Uuid::new_v4());
+    cross["request_id"] = json!(request);
+    inspector.send(cross.clone()).await;
+    let hidden = inspector
+        .until(|frame| frame["command_id"] == cross["command_id"])
+        .await;
+    assert_eq!(hidden["snapshot"]["session"]["observed"], false);
+    assert_eq!(hidden["snapshot"]["request"]["observed"], false);
+
     drop(game);
     let mut resumed = GameClient::connect(address).await;
     resumed.send(json!({"command_id":Uuid::new_v4(),"command":"resume","session_id":session,"session_token":token})).await;
@@ -1507,6 +1556,17 @@ async fn game_link_audio_chunks_delivery_ack_and_ptt_survive_resume() {
     assert_eq!(state["ptt"]["capture_id"], capture.to_string());
     assert_eq!(state["deliveries"][0]["ack"]["applied"], true);
     assert_eq!(state["playback"][0]["report"]["phase"], "completed");
+    inspector.send(inspect.clone()).await;
+    let after_resume = inspector
+        .until(|frame| frame["command_id"] == inspect["command_id"])
+        .await;
+    assert_eq!(
+        after_resume["snapshot"]["request"]["delivery_ack"]["applied"],
+        true
+    );
+    assert_eq!(after_resume["snapshot"]["session"]["connected"], true);
+    assert_eq!(after_resume["snapshot"]["session"]["resume_count"], 1);
+    assert_eq!(after_resume["snapshot"]["session"]["delivery_acks"], 1);
     fixture.shutdown().await;
 }
 
@@ -2366,6 +2426,11 @@ async fn mcp_stdio_probes_the_same_running_core() {
             "tools/call",
             json!({"name":"inspect_onboarding", "arguments":{}}),
         ),
+        (
+            Some(8),
+            "tools/call",
+            json!({"name":"inspect_gamelink", "arguments":{}}),
+        ),
     ] {
         let mut message = json!({"jsonrpc":"2.0","method":method,"params":params});
         if let Some(id) = id {
@@ -2381,7 +2446,7 @@ async fn mcp_stdio_probes_the_same_running_core() {
             let result = &response["result"];
             match id {
                 1 => assert_eq!(result["serverInfo"]["name"], "neuromita"),
-                2 => assert_eq!(result["tools"].as_array().unwrap().len(), 8),
+                2 => assert_eq!(result["tools"].as_array().unwrap().len(), 9),
                 3 => {
                     let frame = &result["structuredContent"];
                     assert_eq!(frame["type"], "presenter_inspect");
@@ -2395,6 +2460,10 @@ async fn mcp_stdio_probes_the_same_running_core() {
                 6 => assert_eq!(result["structuredContent"]["ok"], true),
                 7 => {
                     assert!(result["structuredContent"]["snapshot"]["guide_completed"].is_boolean())
+                }
+                8 => {
+                    assert_eq!(result["structuredContent"]["snapshot"]["enabled"], true);
+                    assert_eq!(result["structuredContent"]["type"], "game_link_inspect");
                 }
                 _ => unreachable!(),
             }

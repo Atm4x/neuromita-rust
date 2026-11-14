@@ -226,6 +226,12 @@ commands! {
         #[serde(default)]
         character: Option<CharacterId>,
     },
+    GameLinkInspect {
+        #[serde(default)]
+        session_id: Option<Uuid>,
+        #[serde(default)]
+        request_id: Option<Uuid>,
+    },
     DebugInspect {
         scope: DebugScope,
         #[serde(default)]
@@ -626,6 +632,20 @@ async fn client(
                     };
                     send(&outbound, response, &stop).await?;
                 }
+                Command::GameLinkInspect { session_id, request_id } => {
+                    if request_id.is_some() && session_id.is_none() {
+                        send(&outbound, error_response(Some(envelope.command_id),
+                            ErrorCode::InvalidValue, "request_id requires session_id"), &stop).await?;
+                        continue;
+                    }
+                    let snapshot = match &api.game_link {
+                        Some(game) => game.inspection(session_id, request_id),
+                        None => json!({"enabled":false,"source":"game_link_protocol_session_owner",
+                            "evidence_level":"core_gamelink_tcp_only", "full_stack_e2e_verified":false}),
+                    };
+                    send(&outbound, json!({"type":"game_link_inspect", "command_id":envelope.command_id,
+                        "snapshot":snapshot}), &stop).await?;
+                }
                 Command::DebugInspect { scope, character, event_id, request_id } => {
                     let invalid_fields = match scope {
                         DebugScope::Character => request_id.is_some()
@@ -646,6 +666,7 @@ async fn client(
                             "presenter_surfaces": ["chat", "ai_runtime", "connections", "speech", "releases"],
                             "character_event_lookup": true,
                             "request_id_lookup": true,
+                            "game_link_session_delivery_lookup": true,
                             "presenter_requires_core_lifecycle": true,
                             "server_authorized_deep_writes": false,
                             "mutating_commands": ["publish_message", "reply", "react", "initiate", "cancel", "set_volume", "set_active_preset"],

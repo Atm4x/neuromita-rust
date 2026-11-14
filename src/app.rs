@@ -1327,6 +1327,7 @@ impl ApplicationLifecycle {
             settings: settings_owner,
             presets: Arc::clone(&presets),
             games: Arc::clone(&games),
+            game_link: game_link.as_ref().map(|(_, handle)| handle.clone()),
             reminders,
         });
         let mut ai_runtime_status = if let Some(live) = &live_speech {

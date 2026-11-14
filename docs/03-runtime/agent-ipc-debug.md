@@ -218,3 +218,47 @@ GameLink event delivery, mic/device capture, model installation, audible TTS,
 Slint/Guide navigation, persistence **after a physical restart** and automatic
 reconnect require independent actors and explicit evidence. A local inspector
 must not mark #442 full-stack gates PASS for these operations.
+
+## GameLink delivery and reconnect probes (`inspect_gamelink`)
+
+The optional ninth MCP tool, `inspect_gamelink`, reads the **existing GameLink
+protocol session owner**, not the LocalControl connection summary or a second
+cache. The equivalent read-only LocalControl command and authenticated HTTP
+routes are:
+
+```json
+{"command":"game_link_inspect"}
+{"command":"game_link_inspect","session_id":"<session UUID>"}
+{"command":"game_link_inspect","session_id":"<session UUID>","request_id":"<request UUID>"}
+```
+
+```text
+GET /v1/gamelink
+GET /v1/gamelink/<session UUID>/request/<request UUID>
+```
+
+The MCP tool takes optional `session_id` and `request_id` UUID strings.
+`request_id` without `session_id` is rejected. With neither ID, only counts
+of existing/connected sessions are returned; individual session identities are
+**not** enumerated. With a known session ID, it reports connected state,
+context revision, number of recorded command receipts, delivery ACK count,
+playback report count, PTT active flag, and **resume_count**. With a known
+request ID, the authoritative request state, terminal flag, matching event ID,
+GameLink accepted `acknowledge_result` (`applied` and `error_present` only), and
+playback phase become visible. No session credentials, private text, audio,
+raw Unity error messages, or other sessions' request IDs are returned.
+
+A GameLink ACK proves only that the GameLink protocol owner accepted a matching
+ACK sent by its connected client. An `applied: true` claim is supplied by the
+client and **does not independently prove Unity scene mutation, rendered speech,
+or actual playback**. `resume_count` increments on successful ownership transfer
+and does not reset on reconnect; a stable delivery ACK count and replayed request
+identity can then support a duplicate-prevention acceptance trace. The data is
+explicitly classified `core_gamelink_tcp_only`, not full-stack E2E.
+
+Integration verification uses the real TCP GameLink lifecycle: initiate a
+request, finish generation, retrieve WAV bytes, send playback start/completed,
+acknowledge its event, inspect by session/request ID through LocalControl,
+reconnect with the real session credential, then inspect again. Unknown sessions
+and request-without-session cases fail closed without disclosing payloads.
+The Unity-side fixture/agent remains responsible for proving who sent that ACK.

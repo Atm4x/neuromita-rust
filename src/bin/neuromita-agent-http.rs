@@ -198,6 +198,7 @@ fn get_command(path: &str) -> Option<Value> {
         "/v1/requests" => Some(json!({"command":"debug_inspect","scope":"requests"})),
         "/v1/presets" => Some(json!({"command":"debug_inspect","scope":"presets"})),
         "/v1/onboarding" => Some(json!({"command":"debug_inspect","scope":"onboarding"})),
+        "/v1/gamelink" => Some(json!({"command":"game_link_inspect"})),
         "/v1/presenter/ai_runtime" => {
             Some(json!({"command":"presenter_inspect","surface":"ai_runtime"}))
         }
@@ -209,6 +210,12 @@ fn get_command(path: &str) -> Option<Value> {
             Some(json!({"command":"presenter_inspect","surface":"releases"}))
         }
         _ => {
+            if let Some(tail) = path.strip_prefix("/v1/gamelink/") {
+                let (session, request) = tail.split_once("/request/")?;
+                return Some(json!({"command":"game_link_inspect",
+                    "session_id":Uuid::parse_str(session).ok()?,
+                    "request_id":Uuid::parse_str(request).ok()?}));
+            }
             if let Some(request) = path.strip_prefix("/v1/request/") {
                 return Uuid::parse_str(request).ok().map(
                     |id| json!({"command":"debug_inspect","scope":"request","request_id":id}),
@@ -255,7 +262,12 @@ fn admitted_post(value: Value, allow_write: bool) -> Result<Value, (u16, &'stati
         .ok_or((400, "missing command"))?;
     let read_only = matches!(
         name,
-        "ping" | "methods" | "server_status" | "debug_inspect" | "presenter_inspect"
+        "ping"
+            | "methods"
+            | "server_status"
+            | "debug_inspect"
+            | "presenter_inspect"
+            | "game_link_inspect"
     );
     let mutating = matches!(
         name,
@@ -365,6 +377,16 @@ mod tests {
     #[test]
     fn closed_routes_and_write_guard() {
         assert!(get_command("/v1/presenter/chat/Crazy").is_some());
+        assert_eq!(
+            get_command("/v1/gamelink").unwrap()["command"],
+            "game_link_inspect"
+        );
+        let scoped = format!("/v1/gamelink/{}/request/{}", Uuid::new_v4(), Uuid::new_v4());
+        assert_eq!(
+            get_command(&scoped).unwrap()["command"],
+            "game_link_inspect"
+        );
+        assert!(get_command("/v1/gamelink/../request/bad").is_none());
         assert!(get_command("/v1/timeline?dump=true").is_none());
         assert!(get_command("/v1/character/../../raw").is_none());
         assert!(admitted_post(json!({"command":"initiate"}), false).is_err());

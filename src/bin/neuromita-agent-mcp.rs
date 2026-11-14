@@ -59,6 +59,15 @@ impl ServerHandler for NeuroMita {
                 }),
             ),
             inspection_tool(
+                "inspect_gamelink",
+                "Read actual GameLink connection/session, delivery ACK and playback state by session/request ID. No session tokens, audio or Unity error text. An ACK is not visual Unity proof.",
+                &[],
+                json!({
+                    "session_id": {"type":"string", "format":"uuid"},
+                    "request_id": {"type":"string", "format":"uuid", "description":"Requires session_id"}
+                }),
+            ),
+            inspection_tool(
                 "inspect_onboarding",
                 "Inspect persisted revision and Guide state from actual Core settings, not GUI.",
                 &[],
@@ -208,6 +217,29 @@ fn command_for_tool(name: &str, mut args: Map<String, Value>) -> Result<Value, E
             let request_id = uuid_field(&mut args, "request_id")?;
             json!({"command":"debug_inspect", "scope":"request", "request_id":request_id})
         }
+        "inspect_gamelink" => {
+            let session_id = args.remove("session_id");
+            let request_id = args.remove("request_id");
+            if request_id.is_some() && session_id.is_none() {
+                return Err(ErrorData::invalid_params(
+                    "request_id requires session_id",
+                    None,
+                ));
+            }
+            let mut command = json!({"command":"game_link_inspect"});
+            for (name, value) in [("session_id", session_id), ("request_id", request_id)] {
+                if let Some(value) = value {
+                    let uuid = value
+                        .as_str()
+                        .and_then(|v| Uuid::parse_str(v).ok())
+                        .ok_or_else(|| {
+                            ErrorData::invalid_params(format!("invalid {name} UUID"), None)
+                        })?;
+                    command[name] = json!(uuid);
+                }
+            }
+            command
+        }
         "inspect_presets" => json!({"command":"debug_inspect", "scope":"presets"}),
         "inspect_onboarding" => json!({"command":"debug_inspect", "scope":"onboarding"}),
         "select_active_preset" => {
@@ -332,6 +364,29 @@ mod tests {
         assert_eq!(selected["command"], "set_active_preset");
         assert_eq!(selected["preset_id"], 12);
         assert!(command_for_tool("select_active_preset", args(json!({"preset_id":-1}))).is_err());
+        let game = command_for_tool(
+            "inspect_gamelink",
+            args(json!({"session_id":Uuid::new_v4(), "request_id":Uuid::new_v4()})),
+        )
+        .unwrap();
+        assert_eq!(game["command"], "game_link_inspect");
+        assert!(
+            command_for_tool(
+                "inspect_gamelink",
+                args(json!({"request_id":Uuid::new_v4()}))
+            )
+            .is_err()
+        );
+        assert!(
+            command_for_tool("inspect_gamelink", args(json!({"session_id":"not-uuid"}))).is_err()
+        );
+        assert!(
+            command_for_tool(
+                "inspect_gamelink",
+                args(json!({"session_id":Uuid::new_v4(),"token":"secret"}))
+            )
+            .is_err()
+        );
         let speech =
             command_for_tool("inspect_presenter", args(json!({"surface":"speech"}))).unwrap();
         assert_eq!(speech["surface"], "speech");
