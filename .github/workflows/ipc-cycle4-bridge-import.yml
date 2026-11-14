@@ -1,4 +1,4 @@
-name: Git Bridge MCP Cycle 10 incoming bundle
+name: Git Bridge MCP Cycle 11 AI Hub install import
 on:
   push:
     branches:
@@ -16,22 +16,22 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true
-      - name: Verify source and stage changes over updated PR HEAD
+      - name: Verify local source and stage onto PR 446
         shell: bash
         run: |
           set -euo pipefail
-          EXPECTED_PR_HEAD=5e1d7dbf2404ef08d08abc45581d3172358aa24b
-          EXPECTED_LOCAL_HEAD=52a8a34fea51717d5522eaa8f87a29b0cad35281
+          EXPECTED_PR_HEAD=7403e70f1ecf25a71665e3f1acd50ba8adafa80d
+          EXPECTED_LOCAL_HEAD=e74442d6320365d84d179effd838c885d628e3c7
           git fetch origin refs/heads/bridge/ipc-cycle4-candidate-20261114:refs/remotes/origin/ipc-candidate
           test "$(git rev-parse refs/remotes/origin/ipc-candidate)" = "$EXPECTED_PR_HEAD"
-          base64 -d .bridge/ipc-cycle4-outgoing.b64 > /tmp/cycle10.bundle
-          echo "950bc24134b75805e592c78108169f143920c28e3d4c3c616edb857e2f11b1df  /tmp/cycle10.bundle" | sha256sum -c -
-          git bundle verify /tmp/cycle10.bundle
-          git fetch /tmp/cycle10.bundle refs/heads/codex/mcp-presenter-control-20261114:refs/heads/cycle10-source
-          test "$(git rev-parse refs/heads/cycle10-source)" = "$EXPECTED_LOCAL_HEAD"
-          git merge-base --is-ancestor 8f1b6688975ffdf01ad5e21574ed98226f872b37 cycle10-source
-          git switch -c cycle10-stage "$EXPECTED_PR_HEAD"
+          base64 -d .bridge/ipc-cycle4-outgoing.b64 > /tmp/cycle11.bundle
+          echo "a7cb07cacda4150fc31da2e1b27d4096499d9f58eda316f3803dff94e24ebc0b  /tmp/cycle11.bundle" | sha256sum -c -
+          git bundle verify /tmp/cycle11.bundle
+          git fetch /tmp/cycle11.bundle refs/heads/codex/mcp-presenter-control-20261114:refs/heads/cycle11-source
+          test "$(git rev-parse refs/heads/cycle11-source)" = "$EXPECTED_LOCAL_HEAD"
+          git merge-base --is-ancestor 8f1b6688975ffdf01ad5e21574ed98226f872b37 cycle11-source
+          git switch -c cycle11-stage "$EXPECTED_PR_HEAD"
           git -c user.name='Git Bridge' -c user.email='git-bridge@users.noreply.github.com' cherry-pick "$EXPECTED_LOCAL_HEAD"
           git diff "$EXPECTED_PR_HEAD" --check
-          git push origin refs/heads/cycle10-stage:refs/heads/bridge/ipc-cycle10-staged-20261115
+          git push origin refs/heads/cycle11-stage:refs/heads/bridge/ipc-cycle11-staged-20261115
           git rev-parse HEAD
