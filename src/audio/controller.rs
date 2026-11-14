@@ -257,7 +257,7 @@ impl SpeechSessionController {
         let session_stop = run_stop.clone();
         let task = tokio::spawn(async move {
             let result = handler
-                .run(capture, segmenter, receive, run_stop.clone())
+                .run(capture, segmenter, receive, run_stop.child_token())
                 .await;
             sender.send_replace(match result {
                 Ok(()) => SpeechSessionSnapshot::default(),

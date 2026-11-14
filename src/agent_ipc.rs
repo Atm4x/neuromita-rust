@@ -595,7 +595,7 @@ mod tests {
         let mut client = Client::connect(opts.address, opts.timeout).await.unwrap();
         let deadline = Instant::now() + Duration::from_millis(60);
         let start = Instant::now();
-        let result = client.response(Uuid::new_v4(), deadline, &opts).await;
+        let result = client.response(Uuid::new_v4(), deadline, Some(&opts)).await;
         assert!(matches!(result, Err(AgentError::Timeout)));
         assert!(start.elapsed() < Duration::from_millis(250));
         server.abort();
