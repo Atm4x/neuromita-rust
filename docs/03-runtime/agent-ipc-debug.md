@@ -142,3 +142,15 @@ loopback address of the running NeuroMita instance in `--core`.
 Both tools are read-only and return the correlated LocalControl frame as
 structured MCP output. The executable uses the Rust MCP SDK and shares the TCP
 client with the CLI and HTTP gateway.
+
+### Targeted issue #442 probes (Core-only evidence)
+
+`GET /v1/request/{request_uuid}` returns a privacy-safe bounded ChatPresenter
+state for that request ID, or `observed=false` if absent from the presenter
+retention window. `GET /v1/character/{character}/event/{event_uuid}` checks
+one observer's projection at the returned branch/head sequence, without
+exposing any payload or proving that a hidden event does not exist.
+
+`GET /v1/presenter/speech` and `/v1/presenter/releases` expose only phase,
+error-presence and structural counters from lifecycle-owned presenters. All
+these probes are read-only and remain `core_ipc_only`, not Unity E2E PASS.

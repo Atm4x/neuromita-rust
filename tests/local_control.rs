@@ -1960,6 +1960,96 @@ async fn tcp_replay_treats_audience_sets_as_unordered_without_losing_conflict_de
 }
 
 #[tokio::test]
+async fn typed_observer_visibility_and_request_probes_are_privacy_safe() {
+    let mut fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+    let event_id = Uuid::new_v4();
+    let mut publish = command("publish_message");
+    publish["event_id"] = json!(event_id);
+    publish["occurred_at_unix_ms"] = json!(1234);
+    publish["speaker"] = json!("player");
+    publish["content"] = json!("private payload for witnesses");
+    publish["targets"] = json!(["player"]);
+    publish["participants"] = json!(["player"]);
+    publish["seen_by"] = json!(["Crazy", "Kind"]);
+    client.send(publish.clone()).await;
+    let sent = client
+        .until(|frame| frame["command_id"] == publish["command_id"])
+        .await;
+    assert_eq!(sent["type"], "published", "{sent}");
+
+    for (observer, expected) in [("Crazy", true), ("Kind", true), ("Cappie", false)] {
+        let mut cmd = command("debug_inspect");
+        cmd["scope"] = json!("character");
+        cmd["character"] = json!(observer);
+        cmd["event_id"] = json!(event_id);
+        client.send(cmd.clone()).await;
+        let response = client
+            .until(|frame| frame["command_id"] == cmd["command_id"])
+            .await;
+        assert_eq!(response["type"], "debug_inspect", "{response}");
+        assert_eq!(response["snapshot"]["character"], observer);
+        assert_eq!(response["snapshot"]["event_visible"], expected);
+        assert_eq!(response["snapshot"]["queried_event_id"], json!(event_id));
+        assert_eq!(response["snapshot"]["head_sequence"], 1);
+        assert!(!response.to_string().contains("private payload"));
+    }
+    for bad in [
+        json!({"scope":"character","event_id":event_id}),
+        json!({"scope":"timeline","event_id":event_id}),
+        json!({"scope":"request","character":"Crazy","request_id":Uuid::new_v4()}),
+        json!({"scope":"request"}),
+    ] {
+        let mut cmd = command("debug_inspect");
+        for (key, value) in bad.as_object().unwrap() {
+            cmd[key] = value.clone();
+        }
+        client.send(cmd.clone()).await;
+        let response = client
+            .until(|frame| frame["command_id"] == cmd["command_id"])
+            .await;
+        assert_eq!(response["type"], "error", "{response}");
+        assert_eq!(response["code"], "invalid_value");
+    }
+
+    let command_id = Uuid::new_v4();
+    client
+        .send(json!({"command_id":command_id,"command":"initiate","character":"Crazy"}))
+        .await;
+    let accepted = client.accepted(command_id).await;
+    let request_id = uuid(&accepted["request_id"]);
+    let provider = fixture.call().await;
+    provider.finish("private model response");
+    let terminal = client.terminal(request_id).await;
+    assert_eq!(terminal["outcome"], "success");
+
+    let mut observed = None;
+    for _ in 0..60 {
+        let mut cmd = command("debug_inspect");
+        cmd["scope"] = json!("request");
+        cmd["request_id"] = json!(request_id);
+        client.send(cmd.clone()).await;
+        let response = client
+            .until(|frame| frame["command_id"] == cmd["command_id"])
+            .await;
+        assert_eq!(response["type"], "debug_inspect", "{response}");
+        let snapshot = &response["snapshot"];
+        assert_eq!(snapshot["request_id"], json!(request_id));
+        assert!(!response.to_string().contains("private model response"));
+        if snapshot["observed"] == true && snapshot["request"]["terminal"] == true {
+            observed = Some(response);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let response = observed.expect("terminal request should appear in existing ChatPresenter view");
+    assert_eq!(response["snapshot"]["request"]["state"], "finished");
+    assert_eq!(response["snapshot"]["request"]["outcome"], "success");
+    assert!(response["snapshot"]["request"]["event_id"].is_string());
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
 async fn debug_inspection_is_canonical_read_only_and_correlated() {
     let fixture = Fixture::start(|_| {}).await;
     let mut client = fixture.connect().await;

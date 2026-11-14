@@ -8,6 +8,7 @@ use tokio::{
     sync::Semaphore,
     time::timeout,
 };
+use uuid::Uuid;
 
 const MAX_HEADERS: usize = 16 * 1024;
 const MAX_BODY: usize = 64 * 1024;
@@ -179,9 +180,10 @@ async fn read_request(stream: &mut TcpStream) -> io::Result<HttpRequest> {
 
 fn authorized(received: &str, token: &str) -> bool {
     let expected = format!("Bearer {token}");
-    received.len() == expected.len()
-        && ring::constant_time::verify_slices_are_equal(received.as_bytes(), expected.as_bytes())
-            .is_ok()
+    bool::from(subtle::ConstantTimeEq::ct_eq(
+        received.as_bytes(),
+        expected.as_bytes(),
+    ))
 }
 
 fn get_command(path: &str) -> Option<Value> {
@@ -200,7 +202,31 @@ fn get_command(path: &str) -> Option<Value> {
         "/v1/presenter/connections" => {
             Some(json!({"command":"presenter_inspect","surface":"connections"}))
         }
+        "/v1/presenter/speech" => Some(json!({"command":"presenter_inspect","surface":"speech"})),
+        "/v1/presenter/releases" => {
+            Some(json!({"command":"presenter_inspect","surface":"releases"}))
+        }
         _ => {
+            if let Some(request) = path.strip_prefix("/v1/request/") {
+                return Uuid::parse_str(request).ok().map(
+                    |id| json!({"command":"debug_inspect","scope":"request","request_id":id}),
+                );
+            }
+            if let Some(tail) = path.strip_prefix("/v1/character/")
+                && let Some((character, event)) = tail.split_once("/event/")
+            {
+                if character.is_empty()
+                    || character.len() > 48
+                    || !character
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                {
+                    return None;
+                }
+                return Uuid::parse_str(event).ok().map(|id| {
+                    json!({"command":"debug_inspect","scope":"character", "character":character,"event_id":id})
+                });
+            }
             let (name, presenter) = match path.strip_prefix("/v1/presenter/chat/") {
                 Some(name) => (name, true),
                 None => (path.strip_prefix("/v1/character/")?, false),

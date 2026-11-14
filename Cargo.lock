@@ -3100,6 +3100,7 @@ dependencies = [
  "serde_json",
  "slint",
  "slint-build",
+ "subtle",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",

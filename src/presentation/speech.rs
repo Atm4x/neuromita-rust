@@ -4,6 +4,7 @@ use tokio::sync::watch;
 
 use crate::audio::controller::SpeechSessionSnapshot;
 
+#[derive(Clone)]
 pub struct SpeechSessionPresenter {
     updates: watch::Receiver<SpeechSessionSnapshot>,
 }

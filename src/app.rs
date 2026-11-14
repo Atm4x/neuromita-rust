@@ -1450,6 +1450,8 @@ impl ApplicationLifecycle {
             Some(crate::presentation::PresenterProbe::new(
                 chat.clone(),
                 ai_runtime_status.clone(),
+                speech_view.clone(),
+                releases.clone(),
             )),
         )));
         let stop = CancellationToken::new();

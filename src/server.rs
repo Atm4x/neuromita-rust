@@ -229,6 +229,10 @@ commands! {
         scope: DebugScope,
         #[serde(default)]
         character: Option<CharacterId>,
+        #[serde(default)]
+        event_id: Option<Uuid>,
+        #[serde(default)]
+        request_id: Option<Uuid>,
     },
     PublishMessage {
         event_id: Uuid,
@@ -292,6 +296,7 @@ enum DebugScope {
     Timeline,
     Character,
     Requests,
+    Request,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -613,12 +618,26 @@ async fn client(
                     };
                     send(&outbound, response, &stop).await?;
                 }
-                Command::DebugInspect { scope, character } => {
+                Command::DebugInspect { scope, character, event_id, request_id } => {
+                    let invalid_fields = match scope {
+                        DebugScope::Character => request_id.is_some()
+                            || (event_id.is_some() && character.is_none()),
+                        DebugScope::Request => request_id.is_none()
+                            || character.is_some() || event_id.is_some(),
+                        _ => character.is_some() || event_id.is_some() || request_id.is_some(),
+                    };
+                    if invalid_fields {
+                        send(&outbound, error_response(Some(envelope.command_id),
+                            ErrorCode::InvalidValue, "parameters do not match inspection scope"), &stop).await?;
+                        continue;
+                    }
                     let snapshot = match scope {
                         DebugScope::Capabilities => Ok(json!({
                             "protocol": "local_control_jsonl_v1",
                             "capabilities": ["lifecycle", "timeline", "character", "requests"],
-                            "presenter_surfaces": ["chat", "ai_runtime", "connections"],
+                            "presenter_surfaces": ["chat", "ai_runtime", "connections", "speech", "releases"],
+                            "character_event_lookup": true,
+                            "request_id_lookup": true,
                             "presenter_requires_core_lifecycle": true,
                             "server_authorized_deep_writes": false,
                             "mutating_commands": ["publish_message", "reply", "react", "initiate", "cancel", "set_volume"],
@@ -666,14 +685,22 @@ async fn client(
                                         match at {
                                             Err(error) => Err(error),
                                             Ok(at) => match tokio::time::timeout(std::time::Duration::from_secs(3), handle.get_context(at)).await {
-                                                Ok(Ok(view)) => Ok(json!({
-                                                    "character": character,
-                                                    "branch_id": at.branch_id,
-                                                    "head_sequence": at.through,
-                                                    "visible_messages": view.view.count(),
-                                                    "visible_world_events": view.view.world_events().len(),
-                                                    "privacy": "counts only; no message content or hidden facts",
-                                                })),
+                                                Ok(Ok(view)) => {
+                                                    let messages = view.view.messages();
+                                                    let world = view.view.world_events();
+                                                    let visible = event_id.map(|id| messages.iter().any(|m| m.event_id.0 == id)
+                                                        || world.iter().any(|m| m.event_id.0 == id));
+                                                    Ok(json!({
+                                                        "character": character,
+                                                        "branch_id": at.branch_id,
+                                                        "head_sequence": at.through,
+                                                        "visible_messages": messages.len(),
+                                                        "visible_world_events": world.len(),
+                                                        "queried_event_id": event_id,
+                                                        "event_visible": visible,
+                                                        "privacy": "observer-only visibility projection; no payload or hidden-fact inventory",
+                                                    }))
+                                                },
                                                 Ok(Err(_)) => Err("character context unavailable"),
                                                 Err(_) => Err("character context timed out"),
                                             },
@@ -682,6 +709,9 @@ async fn client(
                                 },
                             }
                         }
+                        DebugScope::Request => presenter.as_ref()
+                            .map(|probe| probe.request_inspect(request_id.expect("validated request ID")))
+                            .ok_or("presenter projection unavailable"),
                         DebugScope::Requests => Ok(json!({
                             "ownership": "connection_local_receipts_only",
                             "tracked": receipts.iter().map(|receipt| match &receipt.result {

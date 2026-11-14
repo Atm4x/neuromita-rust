@@ -442,20 +442,30 @@ pub async fn run(args: impl IntoIterator<Item = String>) -> Result<(), AgentErro
         "inspect" => {
             if !(1..=2).contains(&opts.positional.len()) {
                 return Err(AgentError::Usage(
-                    "inspect <capabilities|lifecycle|timeline|character|requests> [character]"
+                    "inspect <capabilities|lifecycle|timeline|character|requests|request> [character|uuid]"
                         .into(),
                 ));
             }
             let mut command = json!({"command":"debug_inspect", "scope":opts.positional[0]});
-            if let Some(character) = opts.positional.get(1) {
-                command["character"] = json!(character);
+            match (opts.positional[0].as_str(), opts.positional.get(1)) {
+                ("character", Some(character)) => command["character"] = json!(character),
+                ("request", Some(request_id)) => command["request_id"] = json!(request_id),
+                ("request", None) => {
+                    return Err(AgentError::Usage("inspect request <uuid>".into()));
+                }
+                (_, Some(_)) => {
+                    return Err(AgentError::Usage(
+                        "scope does not accept a second argument".into(),
+                    ));
+                }
+                _ => {}
             }
             vec![command]
         }
         "presenter" => {
             if !(1..=2).contains(&opts.positional.len()) {
                 return Err(AgentError::Usage(
-                    "presenter <chat|ai_runtime|connections> [character]".into(),
+                    "presenter <chat|ai_runtime|connections|speech|releases> [character]".into(),
                 ));
             }
             let mut command = json!({"command":"presenter_inspect", "surface":opts.positional[0]});
