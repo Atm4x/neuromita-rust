@@ -926,6 +926,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7704b5fdd17b18ae31c4c1da5a2e0305a2bf17b5249300a9ee9ed7b72114c636"
 
 [[package]]
+name = "cozy-chess"
+version = "0.3.4"
+dependencies = [
+ "cozy-chess-types",
+]
+
+[[package]]
+name = "cozy-chess-types"
+version = "0.2.2"
+
+[[package]]
 name = "cpal"
 version = "0.17.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3023,6 +3034,7 @@ dependencies = [
  "base64",
  "chrono",
  "chrono-tz",
+ "cozy-chess",
  "cpal",
  "earshot",
  "iana-time-zone",
