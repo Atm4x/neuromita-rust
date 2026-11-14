@@ -784,16 +784,16 @@ fn apply_with_catalog(
                 window.set_onboarding_guide_saving(false);
                 window.set_onboarding_guide_save_failed(false);
                 match change {
-                    super::runtime::GuideChange::Page(page) => {
+                    neuromita::onboarding::GuideChange::Page(page) => {
                         let level = neuromita::onboarding::guide::GuideLevel::from_index(
                             window.get_onboarding_guide_level(),
                         );
                         super::binding::sync_guide_position(window, level, page);
                     }
-                    super::runtime::GuideChange::Level(level) => {
+                    neuromita::onboarding::GuideChange::Level(level) => {
                         super::binding::sync_guide_position(window, level, 0);
                     }
-                    super::runtime::GuideChange::Language(language) => {
+                    neuromita::onboarding::GuideChange::Language(language) => {
                         let code = match language {
                             neuromita::settings::Language::Russian => "ru",
                             neuromita::settings::Language::English => "en",
@@ -808,7 +808,7 @@ fn apply_with_catalog(
                         super::binding::update_guide(window, window.get_onboarding_guide_page());
                         window.invoke_language_selected(code.into());
                     }
-                    super::runtime::GuideChange::Complete => {
+                    neuromita::onboarding::GuideChange::Complete => {
                         window.set_onboarding_guide_visible(false);
                     }
                 }

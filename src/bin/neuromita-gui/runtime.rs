@@ -29,15 +29,13 @@ use neuromita::{
         GenerationPreset, GenerationProvider, ProviderTemplate, ResponseGenerator,
         gemini::{GeminiProvider, GeminiTemplate, GenerationSettings},
     },
+    onboarding::GuideChange,
     presentation::{
         ConversationChange, ConversationChangePreview, ConversationSnapshot, GuiPresenter,
         PresetSlot, native_download::NativeDownloadPresenter,
     },
     request::{CancelResult, RequestId},
-    settings::{
-        AsrPreferences, GuideLevel, InterfaceSettings, OnboardingSettings, PresetId,
-        PresetSelection, SettingsApi, SettingsError, TtsPreferences, Volume,
-    },
+    settings::{AsrPreferences, PresetId, PresetSelection, SettingsApi, TtsPreferences, Volume},
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -53,65 +51,6 @@ pub enum ToolOption {
 
 #[path = "chat_fence.rs"]
 pub mod chat_fence;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GuideChange {
-    Page(u8),
-    Level(GuideLevel),
-    Language(neuromita::settings::Language),
-    Complete,
-}
-
-impl GuideChange {
-    fn edit_onboarding(&self, state: &mut OnboardingSettings) {
-        match self {
-            Self::Page(page) => state.guide_page = *page,
-            Self::Level(level) => {
-                state.guide_level = *level;
-                state.guide_page = 0;
-            }
-            Self::Complete => state.guide_completed = true,
-            Self::Language(_) => {}
-        }
-    }
-
-    fn matches_current(&self) -> Result<bool, SettingsError> {
-        let snapshot = SettingsApi::snapshot_all()?;
-        Ok(match self {
-            Self::Page(page) => snapshot.values.onboarding.guide_page == *page,
-            Self::Level(level) => {
-                snapshot.values.onboarding.guide_level == *level
-                    && snapshot.values.onboarding.guide_page == 0
-            }
-            Self::Language(language) => snapshot.values.interface.language == *language,
-            Self::Complete => snapshot.values.onboarding.guide_completed,
-        })
-    }
-
-    fn apply(&self) -> Result<(), SettingsError> {
-        match self {
-            Self::Page(page) => {
-                let page = *page;
-                let current = SettingsApi::snapshot::<OnboardingSettings>()?;
-                if usize::from(page)
-                    >= neuromita::onboarding::guide::count(current.value.guide_level)
-                {
-                    return Err(SettingsError::Validation(format!(
-                        "Guide page {page} is outside selected level"
-                    )));
-                }
-                SettingsApi::edit::<OnboardingSettings>(|state| self.edit_onboarding(state))?;
-            }
-            Self::Level(_) | Self::Complete => {
-                SettingsApi::edit::<OnboardingSettings>(|state| self.edit_onboarding(state))?;
-            }
-            Self::Language(language) => {
-                SettingsApi::edit::<InterfaceSettings>(|state| state.language = language.clone())?;
-            }
-        }
-        Ok(())
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChatOrigin {
@@ -601,6 +540,7 @@ async fn run(
         Err(error) => {
             publish(Update::Error(error));
             publish(Update::Stopped);
+            serve_offline_guide(&directory, &mut receive, &stop, &publish).await;
             return;
         }
     };
@@ -634,6 +574,34 @@ async fn run(
     }
     publish(Update::GraphCapability(false));
     publish(Update::Stopped);
+}
+
+async fn serve_offline_guide(
+    directory: &std::path::Path,
+    receive: &mut mpsc::Receiver<Command>,
+    stop: &CancellationToken,
+    publish: &impl Fn(Update),
+) {
+    loop {
+        let command = tokio::select! {
+            biased;
+            () = stop.cancelled() => return,
+            command = receive.recv() => command,
+        };
+        let Some(command) = command else { return };
+        if let Command::ChangeGuide { request_id, change } = command {
+            let directory = directory.to_owned();
+            let operation = change.clone();
+            let result = tokio::task::spawn_blocking(move || operation.persist_offline(&directory))
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result.map_err(|error| error.to_string()));
+            match result {
+                Ok(()) => publish(Update::GuidePersisted { request_id, change }),
+                Err(error) => publish(Update::GuideRejected { request_id, error }),
+            }
+        }
+    }
 }
 
 pub fn native_download_configured() -> bool {
@@ -1708,23 +1676,3 @@ mod speech_dispatch_tests {
     }
 }
 
-#[cfg(test)]
-mod guide_change_tests {
-    use super::*;
-
-    #[test]
-    fn guide_level_reset_updates_page_in_one_section_snapshot() {
-        let mut onboarding = OnboardingSettings::default();
-        onboarding.guide_page = 2;
-        GuideChange::Level(GuideLevel::Full).edit_onboarding(&mut onboarding);
-        assert_eq!(onboarding.guide_level, GuideLevel::Full);
-        assert_eq!(onboarding.guide_page, 0);
-        GuideChange::Page(8).edit_onboarding(&mut onboarding);
-        assert_eq!(onboarding.guide_page, 8);
-        GuideChange::Complete.edit_onboarding(&mut onboarding);
-        assert!(onboarding.guide_completed);
-        GuideChange::Language(neuromita::settings::Language::English)
-            .edit_onboarding(&mut onboarding);
-        assert_eq!(onboarding.guide_page, 8);
-    }
-}

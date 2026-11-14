@@ -3,7 +3,94 @@ pub mod wiki;
 
 use std::{io, path::Path};
 
-use crate::settings::{AppSettings, JsonSettingsRepository, SettingsRepository, StoredSettings};
+use crate::settings::{
+    AppSettings, GuideLevel, JsonSettingsRepository, Language, OnboardingSettings, SettingsApi,
+    SettingsError, SettingsInstanceLease, SettingsRepository, StoredSettings,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuideChange {
+    Page(u8),
+    Level(GuideLevel),
+    Language(Language),
+    Complete,
+}
+
+impl GuideChange {
+    pub fn matches_current(&self) -> Result<bool, SettingsError> {
+        let snapshot = SettingsApi::snapshot_all()?;
+        Ok(match self {
+            Self::Page(page) => snapshot.values.onboarding.guide_page == *page,
+            Self::Level(level) => {
+                snapshot.values.onboarding.guide_level == *level
+                    && snapshot.values.onboarding.guide_page == 0
+            }
+            Self::Language(language) => snapshot.values.interface.language == *language,
+            Self::Complete => snapshot.values.onboarding.guide_completed,
+        })
+    }
+
+    pub fn apply(&self) -> Result<(), SettingsError> {
+        match self {
+            Self::Language(language) => {
+                SettingsApi::edit::<crate::settings::InterfaceSettings>(|state| {
+                    state.language = language.clone();
+                })?;
+            }
+            _ => {
+                let current = SettingsApi::snapshot::<OnboardingSettings>()?;
+                let mut next = current.value;
+                self.edit_onboarding(&mut next)?;
+                SettingsApi::replace(current.revision, next)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Updates the same profile only while its Core settings lease is available.
+    pub fn persist_offline(&self, data_dir: &Path) -> Result<(), SettingsError> {
+        let lease = SettingsInstanceLease::acquire(data_dir)
+            .map_err(|error| SettingsError::Storage(error.to_string()))?;
+        let repo = JsonSettingsRepository::new(data_dir.join("settings.json"));
+        let mut stored = repo.load()?;
+        match self {
+            Self::Language(language) => {
+                if !stored.settings.onboarding.eula_accepted {
+                    return Err(SettingsError::Validation("Guide requires EULA acceptance".into()));
+                }
+                stored.settings.interface.language = language.clone();
+            }
+            _ => self.edit_onboarding(&mut stored.settings.onboarding)?,
+        }
+        stored.revision = stored.revision.checked_add(1).ok_or_else(|| {
+            SettingsError::Storage("settings revision exhausted".into())
+        })?;
+        repo.save_with_owner(&stored, &lease)
+    }
+
+    fn edit_onboarding(&self, state: &mut OnboardingSettings) -> Result<(), SettingsError> {
+        if !state.eula_accepted {
+            return Err(SettingsError::Validation("Guide requires EULA acceptance".into()));
+        }
+        match self {
+            Self::Page(page) => {
+                if usize::from(*page) >= guide::count(state.guide_level) {
+                    return Err(SettingsError::Validation(format!(
+                        "Guide page {page} is outside selected level"
+                    )));
+                }
+                state.guide_page = *page;
+            }
+            Self::Level(level) => {
+                state.guide_level = *level;
+                state.guide_page = 0;
+            }
+            Self::Complete => state.guide_completed = true,
+            Self::Language(_) => {}
+        }
+        Ok(())
+    }
+}
 
 const RU: &str = include_str!("../assets/onboarding/eula_ru.txt");
 const EN: &str = include_str!("../assets/onboarding/eula_en.txt");
@@ -85,8 +172,6 @@ pub fn selected_guide_level(data_dir: &Path) -> Result<guide::GuideLevel, io::Er
 }
 
 pub fn accept(data_dir: &Path, language: &str) -> Result<(), io::Error> {
-    use crate::settings::Language;
-
     let selected = match language.to_ascii_lowercase().as_str() {
         "ru" => Language::Russian,
         "en" => Language::English,
@@ -124,7 +209,6 @@ pub fn accept(data_dir: &Path, language: &str) -> Result<(), io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::Language;
 
     struct Directory(std::path::PathBuf);
     impl Directory {
@@ -147,6 +231,26 @@ mod tests {
         assert!(pending(&dir.0).unwrap());
         assert!(!dir.0.join("settings.json").exists());
         assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn offline_guide_progress_is_durable_and_cannot_overwrite_a_live_owner() {
+        let dir = Directory::new();
+        accept(&dir.0, "en").unwrap();
+        GuideChange::Page(1).persist_offline(&dir.0).unwrap();
+        assert_eq!(startup_state(&dir.0).unwrap().guide_page, 1);
+        let lease = SettingsInstanceLease::acquire(&dir.0).unwrap();
+        assert!(GuideChange::Complete.persist_offline(&dir.0).is_err());
+        drop(lease);
+        assert!(GuideChange::Page(99).persist_offline(&dir.0).is_err());
+        assert_eq!(startup_state(&dir.0).unwrap().guide_page, 1);
+        GuideChange::Level(GuideLevel::Full).persist_offline(&dir.0).unwrap();
+        assert_eq!(startup_state(&dir.0).unwrap().guide_page, 0);
+        GuideChange::Language(Language::Russian).persist_offline(&dir.0).unwrap();
+        GuideChange::Complete.persist_offline(&dir.0).unwrap();
+        let stored = JsonSettingsRepository::new(dir.0.join("settings.json")).load().unwrap();
+        assert_eq!(stored.settings.interface.language, Language::Russian);
+        assert!(stored.settings.onboarding.guide_completed);
     }
 
     #[test]
