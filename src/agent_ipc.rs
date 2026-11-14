@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{TcpStream, tcp::OwnedReadHalf, tcp::OwnedWriteHalf},
-    time::timeout,
+    time::{Instant, timeout, timeout_at},
 };
 use uuid::Uuid;
 
@@ -46,6 +46,7 @@ struct Options {
     command: String,
     positional: Vec<String>,
     expect: Option<Value>,
+    expect_terminal: Option<Value>,
 }
 
 impl Options {
@@ -57,6 +58,7 @@ impl Options {
         let mut show_events = false;
         let mut await_terminal = false;
         let mut expect = None;
+        let mut expect_terminal = None;
         let mut positional = Vec::new();
         let mut arguments = args.into_iter();
         while let Some(arg) = arguments.next() {
@@ -80,6 +82,12 @@ impl Options {
                         return Err(AgentError::Usage("timeout must be 1..300000 ms".into()));
                     }
                     timeout = Duration::from_millis(value);
+                }
+                "--expect-terminal" => {
+                    let value = arguments.next().ok_or_else(|| {
+                        AgentError::Usage("--expect-terminal requires JSON".into())
+                    })?;
+                    expect_terminal = Some(serde_json::from_str(&value)?);
                 }
                 "--allow-write" => allow_write = true,
                 "--include-private" => include_private = true,
@@ -115,6 +123,7 @@ impl Options {
             command,
             positional: positional.into_iter().skip(1).collect(),
             expect,
+            expect_terminal,
         })
     }
 }
@@ -265,31 +274,50 @@ impl Client {
         Ok(())
     }
 
-    async fn response(&mut self, id: Uuid, opts: &Options) -> Result<Value, AgentError> {
-        loop {
-            let frame = self.read_frame().await?;
-            if frame["command_id"] == id.to_string() {
-                return Ok(frame);
+    async fn read_until(
+        &mut self,
+        deadline: Instant,
+        opts: &Options,
+        predicate: impl Fn(&Value) -> bool,
+    ) -> Result<Value, AgentError> {
+        timeout_at(deadline, async {
+            loop {
+                let frame = self.read_frame().await?;
+                if predicate(&frame) {
+                    return Ok(frame);
+                }
+                if opts.show_events && frame["type"] != "settings" {
+                    emit(&frame, opts.include_private)?;
+                }
             }
-            if opts.show_events && frame["type"] != "settings" {
-                emit(&frame, opts.include_private)?;
-            }
-        }
+        })
+        .await
+        .map_err(|_| AgentError::Timeout)?
     }
 
-    async fn terminal(&mut self, request_id: &Value, opts: &Options) -> Result<Value, AgentError> {
-        loop {
-            let frame = self.read_frame().await?;
-            if frame["type"] == "request_status"
+    async fn response(
+        &mut self,
+        id: Uuid,
+        deadline: Instant,
+        opts: &Options,
+    ) -> Result<Value, AgentError> {
+        let expected_id = id.to_string();
+        self.read_until(deadline, opts, |frame| frame["command_id"] == expected_id)
+            .await
+    }
+
+    async fn terminal(
+        &mut self,
+        request_id: &Value,
+        deadline: Instant,
+        opts: &Options,
+    ) -> Result<Value, AgentError> {
+        self.read_until(deadline, opts, |frame| {
+            frame["type"] == "request_status"
                 && frame["request_id"] == *request_id
                 && matches!(frame["state"].as_str(), Some("finished" | "cancelled"))
-            {
-                return Ok(frame);
-            }
-            if opts.show_events && frame["type"] != "settings" {
-                emit(&frame, opts.include_private)?;
-            }
-        }
+        })
+        .await
     }
 
     async fn invoke(&mut self, mut command: Value, opts: &Options) -> Result<(), AgentError> {
@@ -297,10 +325,18 @@ impl Client {
             .as_object_mut()
             .ok_or_else(|| AgentError::Protocol("command must be a JSON object".into()))?;
         let expect = object.remove("expect").or_else(|| opts.expect.clone());
-        let wait_terminal = object
-            .remove("wait_terminal")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(opts.await_terminal);
+        let expect_terminal = object
+            .remove("expect_terminal")
+            .or_else(|| opts.expect_terminal.clone());
+        let wait_terminal = match object.remove("wait_terminal") {
+            Some(Value::Bool(value)) => value,
+            Some(_) => {
+                return Err(AgentError::Protocol(
+                    "wait_terminal must be a boolean".into(),
+                ));
+            }
+            None => opts.await_terminal,
+        } || expect_terminal.is_some();
         let name = object
             .get("command")
             .and_then(Value::as_str)
@@ -323,8 +359,11 @@ impl Client {
                 id
             }
         };
-        self.send(&command).await?;
-        let response = self.response(id, opts).await?;
+        let deadline = Instant::now() + self.timeout;
+        timeout_at(deadline, self.send(&command))
+            .await
+            .map_err(|_| AgentError::Timeout)??;
+        let response = self.response(id, deadline, opts).await?;
         if let Some(expected) = expect {
             if !is_subset(&expected, &response) {
                 return Err(AgentError::Assertion {
@@ -338,9 +377,30 @@ impl Client {
             ));
         }
         emit(&response, opts.include_private)?;
-        if wait_terminal && response["type"] == "accepted" {
-            let terminal = self.terminal(&response["request_id"], opts).await?;
+        if wait_terminal {
+            if response["type"] != "accepted" || !response["request_id"].is_string() {
+                return Err(AgentError::Protocol(
+                    "terminal wait requires an accepted request with request_id".into(),
+                ));
+            }
+            let terminal = self
+                .terminal(&response["request_id"], deadline, opts)
+                .await?;
             emit(&terminal, opts.include_private)?;
+            if let Some(expected) = expect_terminal {
+                if !is_subset(&expected, &terminal) {
+                    return Err(AgentError::Assertion {
+                        expected,
+                        observed: redacted(terminal, opts.include_private),
+                    });
+                }
+            } else if terminal["state"] != "finished" || terminal["outcome"] != "success" {
+                return Err(AgentError::Core(format!(
+                    "request terminal state={}, outcome={}",
+                    terminal["state"].as_str().unwrap_or("unknown"),
+                    terminal["outcome"].as_str().unwrap_or("unknown"),
+                )));
+            }
         }
         Ok(())
     }
@@ -458,5 +518,97 @@ mod tests {
             &json!({"snapshot":{"head_sequence":4}}),
             &actual
         ));
+    }
+
+    #[tokio::test]
+    async fn unrelated_frames_cannot_extend_the_command_deadline() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut peer, _) = listener.accept().await.unwrap();
+            peer.write_all(b"{\"type\":\"connected\",\"client_id\":\"fixture\"}\n")
+                .await
+                .unwrap();
+            for _ in 0..120 {
+                if peer
+                    .write_all(b"{\"type\":\"request_status\",\"request_id\":\"foreign\"}\n")
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(3)).await;
+            }
+        });
+        let opts = Options::parse([
+            "--addr".into(),
+            address.to_string(),
+            "--timeout-ms".into(),
+            "60".into(),
+            "call".into(),
+            r#"{"command":"ping"}"#.into(),
+        ])
+        .unwrap();
+        let mut client = Client::connect(opts.address, opts.timeout).await.unwrap();
+        let deadline = Instant::now() + Duration::from_millis(60);
+        let start = Instant::now();
+        let result = client.response(Uuid::new_v4(), deadline, &opts).await;
+        assert!(matches!(result, Err(AgentError::Timeout)));
+        assert!(start.elapsed() < Duration::from_millis(250));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn terminal_error_fails_unless_explicitly_expected() {
+        async fn check(expect_failure: bool) -> Result<(), AgentError> {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut peer, _) = listener.accept().await.unwrap();
+                peer.write_all(b"{\"type\":\"connected\",\"client_id\":\"fixture\"}\n")
+                    .await
+                    .unwrap();
+                let mut reader = BufReader::new(peer);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let command: Value = serde_json::from_str(&line).unwrap();
+                let id = command["command_id"].clone();
+                let mut peer = reader.into_inner();
+                let accepted =
+                    json!({"type":"accepted","command_id":id,"request_id":Uuid::new_v4()});
+                peer.write_all(&serde_json::to_vec(&accepted).unwrap())
+                    .await
+                    .unwrap();
+                peer.write_all(b"\n").await.unwrap();
+                let terminal = json!({"type":"request_status","request_id":accepted["request_id"],"state":"finished","outcome":"text_error","text":"not allowed"});
+                peer.write_all(&serde_json::to_vec(&terminal).unwrap())
+                    .await
+                    .unwrap();
+                peer.write_all(b"\n").await.unwrap();
+            });
+            let mut args = vec![
+                "--addr".to_owned(),
+                address.to_string(),
+                "--timeout-ms".to_owned(),
+                "2000".to_owned(),
+                "--allow-write".to_owned(),
+                "--wait-terminal".to_owned(),
+            ];
+            if expect_failure {
+                args.extend([
+                    "--expect-terminal".to_owned(),
+                    r#"{"state":"finished","outcome":"text_error"}"#.to_owned(),
+                ]);
+            }
+            args.extend([
+                "call".to_owned(),
+                r#"{"command":"initiate","character":"Crazy"}"#.to_owned(),
+            ]);
+            let result = run(args).await;
+            server.await.unwrap();
+            result
+        }
+        assert!(matches!(check(false).await, Err(AgentError::Core(_))));
+        check(true).await.unwrap();
     }
 }
