@@ -42,6 +42,8 @@ impl InstallReviewFence {
 
 #[derive(Debug, Error)]
 pub enum InstallPreviewError {
+    #[error("установка отменена владельцем")]
+    Cancelled,
     #[error("выбранная модель недоступна или неоднозначна")]
     InvalidSelection,
     #[error("проверенный Python SDK ещё не установлен: {0}")]

@@ -49,7 +49,7 @@ impl NativeDownloadEvent {
 pub struct NativeDownloadOperation {
     id: Uuid,
     cancellation: CancellationToken,
-    task: Option<JoinHandle<()>>,
+    task: Option<JoinHandle<bool>>,
 }
 
 impl NativeDownloadOperation {
@@ -64,6 +64,30 @@ impl NativeDownloadOperation {
         file_timeout: Duration,
         events: mpsc::UnboundedSender<NativeDownloadEvent>,
     ) -> Result<Self, NativeHttpsError> {
+        Self::start_with_cancellation(
+            store,
+            trust,
+            origin,
+            request,
+            staging_root,
+            file_timeout,
+            events,
+            CancellationToken::new(),
+            Uuid::new_v4(),
+        )
+    }
+
+    pub fn start_with_cancellation(
+        store: NativeRevisionStore,
+        trust: NativeReleaseTrust,
+        origin: NativeHttpsOrigin,
+        request: NativeDownloadSelection,
+        staging_root: PathBuf,
+        file_timeout: Duration,
+        events: mpsc::UnboundedSender<NativeDownloadEvent>,
+        cancellation: CancellationToken,
+        operation_id: Uuid,
+    ) -> Result<Self, NativeHttpsError> {
         if !valid_identifier(&request.model_id) {
             return Err(NativeHttpsError::Invalid("invalid model ID"));
         }
@@ -71,8 +95,7 @@ impl NativeDownloadOperation {
         trust.verify(&request.model_id, &digest)?;
         store.verify_download_staging_root(&staging_root)?;
         let transfer = NativeHttpsPackageTransfer::new(file_timeout)?;
-        let id = Uuid::new_v4();
-        let cancellation = CancellationToken::new();
+        let id = operation_id;
         let task_cancel = cancellation.clone();
         let task = tokio::spawn(async move {
             let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
@@ -100,7 +123,9 @@ impl NativeDownloadOperation {
                 Ok(result) => result,
                 Err(_) => Err(NativeHttpsError::InstallerTask),
             };
+            let succeeded = result.is_ok();
             let _ = events.send(NativeDownloadEvent::Finished { id, result });
+            succeeded
         });
         Ok(Self {
             id,
@@ -119,9 +144,10 @@ impl NativeDownloadOperation {
 
     /// Await release of the staging owner before application shutdown. Dropping
     /// the operation alone is not a confirmation that publication has ended.
-    pub async fn join(&mut self) {
-        if let Some(task) = self.task.take() {
-            let _ = task.await;
+    pub async fn join(&mut self) -> bool {
+        match self.task.take() {
+            Some(task) => task.await.unwrap_or(false),
+            None => false,
         }
     }
 }

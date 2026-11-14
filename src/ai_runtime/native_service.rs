@@ -13,6 +13,9 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::{
+    installation_owner::{
+        InstallComponentKind, InstallationOwner, InstallationPermit, InstallationTarget,
+    },
     native_download_operation::{
         NativeDownloadEvent, NativeDownloadOperation, NativeDownloadSelection,
     },
@@ -28,6 +31,7 @@ use super::{
 struct NativeState {
     workflow: Option<NativeModelWorkflow>,
     download: Option<NativeDownloadOperation>,
+    installation: Option<InstallationPermit>,
     claims: HashMap<NativeSpeechKind, WorkerClaim>,
 }
 
@@ -36,6 +40,7 @@ pub struct AiHubNativeService {
     state: Mutex<NativeState>,
     stop: CancellationToken,
     registry: Arc<ServiceWorkerRegistry>,
+    installation: Arc<InstallationOwner>,
 }
 
 pub fn native_download_configured() -> bool {
@@ -102,19 +107,31 @@ fn ensure_storage(path: &Path) -> Result<(), String> {
 
 impl AiHubNativeService {
     pub fn new(root: PathBuf) -> Arc<Self> {
-        Self::with_registry(root, ServiceWorkerRegistry::new())
+        let installation = InstallationOwner::new(root.join("AIData"));
+        Self::with_registry_and_installation(root, ServiceWorkerRegistry::new(), installation)
     }
 
     pub fn with_registry(root: PathBuf, registry: Arc<ServiceWorkerRegistry>) -> Arc<Self> {
+        let installation = InstallationOwner::new(root.join("AIData"));
+        Self::with_registry_and_installation(root, registry, installation)
+    }
+
+    pub fn with_registry_and_installation(
+        root: PathBuf,
+        registry: Arc<ServiceWorkerRegistry>,
+        installation: Arc<InstallationOwner>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             root,
             state: Mutex::new(NativeState {
                 workflow: None,
                 download: None,
+                installation: None,
                 claims: HashMap::new(),
             }),
             stop: CancellationToken::new(),
             registry,
+            installation,
         })
     }
 
@@ -553,7 +570,17 @@ impl AiHubNativeService {
         for path in [&revisions, &runtime, &staging] {
             ensure_storage(path)?;
         }
-        let operation = NativeDownloadOperation::start(
+        let permit = self
+            .installation
+            .begin(InstallationTarget {
+                kind: InstallComponentKind::Bundle,
+                service: None,
+                module_id: request.model_id.clone(),
+                revision: request.manifest_sha256.clone(),
+                component: "package".into(),
+            })
+            .map_err(|error| error.to_string())?;
+        let operation = NativeDownloadOperation::start_with_cancellation(
             NativeRevisionStore::new(revisions, runtime),
             trust,
             origin,
@@ -561,9 +588,12 @@ impl AiHubNativeService {
             staging,
             Duration::from_secs(3600),
             events,
+            permit.cancellation().clone(),
+            permit.operation(),
         )
         .map_err(|error| error.to_string())?;
         let id = operation.id();
+        state.installation = Some(permit);
         state.download = Some(operation);
         Ok(id)
     }
@@ -571,6 +601,9 @@ impl AiHubNativeService {
     pub async fn cancel_download(&self) -> bool {
         let state = self.state.lock().await;
         if let Some(operation) = state.download.as_ref() {
+            if let Some(permit) = state.installation.as_ref() {
+                self.installation.cancel(permit.operation());
+            }
             operation.cancel();
             true
         } else {
@@ -578,19 +611,28 @@ impl AiHubNativeService {
         }
     }
 
-    pub async fn finish_download(&self, id: Uuid) -> bool {
+    pub async fn finish_download(&self, id: Uuid) -> Result<bool, String> {
         let mut state = self.state.lock().await;
         if state
             .download
             .as_ref()
             .is_none_or(|operation| operation.id() != id)
         {
-            return false;
+            return Ok(false);
         }
-        if let Some(mut operation) = state.download.take() {
-            operation.join().await;
+        let succeeded = if let Some(mut operation) = state.download.take() {
+            operation.join().await
+        } else {
+            false
+        };
+        if let Some(permit) = state.installation.take() {
+            if succeeded {
+                permit.complete().map_err(|error| error.to_string())?;
+            } else {
+                permit.fail().map_err(|error| error.to_string())?;
+            }
         }
-        true
+        Ok(true)
     }
 
     pub async fn shutdown(&self) {
@@ -599,9 +641,13 @@ impl AiHubNativeService {
         let _asr_gate = self.registry.transition_gate(super::AiService::Asr).await;
         let mut state = self.state.lock().await;
         if let Some(mut operation) = state.download.take() {
+            if let Some(permit) = state.installation.as_ref() {
+                self.installation.cancel(permit.operation());
+            }
             operation.cancel();
-            operation.join().await;
+            let _ = operation.join().await;
         }
+        state.installation.take();
         if let Some(workflow) = state.workflow.as_mut() {
             if let Err(error) = workflow.deactivate_all().await {
                 tracing::warn!(%error, "native worker shutdown failed");

@@ -7,8 +7,12 @@ use std::{
     time::Duration,
 };
 
-use crate::ai_runtime::{assets::ModelAssetStore, layer::valid_segment};
-use serde::Deserialize;
+use crate::ai_runtime::{
+    AiService,
+    assets::ModelAssetStore,
+    layer::valid_segment,
+    module_contract::{ModelModuleDeclaration, PythonPluginManifest},
+};
 
 include!(concat!(env!("OUT_DIR"), "/speech-plugin-manifests.rs"));
 
@@ -52,23 +56,19 @@ pub struct SpeechInventory {
     pub errors: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ModuleDiscovery {
+    pub modules: Vec<ModelModuleDeclaration>,
+    pub errors: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SpeechModelCatalog {
     pub plugin_roots: Vec<PathBuf>,
     pub data_directory: PathBuf,
 }
 
-#[derive(Deserialize)]
-struct PluginManifest {
-    id: String,
-    name: String,
-    kind: String,
-    api_version: u32,
-    entrypoint: String,
-    version: Option<String>,
-    publisher: Option<String>,
-    permissions: Option<Vec<String>>,
-}
+type PluginManifest = PythonPluginManifest;
 
 pub(super) fn executable_plugin_root(data_directory: &Path) -> PathBuf {
     for path in ["AIData/plugins", "AIData/Scripts"] {
@@ -141,16 +141,21 @@ fn inspect_manifest(path: &Path, community: bool) -> Result<PluginManifest, Stri
     if !metadata.is_file() || metadata.is_symlink() || metadata.len() > 64 * 1024 {
         return Err("manifest is not a bounded regular file".into());
     }
-    let manifest: PluginManifest =
-        serde_json::from_slice(&std::fs::read(&manifest_path).map_err(|error| error.to_string())?)
-            .map_err(|error| format!("invalid manifest JSON: {error}"))?;
+    let source = std::fs::read(&manifest_path).map_err(|error| error.to_string())?;
+    let manifest: PluginManifest = serde_json::from_slice(&source)
+        .map_err(|error| format!("invalid manifest JSON: {error}"))?;
+    ModelModuleDeclaration::from_python_manifest(&manifest, &source)
+        .map_err(|error| format!("invalid module declaration: {error}"))?;
     if !valid_segment(&manifest.id)
         || path
             .file_name()
             .is_none_or(|name| name != manifest.id.as_str())
         || manifest.api_version != 1
         || manifest.entrypoint != "plugin.py"
-        || !matches!(manifest.kind.as_str(), "tts" | "asr")
+        || !matches!(
+            manifest.kind.as_str(),
+            "tts" | "asr" | "embedding" | "reranker" | "beats"
+        )
         || manifest.name.trim().is_empty()
         || manifest.name.len() > 128
         || manifest
@@ -244,9 +249,10 @@ impl SpeechModelCatalog {
         }
     }
 
-    pub async fn snapshot(&self) -> SpeechInventory {
-        let mut inventory = SpeechInventory::default();
-        let mut models = BTreeMap::<(String, String), SpeechModelOption>::new();
+    pub fn module_declarations(&self) -> ModuleDiscovery {
+        let mut discovery = ModuleDiscovery::default();
+        let mut models = BTreeMap::<(String, String), ModelModuleDeclaration>::new();
+        let mut blocked = std::collections::HashSet::<String>::new();
         for root in &self.plugin_roots {
             let candidates = plugin_candidates(root);
             let mut counts = HashMap::<String, usize>::new();
@@ -260,9 +266,8 @@ impl SpeechModelCatalog {
                     continue;
                 };
                 if counts[id] != 1 {
-                    inventory
-                        .errors
-                        .push(format!("ambiguous speech plugin id: {id}"));
+                    discovery.errors.push(format!("ambiguous module id: {id}"));
+                    blocked.insert(id.to_owned());
                     continue;
                 }
                 let symlinked = std::fs::symlink_metadata(&directory)
@@ -276,40 +281,76 @@ impl SpeechModelCatalog {
                 let manifest = match inspect_manifest(&directory, community) {
                     Ok(manifest) => manifest,
                     Err(reason) => {
-                        inventory
-                            .errors
-                            .push(format!("speech plugin {id}: {reason}"));
+                        discovery.errors.push(format!("module {id}: {reason}"));
+                        blocked.insert(id.to_owned());
                         continue;
                     }
                 };
-                let key = (manifest.kind, manifest.id.clone());
-                models.entry(key).or_insert(SpeechModelOption {
-                    id: manifest.id,
-                    name: manifest.name,
-                    package_detected: false,
-                    verified_assets: false,
-                    installed_revisions: Vec::new(),
-                });
+                let Ok(source) = std::fs::read(directory.join("plugin.json")) else {
+                    discovery
+                        .errors
+                        .push(format!("module {id}: manifest disappeared"));
+                    continue;
+                };
+                match ModelModuleDeclaration::from_python_manifest(&manifest, &source) {
+                    Ok(module) => {
+                        let key = (manifest.kind, manifest.id);
+                        if models.contains_key(&key) {
+                            discovery.errors.push(format!("ambiguous module id: {id}"));
+                            blocked.insert(id.to_owned());
+                        } else {
+                            models.insert(key, module);
+                        }
+                    }
+                    Err(error) => {
+                        discovery.errors.push(format!("module {id}: {error}"));
+                        blocked.insert(id.to_owned());
+                    }
+                }
             }
         }
         for text in BUNDLED_SPEECH_MANIFESTS {
             let Ok(manifest) = serde_json::from_str::<PluginManifest>(text) else {
                 continue;
             };
-            if !valid_segment(&manifest.id)
-                || !matches!(manifest.kind.as_str(), "tts" | "asr")
-                || manifest.name.is_empty()
+            if let Ok(module) =
+                ModelModuleDeclaration::from_python_manifest(&manifest, text.as_bytes())
             {
-                continue;
+                models.entry((manifest.kind, manifest.id)).or_insert(module);
             }
-            let key = (manifest.kind, manifest.id.clone());
-            models.entry(key).or_insert(SpeechModelOption {
-                id: manifest.id,
-                name: manifest.name,
-                package_detected: false,
-                verified_assets: false,
-                installed_revisions: Vec::new(),
-            });
+        }
+        discovery.modules = models
+            .into_iter()
+            .filter(|((_, id), _)| !blocked.contains(id))
+            .map(|(_, module)| module)
+            .collect();
+        discovery
+    }
+
+    pub async fn snapshot(&self) -> SpeechInventory {
+        let discovered = self.module_declarations();
+        let mut inventory = SpeechInventory {
+            errors: discovered.errors,
+            ..SpeechInventory::default()
+        };
+        let mut models = BTreeMap::<(String, String), SpeechModelOption>::new();
+        for module in discovered.modules {
+            let kind = match module.service {
+                AiService::Tts => "tts",
+                AiService::Asr => "asr",
+                _ => continue,
+            };
+            let id = module.id.as_str().to_owned();
+            models.insert(
+                (kind.to_owned(), id.clone()),
+                SpeechModelOption {
+                    id,
+                    name: module.name,
+                    package_detected: false,
+                    verified_assets: false,
+                    installed_revisions: Vec::new(),
+                },
+            );
         }
         for ((kind, id), option) in &mut models {
             let overlays = self.data_directory.join("AIData/overlays").join(id);
@@ -399,6 +440,48 @@ mod tests {
         assert!(!model.package_detected);
         assert!(!model.verified_assets);
         assert!(snapshot.tts.iter().any(|item| item.id == "fish_speech"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn clean_profile_lists_module_models_without_python_or_inference_components() {
+        let root = std::env::temp_dir().join(format!("nm-module-clean-{}", uuid::Uuid::new_v4()));
+        let modules = SpeechModelCatalog::for_desktop(root).module_declarations();
+        let speech = modules
+            .modules
+            .iter()
+            .find(|module| module.id.as_str() == "mock_tts")
+            .unwrap();
+        assert_eq!(speech.models.len(), 1);
+        assert_eq!(speech.models[0].id.as_str(), "mock_tts");
+        assert_eq!(
+            speech.bootstrap,
+            crate::ai_runtime::module_contract::ModuleBootstrap::python_sdk_312()
+        );
+        assert!(
+            modules
+                .modules
+                .iter()
+                .any(|module| module.id.as_str() == "mock_embedding")
+        );
+    }
+
+    #[test]
+    fn invalid_module_in_executable_root_cannot_fallback_to_embedded_copy() {
+        let root = std::env::temp_dir().join(format!("nm-module-invalid-{}", uuid::Uuid::new_v4()));
+        let plugins = root.join("AIData/plugins");
+        std::fs::create_dir_all(plugins.join("mock_tts")).unwrap();
+        std::fs::write(plugins.join("mock_tts/plugin.json"),
+            r#"{"id":"mock_tts","name":"Fake","kind":"tts","entrypoint":"plugin.py","api_version":1,"bootstrap":{"kind":"python_sdk","python_minor":"3.13","sdk_api_version":1}}"#).unwrap();
+        std::fs::write(plugins.join("mock_tts/plugin.py"), "class Plugin: pass").unwrap();
+        let modules = SpeechModelCatalog::for_desktop(root.clone()).module_declarations();
+        assert!(!modules.errors.is_empty());
+        assert!(
+            !modules
+                .modules
+                .iter()
+                .any(|module| module.id.as_str() == "mock_tts")
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

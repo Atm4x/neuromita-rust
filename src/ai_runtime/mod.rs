@@ -18,6 +18,7 @@ pub mod install_coordinator;
 pub mod install_operation;
 pub mod install_review;
 mod install_source;
+pub mod installation_owner;
 pub mod installed_speech;
 mod layer;
 #[cfg(target_os = "linux")]
@@ -25,6 +26,7 @@ mod linux_worker_lifetime;
 pub mod live_speech;
 pub mod managed;
 pub mod model_identity;
+pub mod module_contract;
 pub mod native_approval;
 pub mod native_controller;
 pub mod native_download_operation;
