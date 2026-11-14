@@ -1,4 +1,4 @@
-name: Git Bridge - IPC Debug bundle export
+name: Git Bridge - IPC Debug bundle export refreshed
 on:
   push:
     branches:
