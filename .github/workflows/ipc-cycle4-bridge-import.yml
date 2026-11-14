@@ -1,4 +1,4 @@
-name: Git Bridge IPC restart evidence import
+name: Git Bridge IPC Presenter Control source import
 on:
   push:
     branches:
@@ -16,18 +16,18 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true
-      - name: Verify instance ID instrumentation commit
+      - name: Verify exact Presenter Control bundle
         shell: bash
         run: |
           set -euo pipefail
-          BASE=c28bfbadafc0c62b870e1ff555eadfd429923322
-          EXPECTED=f860ab109185247a56f121d8ed2068e9f3ff24e0
+          BASE=f860ab109185247a56f121d8ed2068e9f3ff24e0
+          EXPECTED=6ee28c5d502162c50d9ed47666edd80c24e16d03
           git fetch origin refs/heads/bridge/ipc-cycle4-candidate-20261114:refs/remotes/origin/ipc-candidate
           test "$(git rev-parse refs/remotes/origin/ipc-candidate)" = "$BASE"
-          base64 -d .bridge/ipc-cycle4-outgoing.b64 > /tmp/ipc-restart.bundle
-          echo "b32ecc7b05c3e95fb31dc342c77c2968ee84fdc5c6833809cd5a5f3dd52c07b5  /tmp/ipc-restart.bundle" | sha256sum -c -
-          git bundle verify /tmp/ipc-restart.bundle
-          git fetch /tmp/ipc-restart.bundle refs/heads/ipc-cycle6-restart-export:refs/heads/ipc-restart-imported
-          test "$(git rev-parse refs/heads/ipc-restart-imported)" = "$EXPECTED"
+          base64 -d .bridge/ipc-cycle4-outgoing.b64 > /tmp/presenter-control.bundle
+          echo "ddc81ce7aa5dd5526dd45f11027423047d985926ca8619d2e75bcf8d263c08aa  /tmp/presenter-control.bundle" | sha256sum -c -
+          git bundle verify /tmp/presenter-control.bundle
+          git fetch /tmp/presenter-control.bundle refs/heads/codex/mcp-presenter-control-20261114:refs/heads/ipc-presenter-imported
+          test "$(git rev-parse refs/heads/ipc-presenter-imported)" = "$EXPECTED"
           git merge-base --is-ancestor "$BASE" "$EXPECTED"
-          git push origin refs/heads/ipc-restart-imported:refs/heads/bridge/ipc-cycle6-restart-staged-20261114
+          git push origin refs/heads/ipc-presenter-imported:refs/heads/bridge/ipc-presenter-cycle7-staged-20261114
