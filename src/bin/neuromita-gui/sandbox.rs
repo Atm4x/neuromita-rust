@@ -639,6 +639,10 @@ fn apply_with_catalog(
                 ui.set_telegram_password("".into());
             }
         }
+        Update::RemoteVoices(config) => super::voice::render_remote(window, &config),
+        Update::RemoteVoiceState(status, busy) => {
+            super::voice::remote_status(window, &status, busy)
+        }
         Update::RuntimeStatus(snapshot) => {
             super::voice::runtime_status(window, &snapshot);
             super::asr::runtime_status(window, &snapshot);

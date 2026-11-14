@@ -171,6 +171,7 @@ async fn application_owns_initialized_tts_and_releases_it_on_shutdown() {
             Arc::from("Test"),
             VoiceOptions {
                 voice: "default".into(),
+                character: None,
                 volume: Volume::new(50).unwrap(),
             },
         )

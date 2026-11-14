@@ -128,6 +128,8 @@ pub struct ApplicationConfig {
     pub graph_extractor: Option<Arc<dyn crate::knowledge::graph::GraphExtractor>>,
     pub limits: RuntimeLimits,
     pub voice: Arc<dyn VoiceProvider>,
+    /// Optional dedicated remote voice catalog; enabled only by the desktop host.
+    pub remote_voice_store: Option<std::path::PathBuf>,
     pub ai_runtime: Option<AiApplicationConfig>,
     pub ai_hub_install_root: Option<std::path::PathBuf>,
     pub ai_speech_inventory: Option<crate::ai_runtime::speech_catalog::SpeechInventory>,
@@ -180,6 +182,7 @@ impl ApplicationConfig {
             graph_extractor: None,
             limits,
             voice: Arc::new(UnavailableVoiceProvider),
+            remote_voice_store: None,
             ai_runtime: None,
             ai_hub_install_root: None,
             ai_speech_inventory: None,
@@ -781,6 +784,7 @@ impl ApplicationLifecycle {
             graph_extractor,
             limits,
             voice,
+            remote_voice_store,
             ai_runtime,
             ai_hub_install_root,
             ai_speech_inventory,
@@ -1187,6 +1191,17 @@ impl ApplicationLifecycle {
             ai_hub_native.clone(),
             Arc::clone(&service_workers),
         ));
+        let voice: Arc<dyn VoiceProvider> = if let Some(path) = remote_voice_store {
+            Arc::new(crate::remote_voice::RemoteVoiceRouter {
+                local: voice,
+                settings: Arc::clone(&settings_owner),
+                store: crate::remote_voice::RemoteVoiceStore { path },
+                client: crate::remote_voice::FishAudioClient::new()
+                    .map_err(|error| ApplicationError::Task(error.to_string()))?,
+            })
+        } else {
+            voice
+        };
         let registry = Arc::new(RequestRegistry::new_with_diagnostics(
             limits.discovery_buffer.get(),
             crate::request::DiagnosticsLimits::default(),
