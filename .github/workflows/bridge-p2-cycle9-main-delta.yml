@@ -1,0 +1,40 @@
+name: P2 cycle9 export main delta
+on:
+  push:
+    branches: [bridge/p2-cycle9-main-delta-20261114]
+    paths: [.github/workflows/bridge-p2-cycle9-main-delta.yml]
+permissions:
+  contents: read
+jobs:
+  export-delta:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - name: Create incremental bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin '+refs/heads/main:refs/remotes/origin/main'
+          BASE=adcc3156a8fd33487d7e886dc26bf5c6d19ba1df
+          git cat-file -e "$BASE^{commit}"
+          HEAD_SHA=$(git rev-parse refs/remotes/origin/main)
+          git merge-base --is-ancestor "$BASE" "$HEAD_SHA"
+          echo "BRIDGE_BASE=$BASE"
+          echo "BRIDGE_MAIN=$HEAD_SHA"
+          git bundle create /tmp/p2-main-delta.bundle refs/remotes/origin/main "^$BASE"
+          git bundle list-heads /tmp/p2-main-delta.bundle
+          cp /tmp/p2-main-delta.bundle ./p2-main-delta.bundle
+          printf 'BASE=%s\nHEAD=%s\n' "$BASE" "$HEAD_SHA" > p2-main-delta.refs
+          sha256sum p2-main-delta.bundle p2-main-delta.refs > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p2-cycle9-main-delta
+          path: |
+            p2-main-delta.bundle
+            p2-main-delta.refs
+            SHA256SUMS
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
