@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use super::{
     EndReason, GameFact, GameId, GameKey, GameProjection, GameSessionId, ModelGameAction,
-    ReactionInvite, UserGameCommand, seabattle,
+    ReactionInvite, UserGameCommand, chess, seabattle,
 };
 use crate::identity::EventId;
 use crate::timeline::domain::BranchId;
@@ -45,6 +45,7 @@ pub struct GameReceipt {
     pub game: GameId,
     pub key: Option<GameKey>,
     pub view: Option<GameProjection>,
+    pub chess: Option<chess::ChessProjection>,
     pub events: Vec<EventId>,
     pub auto_reactions: bool,
 }
@@ -145,18 +146,89 @@ impl Session {
     }
 }
 
+/// One chess session in the existing owner-private GameSlot. Never stored
+/// in an independent registry or outside canonical Timeline snapshots.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChessSession {
+    id: GameSessionId,
+    generation: u64,
+    branch: BranchId,
+    game: chess::ChessGame,
+    player_white: bool,
+    difficulty: chess::ChessDifficulty,
+    auto_engine: bool,
+    auto_reactions: bool,
+    revision: u64,
+    last_event: Option<EventId>,
+}
+
+impl ChessSession {
+    fn new(
+        branch: BranchId,
+        generation: u64,
+        player_white: bool,
+        difficulty: chess::ChessDifficulty,
+        auto_engine: bool,
+        auto_reactions: bool,
+    ) -> Self {
+        Self {
+            id: GameSessionId::new_v4(),
+            generation,
+            branch,
+            game: chess::ChessGame::new(),
+            player_white,
+            difficulty,
+            auto_engine,
+            auto_reactions,
+            revision: 0,
+            last_event: None,
+        }
+    }
+
+    fn key(&self) -> GameKey {
+        GameKey {
+            session: self.id,
+            branch: self.branch,
+            revision: self.revision,
+        }
+    }
+
+    fn projection(&self) -> chess::ChessProjection {
+        chess::ChessProjection {
+            session: self.id,
+            revision: self.revision,
+            player_white: self.player_white,
+            difficulty: self.difficulty,
+            auto_engine: self.auto_engine,
+            auto_reactions: self.auto_reactions,
+            view: self.game.view().expect("validated canonical chess session"),
+            root_fen: self.game.root_fen().to_owned(),
+            moves: self.game.uci_history().to_vec(),
+        }
+    }
+
+    fn result(&self) -> Result<chess::ChessResult, GameError> {
+        self.game
+            .view()
+            .map(|view| view.result)
+            .map_err(|error| GameError::Internal(error.to_string()))
+    }
+}
+
 /// Transient owner working copy reconstructed from canonical private Timeline state.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GameSlot {
     current: Option<Session>,
+    chess: Option<ChessSession>,
     next_generation: u64,
 }
 
 impl std::fmt::Debug for GameSlot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GameSlot")
-            .field("active", &self.current.is_some())
+            .field("active", &(self.current.is_some() || self.chess.is_some()))
             .field("last_generation", &self.next_generation.saturating_sub(1))
             .finish_non_exhaustive()
     }
@@ -164,11 +236,11 @@ impl std::fmt::Debug for GameSlot {
 
 impl GameSlot {
     pub fn key(&self) -> Option<GameKey> {
-        self.current.as_ref().map(Session::key)
+        self.chess.as_ref().map(ChessSession::key).or_else(|| self.current.as_ref().map(Session::key))
     }
 
     pub fn is_empty(&self) -> bool {
-        self.current.is_none()
+        self.current.is_none() && self.chess.is_none()
     }
 
     pub fn projection(&self, side: seabattle::Side) -> Option<GameProjection> {
@@ -177,28 +249,51 @@ impl GameSlot {
             .map(|session| session.projection(side))
     }
 
+    pub fn chess_projection(&self) -> Option<chess::ChessProjection> {
+        self.chess.as_ref().map(ChessSession::projection)
+    }
+
+    pub fn active_game(&self) -> Option<GameId> {
+        if self.chess.is_some() {
+            Some(GameId::Chess)
+        } else {
+            self.current.as_ref().map(|_| GameId::SeaBattle)
+        }
+    }
+
     pub fn auto_reactions(&self) -> bool {
-        self.current
+        self.chess
             .as_ref()
-            .is_some_and(|session| session.auto_reactions)
+            .map(|session| session.auto_reactions)
+            .or_else(|| self.current.as_ref().map(|session| session.auto_reactions))
+            .unwrap_or(false)
     }
 
     pub fn record_event(&mut self, event: EventId) {
-        if let Some(session) = self.current.as_mut() {
+        if let Some(session) = self.chess.as_mut() {
+            session.last_event = Some(event);
+        } else if let Some(session) = self.current.as_mut() {
             session.last_event = Some(event);
         }
     }
 
     pub fn last_event(&self) -> Option<EventId> {
-        self.current.as_ref().and_then(|session| session.last_event)
+        self.chess
+            .as_ref()
+            .and_then(|session| session.last_event)
+            .or_else(|| self.current.as_ref().and_then(|session| session.last_event))
     }
 
     pub fn clear(&mut self) {
         self.current = None;
+        self.chess = None;
     }
 
     pub(crate) fn bind_branch(&mut self, branch: BranchId) {
         if let Some(session) = self.current.as_mut() {
+            session.branch = branch;
+        }
+        if let Some(session) = self.chess.as_mut() {
             session.branch = branch;
         }
     }
@@ -210,6 +305,19 @@ impl GameSlot {
                 || session.generation.checked_add(1) != Some(self.next_generation))
         {
             return Err("invalid game generation");
+        }
+        if self.current.is_some() && self.chess.is_some() {
+            return Err("more than one active game");
+        }
+        if let Some(chess) = &self.chess {
+            if chess.id.is_nil()
+                || chess.branch.0.is_nil()
+                || chess.generation.checked_add(1) != Some(self.next_generation)
+                || chess.revision < chess.game.revision()
+                || chess.game.validate().is_err()
+            {
+                return Err("invalid chess game replay or generation");
+            }
         }
         Ok(())
     }
@@ -224,6 +332,9 @@ impl GameSlot {
             invite: None,
         };
         match command {
+            UserGameCommand::Chess(command) => {
+                self.apply_chess(branch, command, &mut applied)?;
+            }
             UserGameCommand::Start { auto_reactions } => {
                 self.start(branch, auto_reactions, &mut applied)?;
             }
@@ -344,6 +455,143 @@ React briefly in character and put exactly one legal MakeMove,<coordinate> comma
         Ok(applied)
     }
 
+
+    fn apply_chess(
+        &mut self,
+        branch: BranchId,
+        command: chess::ChessUserCommand,
+        applied: &mut Applied,
+    ) -> Result<(), GameError> {
+        use chess::{ChessError, ChessResult, ChessSide, ChessUserCommand};
+        let engine_ticket = match &command {
+            ChessUserCommand::EngineMove { expected, .. } => Some(*expected),
+            _ => None,
+        };
+        match command {
+            ChessUserCommand::Start {
+                player_white,
+                difficulty,
+                auto_engine,
+                auto_reactions,
+            } => {
+                let next = self.next_generation.checked_add(1)
+                    .ok_or(GameError::Invalid("game generation overflow"))?;
+                if let Some(previous) = self.current.take() {
+                    applied.facts.push(GameFact::Ended {
+                        session: previous.id,
+                        generation: previous.generation,
+                        revision: previous.game.revision(),
+                        reason: EndReason::Replaced,
+                        winner: previous.game.winner(),
+                    });
+                }
+                if let Some(previous) = self.chess.take() {
+                    applied.facts.push(GameFact::ChessEnded {
+                        session: previous.id,
+                        generation: previous.generation,
+                        revision: previous.revision,
+                        reason: EndReason::Replaced,
+                        result: format!("{:?}", previous.result()?),
+                    });
+                }
+                let session = ChessSession::new(
+                    branch, self.next_generation, player_white, difficulty, auto_engine, auto_reactions,
+                );
+                applied.facts.push(GameFact::ChessStarted {
+                    session: session.id,
+                    generation: session.generation,
+                    auto_reactions,
+                });
+                applied.invite = Self::auto_invite(
+                    auto_reactions, InviteCause::Fact(applied.facts.len() - 1),
+                    "[Chess] The player started a chess match with you. React briefly without making an unrequested chess move.".into(),
+                );
+                self.next_generation = next;
+                self.chess = Some(session);
+            }
+            ChessUserCommand::Move(uci) | ChessUserCommand::EngineMove { uci, .. } => {
+                let engine = engine_ticket.is_some();
+                let session = self.chess.as_mut().ok_or(GameError::NoActiveGame)?;
+                if let Some(expected) = engine_ticket {
+                    if session.key() != expected {
+                        return Err(GameError::StaleState);
+                    }
+                }
+                let view = session.game.view().map_err(|error| GameError::Internal(error.to_string()))?;
+                let player_side = if session.player_white { ChessSide::White } else { ChessSide::Black };
+                let expected_side = if engine { player_side.opposite() } else { player_side };
+                if view.turn != expected_side {
+                    return Err(GameError::NotYourTurn);
+                }
+                session.game.play_uci(&uci).map_err(|error| match error {
+                    ChessError::Finished => GameError::WrongPhase,
+                    ChessError::IllegalMove => GameError::Invalid("illegal chess move"),
+                    _ => GameError::Internal(error.to_string()),
+                })?;
+                session.revision = session.revision.checked_add(1)
+                    .ok_or(GameError::Invalid("chess revision overflow"))?;
+                applied.facts.push(GameFact::ChessMoved {
+                    session: session.id,
+                    generation: session.generation,
+                    revision: session.revision,
+                    actor: expected_side,
+                });
+                let finished = session.result()?;
+                if finished != ChessResult::Ongoing {
+                    applied.facts.push(GameFact::ChessEnded {
+                        session: session.id,
+                        generation: session.generation,
+                        revision: session.revision,
+                        reason: EndReason::Finished,
+                        result: format!("{finished:?}"),
+                    });
+                    applied.invite = Self::auto_invite(
+                        session.auto_reactions, InviteCause::Fact(applied.facts.len() - 1),
+                        format!("[Chess] The match finished: {finished:?}. React briefly, do not make another move."),
+                    );
+                } else if !engine {
+                    applied.invite = Self::auto_invite(
+                        session.auto_reactions, InviteCause::Fact(applied.facts.len() - 1),
+                        "[Chess] The player just moved. React briefly in character; the external engine chooses your legal reply. Do not invent a move.".into(),
+                    );
+                }
+            }
+            ChessUserCommand::SetDifficulty(value) => {
+                let session = self.chess.as_mut().ok_or(GameError::NoActiveGame)?;
+                session.difficulty = value;
+                session.revision = session.revision.checked_add(1)
+                    .ok_or(GameError::Invalid("chess revision overflow"))?;
+            }
+            ChessUserCommand::SetAutoEngine(enabled) => {
+                let session = self.chess.as_mut().ok_or(GameError::NoActiveGame)?;
+                session.auto_engine = enabled;
+                session.revision = session.revision.checked_add(1)
+                    .ok_or(GameError::Invalid("chess revision overflow"))?;
+            }
+            ChessUserCommand::SetAutoReactions(enabled) => {
+                let session = self.chess.as_mut().ok_or(GameError::NoActiveGame)?;
+                session.auto_reactions = enabled;
+                session.revision = session.revision.checked_add(1)
+                    .ok_or(GameError::Invalid("chess revision overflow"))?;
+            }
+            ChessUserCommand::Close => {
+                let session = self.chess.take().ok_or(GameError::NoActiveGame)?;
+                applied.facts.push(GameFact::ChessEnded {
+                    session: session.id,
+                    generation: session.generation,
+                    revision: session.revision,
+                    reason: EndReason::Closed,
+                    result: format!("{:?}", session.result()?),
+                });
+                applied.invite = Self::auto_invite(
+                    session.auto_reactions, InviteCause::Fact(applied.facts.len() - 1),
+                    "[Chess] The player closed the chess match. React naturally without making more moves.".into(),
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn start(
         &mut self,
         branch: BranchId,
@@ -354,6 +602,15 @@ React briefly in character and put exactly one legal MakeMove,<coordinate> comma
             .next_generation
             .checked_add(1)
             .ok_or(GameError::Invalid("game generation overflow"))?;
+        if let Some(previous) = self.chess.take() {
+            applied.facts.push(GameFact::ChessEnded {
+                session: previous.id,
+                generation: previous.generation,
+                revision: previous.revision,
+                reason: EndReason::Replaced,
+                result: format!("{:?}", previous.result()?),
+            });
+        }
         if let Some(previous) = self.current.take() {
             applied.facts.push(GameFact::Ended {
                 session: previous.id,
