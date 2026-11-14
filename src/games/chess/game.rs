@@ -219,14 +219,14 @@ impl ChessGame {
             }
             let mv = parse_uci_move(&board, uci).map_err(|_| ChessError::CorruptHistory)?;
             let canonical = display_uci_move(&board, mv).to_string();
-            if &canonical != uci {
+            if &canonical != uci || !board.is_legal(mv) {
                 return Err(ChessError::CorruptHistory);
             }
             let pawn = board.piece_on(mv.from) == Some(Piece::Pawn);
             let capture =
                 board.piece_on(mv.to).is_some() || (pawn && mv.from.file() != mv.to.file());
             let san = display_san_move(&board, mv).to_string();
-            board.try_play(mv).map_err(|_| ChessError::CorruptHistory)?;
+            board.play(mv);
             halfmoves = if pawn || capture {
                 0
             } else {
