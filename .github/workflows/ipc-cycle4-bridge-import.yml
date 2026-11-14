@@ -1,4 +1,4 @@
-name: Git Bridge IPC Presenter Presets source import
+name: Git Bridge MCP Admin Presenter source import
 on:
   push:
     branches:
@@ -16,18 +16,18 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true
-      - name: Verify exact GUI Presets Presenter delta
+      - name: Verify local MCP administration source and publish staging ref
         shell: bash
         run: |
           set -euo pipefail
-          BASE=6ee28c5d502162c50d9ed47666edd80c24e16d03
-          EXPECTED=dde762960bd2448edde25dbafa496439ce62947e
+          BASE=dde762960bd2448edde25dbafa496439ce62947e
+          EXPECTED=8f1b6688975ffdf01ad5e21574ed98226f872b37
           git fetch origin refs/heads/bridge/ipc-cycle4-candidate-20261114:refs/remotes/origin/ipc-candidate
           test "$(git rev-parse refs/remotes/origin/ipc-candidate)" = "$BASE"
-          base64 -d .bridge/ipc-cycle4-outgoing.b64 > /tmp/presenter-presets.bundle
-          echo "20354291a9d0c4f7817e46a95b2091e005d58cea63484391184562322ede9dcf  /tmp/presenter-presets.bundle" | sha256sum -c -
-          git bundle verify /tmp/presenter-presets.bundle
-          git fetch /tmp/presenter-presets.bundle refs/heads/codex/mcp-presenter-control-20261114:refs/heads/ipc-presenter-presets-imported
-          test "$(git rev-parse refs/heads/ipc-presenter-presets-imported)" = "$EXPECTED"
+          base64 -d .bridge/ipc-cycle4-outgoing.b64 > /tmp/ipc-admin.bundle
+          echo "c72b5930952e6aedecf04f98dbc89b6e0fa00cebc47e8c3b8eae86b05a5f3893  /tmp/ipc-admin.bundle" | sha256sum -c -
+          git bundle verify /tmp/ipc-admin.bundle
+          git fetch /tmp/ipc-admin.bundle refs/heads/codex/mcp-presenter-control-20261114:refs/heads/ipc-admin-imported
+          test "$(git rev-parse refs/heads/ipc-admin-imported)" = "$EXPECTED"
           git merge-base --is-ancestor "$BASE" "$EXPECTED"
-          git push origin refs/heads/ipc-presenter-presets-imported:refs/heads/bridge/ipc-presenter-presets-cycle7-staged-20261114
+          git push origin refs/heads/ipc-admin-imported:refs/heads/bridge/ipc-admin-cycle8-staged-20261115
