@@ -1,0 +1,37 @@
+name: Q2 source bundle handoff
+
+on:
+  push:
+    branches:
+      - codex/q2-bundle-export-20261114
+
+permissions:
+  contents: read
+
+jobs:
+  export-bundles:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Fetch authoritative main and PR 441 Git object graphs
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin '+refs/heads/main:refs/heads/q2-main' '+refs/pull/441/head:refs/heads/q2-pr441'
+          mkdir -p bundle-export
+          git rev-parse refs/heads/q2-main > bundle-export/main.sha
+          git rev-parse refs/heads/q2-pr441 > bundle-export/pr441.sha
+          git bundle create bundle-export/neuromita-main.bundle refs/heads/q2-main
+          git bundle create bundle-export/neuromita-pr441.bundle refs/heads/q2-pr441
+          git bundle create bundle-export/neuromita-main-pr441.bundle refs/heads/q2-main refs/heads/q2-pr441
+          sha256sum bundle-export/*.bundle > bundle-export/SHA256SUMS
+          ls -lh bundle-export
+      - uses: actions/upload-artifact@v4
+        with:
+          name: q2-main-and-pr441-git-bundles
+          path: bundle-export/
+          compression-level: 0
+          retention-days: 3
