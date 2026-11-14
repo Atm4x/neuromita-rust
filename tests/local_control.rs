@@ -1992,3 +1992,41 @@ async fn debug_inspection_is_canonical_read_only_and_correlated() {
     assert_eq!(rejected["code"], "invalid_command");
     fixture.shutdown().await;
 }
+
+#[tokio::test]
+async fn agent_ipc_client_runs_real_core_probes_without_browser_or_write_access() {
+    let fixture = Fixture::start(|_| {}).await;
+    let address = fixture.app.server().address().to_string();
+    neuromita::agent_ipc::run([
+        "--addr".to_owned(),
+        address.clone(),
+        "--expect".to_owned(),
+        json!({"type":"debug_inspect","snapshot":{"selection_matches_head":true}}).to_string(),
+        "inspect".to_owned(),
+        "timeline".to_owned(),
+    ])
+    .await
+    .unwrap();
+    neuromita::agent_ipc::run([
+        "--addr".to_owned(),
+        address.clone(),
+        "--expect".to_owned(),
+        json!({"type":"pong"}).to_string(),
+        "call".to_owned(),
+        json!({"command":"ping"}).to_string(),
+    ])
+    .await
+    .unwrap();
+    let denied = neuromita::agent_ipc::run([
+        "--addr".to_owned(),
+        address,
+        "call".to_owned(),
+        json!({"command":"initiate", "character":"Crazy"}).to_string(),
+    ])
+    .await;
+    assert!(matches!(
+        denied,
+        Err(neuromita::agent_ipc::AgentError::WriteDenied(_))
+    ));
+    fixture.shutdown().await;
+}
