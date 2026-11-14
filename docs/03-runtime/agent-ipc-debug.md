@@ -23,7 +23,7 @@ neuromita-agent --addr 127.0.0.1:8765 inspect character Crazy
 neuromita-agent --addr 127.0.0.1:8765 inspect requests
 neuromita-agent --addr 127.0.0.1:8765 call '{"command":"ping"}' --expect '{"type":"pong"}'
 neuromita-agent --addr 127.0.0.1:8765 batch tests/agent_ipc_smoke.jsonl
-neuromita-agent --allow-write --timeout-ms 90000 --expect-terminal '{"state":"finished","outcome":"success"}' call '{"command":"initiate","character":"Crazy"}' 
+neuromita-agent --allow-write --timeout-ms 90000 --expect-terminal '{"state":"finished","outcome":"success"}' call '{"command":"initiate","character":"Crazy"}'
 ```
 
 For a controlled real Core action, first validate fixture/disposable data roots, then use a script with explicit command IDs and `--allow-write`. Pair `publish_message` with `reply`/`react`/`initiate` and use `--wait-terminal --timeout-ms 90000` to distinguish receipt from actual generation completion. The client returns a nonzero exit on malformed commands, timeout, assertion failure or unexpected Core error. `--timeout-ms` bounds the entire command (send, acknowledgment and terminal result), not merely individual received frames. JSONL commands may carry `expect`, `wait_terminal`, or `expect_terminal` client-side assertion fields, which are removed before sending to Core. For a batch mixing read and write actions, set `wait_terminal` per generation command rather than globally. An expected non-success terminal state must be asserted explicitly, and even then **it is evidence of failure/cancellation, never success of a user action**.
