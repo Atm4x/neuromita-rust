@@ -61,6 +61,12 @@ pub struct ConversationChangePreview {
 }
 
 impl ConversationChangePreview {
+    pub fn timeline_fence(&self) -> TimelineFence {
+        TimelineFence {
+            at: self.at,
+            selection: self.selection,
+        }
+    }
     pub fn operation(&self) -> ConversationChange {
         self.operation.clone()
     }

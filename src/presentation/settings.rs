@@ -331,6 +331,11 @@ pub struct InterfaceSettingsPresenter {
 }
 
 impl InterfaceSettingsPresenter {
+    pub fn set_font_size(&self, size: u16) -> Result<(), SettingsError> {
+        self.owner
+            .edit::<InterfaceSettings>(|settings| settings.font_size = size)
+            .map(|_| ())
+    }
     pub fn set_visible(&self, area: SettingsArea, visible: bool) -> Result<(), SettingsError> {
         self.owner
             .edit::<InterfaceSettings>(|settings| settings.visibility.set_visible(area, visible))

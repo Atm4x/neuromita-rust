@@ -1314,7 +1314,7 @@ impl ApplicationLifecycle {
             limits.retained_finished.get(),
         );
         let presenter_task = Some(tokio::spawn(runner.run(presenter_stop.clone())));
-        let settings_presenter = SettingsPresenter::new(Arc::clone(&settings_owner));
+        let settings_presenter = Arc::new(SettingsPresenter::new(Arc::clone(&settings_owner)));
         let settings_stop = CancellationToken::new();
         let settings_task = Some(tokio::spawn(settings.run(settings_stop.clone())));
         let server_stop = CancellationToken::new();
@@ -1468,6 +1468,8 @@ impl ApplicationLifecycle {
                 conversation_presenter.clone(),
                 presets_presenter.clone(),
                 settings_presenter.presets.clone(),
+                Arc::clone(&settings_presenter),
+                CharactersPresenter::new(bindings.characters.clone()),
             )),
         )));
         let stop = CancellationToken::new();

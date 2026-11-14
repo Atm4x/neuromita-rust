@@ -14,6 +14,7 @@ mod connections;
 mod conversation;
 pub mod hardware;
 mod ipc;
+mod ipc_admin;
 mod presets;
 mod releases;
 mod runtime;
@@ -32,6 +33,7 @@ pub use conversation::{
     ConversationPresenter, ConversationSnapshot, RegeneratePreview,
 };
 pub(crate) use ipc::{PresenterAction, PresenterActionResult, PresenterProbe, PresenterSurface};
+pub(crate) use ipc_admin::{PresenterRead, PresenterWrite};
 pub use presets::{
     PresetParameterOption, PresetView, PresetsApi, PresetsPresenter, PresetsView, ProviderOption,
 };
@@ -55,7 +57,7 @@ pub struct GuiPresenter {
     pub connections: ConnectionsPresenter,
     pub conversation: ConversationPresenter,
     pub chat: ChatPresenter,
-    pub settings: SettingsPresenter,
+    pub settings: std::sync::Arc<SettingsPresenter>,
     pub presets: PresetsPresenter,
     pub characters: CharactersPresenter,
 }

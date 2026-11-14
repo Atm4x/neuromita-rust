@@ -317,3 +317,66 @@ Extended `inspect_presenter` with surfaces `audio_input`, `voice`, and `guide`. 
 ```
 
 Do not mark a full-stack gate PASS solely because a Presenter action returned success: verify the actual displayed UI/Unity event/device result using the main agent's independent observation. Direct Core commands intentionally **do not** simulate UI clicks. Pending wider coverage: configured Preset connection editing, detailed Character/Memory Presenter operations, model installation, real ASR capture/transcription, and UI-specific navigation/actions not yet exposed by their current presenter APIs.
+
+## MCP as an administrative peer of GUI (Cycle 8)
+
+MCP is not a test-only reflection interface. It is an alternative application
+administration surface, backed by the **same** `SettingsPresenter`,
+`CharactersPresenter` and `ConversationPresenter` owners as the GUI. The
+`GuiPresenter.settings` handle and the IPC adapter now share one
+`Arc<SettingsPresenter>`; the character registry and Timeline are likewise
+shared, not copied.
+
+The MCP catalog expands from 18 to **30** tools. New tools and contracts:
+
+| Tool | Presenter operation | Change permission |
+|---|---|---|
+| `presenter_settings_read` | Read allowlisted interface, voice, memory, capture, onboarding, TTS/ASR, history/document and persistence state, including revision | Read-only |
+| `presenter_settings_write` | Set a typed interface/voice/memory property using `SettingsPresenter`, returning live and persisted revisions separately | `--allow-write` |
+| `presenter_character_profile` | Read a character's versioned prompt/preset-assignment profile | `--allow-content` for prompt |
+| `presenter_character_profile_save` | Atomic optimistic-revision save via `CharactersSettingsPresenter::save_profile` | `--allow-write` |
+| `presenter_memories` | Page real memory records, with state filter and SHA-256 snapshot version | `--allow-content` for body |
+| `presenter_memory_edit` | Add/update/ensure/forget/restore/soft-delete/protect/expire through the *character-owned* CAS editor | `--allow-write`, exact version |
+| `presenter_history` | Bounded Timeline-selection-consistent paging through `ConversationPresenter::history_page` | `--allow-content` for body |
+| `presenter_conversation_preview` | Preview clear/reset/hide/revise and return affected count + exact Timeline version | Read-only |
+| `presenter_conversation_edit` | Apply the previewed change with branch/through/generation CAS | `--allow-write` |
+| `presenter_retry_failed` | Retry the latest eligible failed player request via `ConversationPresenter::retry_failed` | `--allow-write` |
+| `presenter_regenerate_preview` | Validate source/canonical reply provenance via `preview_regenerate`; never mutates | Read-only |
+| `presenter_wait` | Wait up to 30 seconds for Settings/Chat watch revision or a specific character-memory version to change | Read-only |
+
+`presenter_regenerate_preview` **does not execute destructive regeneration**:
+that path has no verified atomic Presenter owner operation. No arbitrary
+memory hard-deletion or unrestricted Settings JSON mutation is exposed.
+
+For a memory edit, call `presenter_memories` first and use its returned
+`version` unchanged. An unrelated mutation/branch switch may make this token
+stale; a stale edit fails without a partial write. For a conversation edit,
+call `presenter_conversation_preview`, pass its returned `version` to
+`presenter_conversation_edit`, and retry with a fresh preview if stale. Neither
+successful command acceptance nor a Settings revision implies persisted disk
+state; check `persisted_revision` and, for a restart, `core_instance_id`.
+
+Examples (each an MCP tool call with its `arguments` object):
+
+```json
+{"tool":"presenter_settings_read","arguments":{"area":"interface"}}
+{"tool":"presenter_settings_write","arguments":{"field":"language","value":"english"}}
+{"tool":"presenter_character_profile","arguments":{"character":"Crazy"}}
+{"tool":"presenter_memories","arguments":{"character":"Crazy","include_content":true}}
+{"tool":"presenter_memory_edit","arguments":{"character":"Crazy","expected_version":"<version from presenter_memories>","commands":[{"command":"add","priority":"high","content":"a fact"}]}}
+{"tool":"presenter_conversation_preview","arguments":{"character":"Crazy","change":{"action":"reset_context"}}}
+{"tool":"presenter_conversation_edit","arguments":{"character":"Crazy","version":{"branch_id":"<branch_id from preview>","through":1,"generation":0},"edit":{"action":"reset_context"}}}
+{"tool":"presenter_wait","arguments":{"target":"chat","after_revision":3,"timeout_ms":10000}}
+```
+
+`presenter_admin_read` and `presenter_admin_write` are typed LocalControl
+methods used by these tools. Both are also allowed in `run_scenario`; the latter
+requires `--allow-write`. Mutations never use the Core Debug entry point.
+This retains the separation between ordinary Presenter administration and
+explicit `--core-debug` low-level operations.
+
+The new MCP surface is still partial parity: detailed configured API preset
+editing, AI Hub installation and model lifecycle commands, actual ASR/TTS
+inference operations and host-only Launcher/Unity actions remain pending.
+The main E2E agent must run those real components; this feature does not claim
+their acceptance.

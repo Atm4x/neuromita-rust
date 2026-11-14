@@ -373,6 +373,8 @@ async fn discovery_matches_executable_commands_and_all_control_replies_are_corre
         "methods",
         "server_status",
         "presenter_action",
+        "presenter_admin_read",
+        "presenter_admin_write",
         "presenter_conversation",
         "presenter_inspect",
         "game_link_inspect",
@@ -440,6 +442,10 @@ async fn discovery_matches_executable_commands_and_all_control_replies_are_corre
             }
             "debug_inspect" => cmd["scope"] = json!("capabilities"),
             "presenter_action" => cmd["action"] = json!({"action":"voice_set_volume","volume":42}),
+            "presenter_admin_read" => cmd["query"] = json!({"query":"settings","area":"voice"}),
+            "presenter_admin_write" => {
+                cmd["change"] = json!({"change":"settings","field":"voice_volume","value":42})
+            }
             "presenter_conversation" => cmd["character"] = json!("Crazy"),
             "presenter_inspect" => {
                 cmd["surface"] = json!("chat");
@@ -2482,7 +2488,7 @@ async fn mcp_stdio_probes_the_same_running_core() {
             let result = &response["result"];
             match id {
                 1 => assert_eq!(result["serverInfo"]["name"], "neuromita"),
-                2 => assert_eq!(result["tools"].as_array().unwrap().len(), 18),
+                2 => assert_eq!(result["tools"].as_array().unwrap().len(), 30),
                 3 => {
                     let frame = &result["structuredContent"];
                     assert_eq!(frame["type"], "presenter_inspect");
@@ -2800,6 +2806,148 @@ async fn mcp_presenter_controls_use_actual_gui_owners_and_snapshot_observations(
     assert_eq!(
         client.error("unknown field").await["code"],
         "invalid_command"
+    );
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn presenter_admin_reads_settings_memory_and_history_with_versioned_mutations() {
+    let fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+    let mut settings = command("presenter_admin_read");
+    settings["query"] = json!({"query":"settings","area":"voice"});
+    client.send(settings.clone()).await;
+    let read = client
+        .until(|v| v["command_id"] == settings["command_id"])
+        .await;
+    assert_eq!(read["type"], "presenter_admin_read");
+    assert_eq!(read["snapshot"]["values"]["volume"], 80);
+
+    let mut write = command("presenter_admin_write");
+    write["change"] = json!({"change":"settings","field":"voice_volume","value":55});
+    client.send(write.clone()).await;
+    assert_eq!(
+        client
+            .until(|v| v["command_id"] == write["command_id"])
+            .await["type"],
+        "presenter_admin_write"
+    );
+    assert_eq!(
+        fixture.app.presenter().settings.voice.volume.get().get(),
+        55
+    );
+
+    let mut wait = command("presenter_admin_read");
+    wait["query"] = json!({"query":"wait","target":"settings",
+        "after_revision":read["snapshot"]["revision"],"timeout_ms":100});
+    client.send(wait.clone()).await;
+    let changed = client
+        .until(|v| v["command_id"] == wait["command_id"])
+        .await;
+    assert_eq!(changed["type"], "presenter_admin_read");
+    assert_eq!(changed["snapshot"]["changed"], true);
+
+    let mut wait_again = command("presenter_admin_read");
+    wait_again["query"] = json!({"query":"wait","target":"settings",
+        "after_revision":changed["snapshot"]["revision"],"timeout_ms":10});
+    client.send(wait_again.clone()).await;
+    let timed = client
+        .until(|v| v["command_id"] == wait_again["command_id"])
+        .await;
+    assert_eq!(timed["snapshot"]["timed_out"], true);
+
+    let mut get = command("presenter_admin_read");
+    get["query"] = json!({"query":"memories","character":"Crazy","include_content":false});
+    client.send(get.clone()).await;
+    let empty = client.until(|v| v["command_id"] == get["command_id"]).await;
+    assert_eq!(empty["type"], "presenter_admin_read", "{empty}");
+    let initial = empty["snapshot"]["version"].as_str().unwrap().to_string();
+    assert_eq!(initial.len(), 64);
+    assert_eq!(empty["snapshot"]["records"].as_array().unwrap().len(), 0);
+
+    let mut add = command("presenter_admin_write");
+    add["change"] = json!({"change":"memory","character":"Crazy","expected_version":initial,
+        "commands":[{"command":"add","priority":"high","content":"admin private memory"}]});
+    client.send(add.clone()).await;
+    let applied = client.until(|v| v["command_id"] == add["command_id"]).await;
+    assert_eq!(applied["type"], "presenter_admin_write", "{applied}");
+    assert_eq!(applied["result"]["applied"], 1);
+    assert_ne!(applied["result"]["version"], initial);
+    client.send(get.clone()).await;
+    let redacted = client.until(|v| v["command_id"] == get["command_id"]).await;
+    assert_eq!(redacted["snapshot"]["records"].as_array().unwrap().len(), 1);
+    assert!(!redacted.to_string().contains("admin private memory"));
+
+    let mut stale = command("presenter_admin_write");
+    stale["change"] = json!({"change":"memory","character":"Crazy","expected_version":initial,
+        "commands":[{"command":"add","priority":"normal","content":"should not exist"}]});
+    client.send(stale.clone()).await;
+    let conflict = client
+        .until(|v| v["command_id"] == stale["command_id"])
+        .await;
+    assert_eq!(conflict["type"], "error");
+    assert!(conflict["error"].as_str().unwrap().contains("stale memory"));
+    assert_eq!(
+        fixture
+            .app
+            .presenter()
+            .characters
+            .memories(CharacterId::Crazy)
+            .await
+            .unwrap()
+            .records()
+            .len(),
+        1
+    );
+    assert_eq!(
+        fixture
+            .app
+            .presenter()
+            .characters
+            .memories(CharacterId::Kind)
+            .await
+            .unwrap()
+            .records()
+            .len(),
+        0
+    );
+
+    let mut history = command("presenter_admin_read");
+    history["query"] = json!({"query":"history","character":"Crazy"});
+    client.send(history.clone()).await;
+    let before = client
+        .until(|v| v["command_id"] == history["command_id"])
+        .await;
+    assert_eq!(before["type"], "presenter_admin_read", "{before}");
+    let version = before["snapshot"]["version"].clone();
+
+    let mut preview = command("presenter_admin_read");
+    preview["query"] = json!({"query":"conversation_preview","character":"Crazy","change":{"action":"reset_context"}});
+    client.send(preview.clone()).await;
+    let pre = client
+        .until(|v| v["command_id"] == preview["command_id"])
+        .await;
+    assert_eq!(pre["type"], "presenter_admin_read", "{pre}");
+    assert_eq!(pre["snapshot"]["version"], version);
+
+    let mut edit = command("presenter_admin_write");
+    edit["change"] = json!({"change":"conversation","character":"Crazy","version":version,"edit":{"action":"reset_context"}});
+    client.send(edit.clone()).await;
+    let committed = client
+        .until(|v| v["command_id"] == edit["command_id"])
+        .await;
+    assert_eq!(committed["type"], "presenter_admin_write", "{committed}");
+
+    client.send(edit.clone()).await;
+    let conflict = client
+        .until(|v| v["command_id"] == edit["command_id"])
+        .await;
+    assert_eq!(conflict["type"], "error");
+    assert!(
+        conflict["error"]
+            .as_str()
+            .unwrap()
+            .contains("stale conversation")
     );
     fixture.shutdown().await;
 }

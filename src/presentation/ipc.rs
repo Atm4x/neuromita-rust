@@ -103,16 +103,18 @@ pub(crate) enum PresenterSurface {
 
 #[derive(Clone)]
 pub(crate) struct PresenterProbe {
-    chat: ChatPresenter,
+    pub(super) chat: ChatPresenter,
     runtime: RuntimeStatePresenter,
     speech: super::SpeechSessionPresenter,
     releases: ReleasesPresenter,
     audio_input: AudioInputPresenter,
     voice: VoiceSettingsPresenter,
     guide: OnboardingSettingsPresenter,
-    conversation: super::ConversationPresenter,
+    pub(super) conversation: super::ConversationPresenter,
     presets: super::PresetsPresenter,
     preset_selection: super::PresetsSettingsPresenter,
+    pub(super) settings: std::sync::Arc<super::SettingsPresenter>,
+    pub(super) characters: super::CharactersPresenter,
 }
 
 impl PresenterProbe {
@@ -127,6 +129,8 @@ impl PresenterProbe {
         conversation: super::ConversationPresenter,
         presets: super::PresetsPresenter,
         preset_selection: super::PresetsSettingsPresenter,
+        settings: std::sync::Arc<super::SettingsPresenter>,
+        characters: super::CharactersPresenter,
     ) -> Self {
         Self {
             chat,
@@ -139,6 +143,8 @@ impl PresenterProbe {
             conversation,
             presets,
             preset_selection,
+            settings,
+            characters,
         }
     }
 

@@ -168,6 +168,45 @@ impl ServerHandler for NeuroMita {
                     ("properties".into(),json!({"surface":{"type":"string","enum":["releases","ai_runtime"]}})),
                 ])
             ).with_annotations(ToolAnnotations::new().read_only(false)),
+            inspection_tool("presenter_wait",
+                "Wait for an actual Settings/Chat/CharacterMemory observer change (no polling). Timeout max 30s.",
+                &["target"],json!({"target":{"type":"string","enum":["settings","chat","memory"]},
+                    "character":{"type":"string"},"after_revision":{"type":"integer","minimum":0},
+                    "after_version":{"type":"string","minLength":64,"maxLength":64},
+                    "timeout_ms":{"type":"integer","minimum":1,"maximum":30000}})),
+            inspection_tool("presenter_settings_read",
+                "Read an allowlisted settings area from the actual SettingsPresenter. Credentials withheld.",
+                &["area"], json!({"area":{"type":"string","enum":["interface","voice","memory","capture","onboarding","tts","asr","history_generation","document_generation","tools","persistence"]}})),
+            inspection_tool("presenter_character_profile",
+                "Read one character's actual persisted preset assignments and optional prompt; prompt requires --allow-content.",
+                &["character"],json!({"character":{"type":"string"},"include_content":{"type":"boolean"}})),
+            inspection_tool("presenter_memories",
+                "Page character-owned memory records; content is opt-in. Returns a version token for guarded updates.",
+                &["character"],json!({"character":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":100},"include_content":{"type":"boolean"},"state":{"type":"string","enum":["active","forgotten","deleted"]}})),
+            inspection_tool("presenter_history",
+                "Page visible ConversationPresenter history at a stable timeline version; content requires --allow-content.",
+                &["character"],json!({"character":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":100},"include_content":{"type":"boolean"},"version":{"type":"object"}})),
+            inspection_tool("presenter_conversation_preview",
+                "Preview an edit against the visible conversation; does not mutate the Timeline.",
+                &["character","change"],json!({"character":{"type":"string"},"change":{"type":"object"}})),
+            inspection_tool("presenter_regenerate_preview",
+                "Validate canonical reply provenance; does not regenerate or mutate anything.",
+                &["character","event_id","version"],json!({"character":{"type":"string"},"event_id":{"type":"string","format":"uuid"},"version":{"type":"object"}})),
+            admin_write_tool("presenter_settings_write",
+                "Set a supported GUI settings property using its SettingsPresenter.",
+                &["field","value"],json!({"field":{"type":"string","enum":["language","font_size","hide_private","structured_display","voice_volume","voice_in_launcher","voice_in_game","voice_name","memory_dedup_enabled","memory_dedup_threshold"]},"value":{}})),
+            admin_write_tool("presenter_character_profile_save",
+                "Compare-and-set a complete CharacterSettings profile (prompt and operation preset assignments).",
+                &["character","expected_revision","profile"],json!({"character":{"type":"string"},"expected_revision":{"type":"integer","minimum":0},"profile":{"type":"object"}})),
+            admin_write_tool("presenter_memory_edit",
+                "Apply 1..32 character-owned memory changes against the exact version returned by presenter_memories.",
+                &["character","expected_version","commands"],json!({"character":{"type":"string"},"expected_version":{"type":"string","minLength":64,"maxLength":64},"commands":{"type":"array","minItems":1,"maxItems":32,"items":{"type":"object"}}})),
+            admin_write_tool("presenter_conversation_edit",
+                "Apply a previously previewed conversation change with branch/head/generation CAS.",
+                &["character","version","edit"],json!({"character":{"type":"string"},"version":{"type":"object"},"edit":{"type":"object"}})),
+            admin_write_tool("presenter_retry_failed",
+                "Re-admit a failed request only when its player input is still the latest visible message.",
+                &["character","request_id"],json!({"character":{"type":"string"},"request_id":{"type":"string","format":"uuid"}})),
             Tool::new("core_debug_command",
                 "Privileged raw typed Core LocalControl command. Requires --core-debug, and --allow-write for mutation. Strict allowlist, no unrestricted reflection. Use Presenter tools for ordinary UI acceptance.",
                 serde_json::Map::from_iter([
@@ -221,6 +260,31 @@ impl ServerHandler for NeuroMita {
         {
             return Err(ErrorData::invalid_params(
                 "include_content requires --allow-content",
+                None,
+            ));
+        }
+        if matches!(
+            request.name.as_ref(),
+            "presenter_memories" | "presenter_history" | "presenter_character_profile"
+        ) && args.get("include_content") == Some(&Value::Bool(true))
+            && !self.allow_content
+        {
+            return Err(ErrorData::invalid_params(
+                "include_content requires --allow-content",
+                None,
+            ));
+        }
+        if matches!(
+            request.name.as_ref(),
+            "presenter_settings_write"
+                | "presenter_character_profile_save"
+                | "presenter_memory_edit"
+                | "presenter_conversation_edit"
+                | "presenter_retry_failed"
+        ) && !self.allow_write
+        {
+            return Err(ErrorData::invalid_params(
+                "Presenter writes require --allow-write",
                 None,
             ));
         }
@@ -314,8 +378,12 @@ impl ServerHandler for NeuroMita {
                 .clone();
             if !self.allow_content
                 && steps.iter().any(|step| {
-                    step.get("command").and_then(Value::as_str) == Some("presenter_conversation")
-                        && step.get("include_content") == Some(&Value::Bool(true))
+                    (step.get("command").and_then(Value::as_str) == Some("presenter_conversation")
+                        && step.get("include_content") == Some(&Value::Bool(true)))
+                        || (step.get("command").and_then(Value::as_str)
+                            == Some("presenter_admin_read")
+                            && step.get("query").and_then(|q| q.get("include_content"))
+                                == Some(&Value::Bool(true)))
                 })
             {
                 return Err(ErrorData::invalid_params(
@@ -327,7 +395,13 @@ impl ServerHandler for NeuroMita {
                 && steps.iter().any(|step| {
                     !matches!(
                         step.get("command").and_then(Value::as_str),
-                        Some("presenter_action" | "presenter_conversation" | "presenter_inspect")
+                        Some(
+                            "presenter_action"
+                                | "presenter_conversation"
+                                | "presenter_inspect"
+                                | "presenter_admin_read"
+                                | "presenter_admin_write"
+                        )
                     )
                 })
             {
@@ -477,6 +551,90 @@ fn command_for_tool(name: &str, mut args: Map<String, Value>) -> Result<Value, E
                 }
             }
             command
+        }
+        "presenter_wait" => {
+            let target = string(&mut args, "target")?;
+            let mut query = json!({"query":"wait","target":target});
+            for key in ["character", "after_revision", "after_version", "timeout_ms"] {
+                if let Some(value) = args.remove(key) {
+                    query[key] = value;
+                }
+            }
+            json!({"command":"presenter_admin_read","query":query})
+        }
+        "presenter_settings_read" => {
+            let area = string(&mut args, "area")?;
+            json!({"command":"presenter_admin_read","query":{"query":"settings","area":area}})
+        }
+        "presenter_character_profile" => {
+            let character = string(&mut args, "character")?;
+            let include_content = args.remove("include_content").unwrap_or(json!(false));
+            json!({"command":"presenter_admin_read","query":{"query":"character_profile","character":character,"include_content":include_content}})
+        }
+        "presenter_memories" | "presenter_history" => {
+            let character = string(&mut args, "character")?;
+            let mut query = json!({"query":if name=="presenter_memories"{"memories"}else{"history"},"character":character});
+            for key in ["offset", "limit", "include_content", "state", "version"] {
+                if let Some(value) = args.remove(key) {
+                    query[key] = value;
+                }
+            }
+            json!({"command":"presenter_admin_read","query":query})
+        }
+        "presenter_conversation_preview" => {
+            let character = string(&mut args, "character")?;
+            let change = args
+                .remove("change")
+                .ok_or_else(|| ErrorData::invalid_params("missing change", None))?;
+            json!({"command":"presenter_admin_read","query":{"query":"conversation_preview","character":character,"change":change}})
+        }
+        "presenter_regenerate_preview" => {
+            let character = string(&mut args, "character")?;
+            let event_id = uuid_field(&mut args, "event_id")?;
+            let version = args
+                .remove("version")
+                .ok_or_else(|| ErrorData::invalid_params("missing version", None))?;
+            json!({"command":"presenter_admin_read","query":{"query":"regenerate_preview","character":character,"event_id":event_id,"version":version}})
+        }
+        "presenter_settings_write" => {
+            let field = string(&mut args, "field")?;
+            let value = args
+                .remove("value")
+                .ok_or_else(|| ErrorData::invalid_params("missing value", None))?;
+            json!({"command":"presenter_admin_write","change":{"change":"settings","field":field,"value":value}})
+        }
+        "presenter_character_profile_save" => {
+            let character = string(&mut args, "character")?;
+            let expected_revision = args
+                .remove("expected_revision")
+                .ok_or_else(|| ErrorData::invalid_params("missing expected_revision", None))?;
+            let profile = args
+                .remove("profile")
+                .ok_or_else(|| ErrorData::invalid_params("missing profile", None))?;
+            json!({"command":"presenter_admin_write","change":{"change":"character_profile","character":character,"expected_revision":expected_revision,"profile":profile}})
+        }
+        "presenter_memory_edit" => {
+            let character = string(&mut args, "character")?;
+            let expected_version = string(&mut args, "expected_version")?;
+            let commands = args
+                .remove("commands")
+                .ok_or_else(|| ErrorData::invalid_params("missing commands", None))?;
+            json!({"command":"presenter_admin_write","change":{"change":"memory","character":character,"expected_version":expected_version,"commands":commands}})
+        }
+        "presenter_conversation_edit" => {
+            let character = string(&mut args, "character")?;
+            let version = args
+                .remove("version")
+                .ok_or_else(|| ErrorData::invalid_params("missing version", None))?;
+            let edit = args
+                .remove("edit")
+                .ok_or_else(|| ErrorData::invalid_params("missing edit", None))?;
+            json!({"command":"presenter_admin_write","change":{"change":"conversation","character":character,"version":version,"edit":edit}})
+        }
+        "presenter_retry_failed" => {
+            let character = string(&mut args, "character")?;
+            let request_id = uuid_field(&mut args, "request_id")?;
+            json!({"command":"presenter_admin_write","change":{"change":"retry_failed","character":character,"request_id":request_id}})
         }
         "presenter_conversation" => {
             let character = string(&mut args, "character")?;
@@ -643,6 +801,21 @@ fn uuid_field(args: &mut Map<String, Value>, key: &str) -> Result<Uuid, ErrorDat
         .map_err(|_| ErrorData::invalid_params(format!("invalid {key} UUID"), None))
 }
 
+fn admin_write_tool(
+    name: &'static str,
+    description: &'static str,
+    required: &[&str],
+    properties: Value,
+) -> Tool {
+    let schema = serde_json::Map::from_iter([
+        ("type".into(), json!("object")),
+        ("additionalProperties".into(), json!(false)),
+        ("required".into(), json!(required)),
+        ("properties".into(), properties),
+    ]);
+    Tool::new(name, description, schema).with_annotations(ToolAnnotations::new().read_only(false))
+}
+
 fn inspection_tool(
     name: &'static str,
     description: &'static str,
@@ -709,6 +882,36 @@ mod tests {
 
     fn args(value: Value) -> Map<String, Value> {
         value.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn presenter_admin_tools_are_typed_and_fail_closed() {
+        let read = command_for_tool(
+            "presenter_memories",
+            args(json!({"character":"Crazy","limit":20})),
+        )
+        .unwrap();
+        assert_eq!(read["command"], "presenter_admin_read");
+        assert_eq!(read["query"]["query"], "memories");
+        assert_eq!(read["query"]["limit"], 20);
+        let edit=command_for_tool("presenter_memory_edit",args(json!({"character":"Crazy",
+            "expected_version":"a".repeat(64),"commands":[{"command":"forget","id":Uuid::new_v4()}]}))).unwrap();
+        assert_eq!(edit["command"], "presenter_admin_write");
+        assert_eq!(edit["change"]["change"], "memory");
+        assert!(
+            command_for_tool(
+                "presenter_settings_read",
+                args(json!({"area":"voice","password":"bad"}))
+            )
+            .is_err()
+        );
+        assert!(
+            command_for_tool(
+                "presenter_conversation_edit",
+                args(json!({"character":"Crazy"}))
+            )
+            .is_err()
+        );
     }
 
     #[test]

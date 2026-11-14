@@ -22,7 +22,10 @@ use crate::{
     generation::PresetId,
     identity::EventId,
     lifecycle::Lifecycle,
-    presentation::{PresenterAction, PresenterActionResult, PresenterProbe, PresenterSurface},
+    presentation::{
+        PresenterAction, PresenterActionResult, PresenterProbe, PresenterRead, PresenterSurface,
+        PresenterWrite,
+    },
     request::{
         DiagnosticLookupError, DiagnosticScope, DiagnosticSection, InitiateRequest,
         ProcessingStage, ReactRequest, ReplyRequest, RequestHandle, RequestId, RequestOutcome,
@@ -224,6 +227,8 @@ commands! {
     PresenterAction {
         action: PresenterAction,
     },
+    PresenterAdminRead { query: PresenterRead },
+    PresenterAdminWrite { change: PresenterWrite },
     PresenterConversation {
         character: CharacterId,
         #[serde(default)]
@@ -665,6 +670,30 @@ async fn client(
                                 ErrorCode::InvalidValue, message), &stop).await?;
                         }
                     }
+                }
+                Command::PresenterAdminRead { query } => {
+                    let result = match &presenter {
+                        Some(presenter) => presenter.admin_read(query).await,
+                        None => Err("application presenter is not attached".into()),
+                    };
+                    let response = match result {
+                        Ok(snapshot) => json!({"type":"presenter_admin_read", "command_id":envelope.command_id,
+                            "snapshot":snapshot}),
+                        Err(error) => error_response(Some(envelope.command_id),ErrorCode::InvalidValue,error),
+                    };
+                    send(&outbound, response, &stop).await?;
+                }
+                Command::PresenterAdminWrite { change } => {
+                    let result = match &presenter {
+                        Some(presenter) => presenter.admin_write(change).await,
+                        None => Err("application presenter is not attached".into()),
+                    };
+                    let response = match result {
+                        Ok(snapshot) => json!({"type":"presenter_admin_write", "command_id":envelope.command_id,
+                            "result":snapshot}),
+                        Err(error) => error_response(Some(envelope.command_id),ErrorCode::InvalidValue,error),
+                    };
+                    send(&outbound, response, &stop).await?;
                 }
                 Command::PresenterConversation { character, include_content, limit } => {
                     let result = match &presenter {
