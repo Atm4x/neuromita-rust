@@ -419,13 +419,17 @@ pub async fn run(args: impl IntoIterator<Item = String>) -> Result<(), AgentErro
             let mut command = json!({"command":"debug_inspect", "scope":opts.positional[0]});
             match (opts.positional[0].as_str(), opts.positional.get(1)) {
                 ("presenter", Some(surface)) => command["surface"] = json!(surface),
-                ("presenter", None) => return Err(AgentError::Usage(
-                    "inspect presenter <chat|ai_runtime|connections>".into()
-                )),
+                ("presenter", None) => {
+                    return Err(AgentError::Usage(
+                        "inspect presenter <chat|ai_runtime|connections>".into(),
+                    ));
+                }
                 ("character", Some(character)) => command["character"] = json!(character),
-                (_, Some(_)) => return Err(AgentError::Usage(
-                    "only character and presenter accept a second argument".into()
-                )),
+                (_, Some(_)) => {
+                    return Err(AgentError::Usage(
+                        "only character and presenter accept a second argument".into(),
+                    ));
+                }
                 _ => {}
             }
             vec![command]

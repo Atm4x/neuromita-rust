@@ -29,7 +29,6 @@ pub(crate) struct ApiBindings {
     pub(crate) presenter_probe: OnceLock<PresenterProbe>,
 }
 
-
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum PresenterSurface {
@@ -50,7 +49,11 @@ impl PresenterProbe {
         ai_runtime: crate::presentation::RuntimeStatePresenter,
         connections: crate::presentation::ConnectionsPresenter,
     ) -> Self {
-        Self { chat, ai_runtime, connections }
+        Self {
+            chat,
+            ai_runtime,
+            connections,
+        }
     }
 
     pub(crate) fn snapshot(&self, surface: PresenterSurface) -> serde_json::Value {
@@ -58,30 +61,42 @@ impl PresenterProbe {
         match surface {
             PresenterSurface::Chat => {
                 let model = self.chat.snapshot();
-                let requests = model.requests.iter().rev().take(32).map(|row| {
-                    let (state, outcome) = match &row.snapshot.state {
-                        crate::request::RequestState::Pending => ("pending", None),
-                        crate::request::RequestState::Processing(_) => ("processing", None),
-                        crate::request::RequestState::Cancelled => ("cancelled", None),
-                        crate::request::RequestState::Finished(outcome) => {
-                            let outcome = match outcome {
-                                crate::request::RequestOutcome::Success(_) => "success",
-                                crate::request::RequestOutcome::VoiceGenerationFailed { .. } => "voice_error",
-                                crate::request::RequestOutcome::TextGenerationFailed(_) => "text_error",
-                                crate::request::RequestOutcome::InternalError(_) => "internal_error",
-                            };
-                            ("finished", Some(outcome))
-                        }
-                    };
-                    json!({
-                        "request_id": row.metadata.id.0,
-                        "character": row.metadata.character_id,
-                        "revision": row.snapshot.revision,
-                        "state": state,
-                        "outcome": outcome,
-                        "observation_error_present": row.observation_error.is_some()
+                let requests = model
+                    .requests
+                    .iter()
+                    .rev()
+                    .take(32)
+                    .map(|row| {
+                        let (state, outcome) = match &row.snapshot.state {
+                            crate::request::RequestState::Pending => ("pending", None),
+                            crate::request::RequestState::Processing(_) => ("processing", None),
+                            crate::request::RequestState::Cancelled => ("cancelled", None),
+                            crate::request::RequestState::Finished(outcome) => {
+                                let outcome = match outcome {
+                                    crate::request::RequestOutcome::Success(_) => "success",
+                                    crate::request::RequestOutcome::VoiceGenerationFailed {
+                                        ..
+                                    } => "voice_error",
+                                    crate::request::RequestOutcome::TextGenerationFailed(_) => {
+                                        "text_error"
+                                    }
+                                    crate::request::RequestOutcome::InternalError(_) => {
+                                        "internal_error"
+                                    }
+                                };
+                                ("finished", Some(outcome))
+                            }
+                        };
+                        json!({
+                            "request_id": row.metadata.id.0,
+                            "character": row.metadata.character_id,
+                            "revision": row.snapshot.revision,
+                            "state": state,
+                            "outcome": outcome,
+                            "observation_error_present": row.observation_error.is_some()
+                        })
                     })
-                }).collect::<Vec<_>>();
+                    .collect::<Vec<_>>();
                 json!({
                     "schema_version": 1,
                     "source": "gui_presenter_watch",
@@ -99,9 +114,14 @@ impl PresenterProbe {
                 use crate::ai_runtime::{AiService, runtime_status::RuntimePhase};
                 let snapshot = self.ai_runtime.snapshot();
                 let services = [
-                    AiService::Tts, AiService::Asr, AiService::Embedding,
-                    AiService::Reranker, AiService::Beats,
-                ].into_iter().map(|service| {
+                    AiService::Tts,
+                    AiService::Asr,
+                    AiService::Embedding,
+                    AiService::Reranker,
+                    AiService::Beats,
+                ]
+                .into_iter()
+                .map(|service| {
                     let state = snapshot.service(service);
                     let phase = match state.phase {
                         RuntimePhase::Stopped => "stopped",
@@ -120,7 +140,8 @@ impl PresenterProbe {
                         "recovery_attempts": state.recovery.as_ref().map(|v| v.attempted),
                         "recovery_exhausted": state.recovery.as_ref().map(|v| v.exhausted)
                     })
-                }).collect::<Vec<_>>();
+                })
+                .collect::<Vec<_>>();
                 json!({
                     "schema_version": 1,
                     "source": "gui_presenter_watch",

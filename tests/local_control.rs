@@ -1993,7 +1993,6 @@ async fn debug_inspection_is_canonical_read_only_and_correlated() {
     fixture.shutdown().await;
 }
 
-
 #[tokio::test]
 async fn actual_presenter_projections_are_read_only_and_versioned() {
     let fixture = Fixture::start(|_| {}).await;
@@ -2007,7 +2006,9 @@ async fn actual_presenter_projections_are_read_only_and_versioned() {
         cmd["scope"] = json!("presenter");
         cmd["surface"] = json!(surface);
         client.send(cmd.clone()).await;
-        let response = client.until(|frame| frame["command_id"] == cmd["command_id"]).await;
+        let response = client
+            .until(|frame| frame["command_id"] == cmd["command_id"])
+            .await;
         assert_eq!(response["type"], "debug_inspect", "{response}");
         assert_eq!(response["snapshot"]["schema_version"], 1);
         assert_eq!(response["snapshot"]["source"], "gui_presenter_watch");
@@ -2027,7 +2028,9 @@ async fn actual_presenter_projections_are_read_only_and_versioned() {
             cmd[key] = value.clone();
         }
         client.send(cmd.clone()).await;
-        let response = client.until(|frame| frame["command_id"] == cmd["command_id"]).await;
+        let response = client
+            .until(|frame| frame["command_id"] == cmd["command_id"])
+            .await;
         assert_eq!(response["type"], "error", "{response}");
     }
     fixture.shutdown().await;

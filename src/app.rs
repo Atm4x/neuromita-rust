@@ -1403,11 +1403,14 @@ impl ApplicationLifecycle {
             speech_watch_task,
         };
         assert!(
-            bindings.presenter_probe.set(crate::runtime::PresenterProbe::new(
-                chat.clone(),
-                ai_runtime_status.clone(),
-                ConnectionsPresenter::new(server.clone()),
-            )).is_ok(),
+            bindings
+                .presenter_probe
+                .set(crate::runtime::PresenterProbe::new(
+                    chat.clone(),
+                    ai_runtime_status.clone(),
+                    ConnectionsPresenter::new(server.clone()),
+                ))
+                .is_ok(),
             "Presenter probe is initialized once per Core lifecycle"
         );
         owner.lease.publish(Arc::clone(&bindings));
