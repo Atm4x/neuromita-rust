@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 23
     env:
-      SOURCE_SHA: f0e347138f61b4e301240384cf203ed5331a2160
+      SOURCE_SHA: 475bcf078d6be8459f90b70d6911930fc77bdfae
       CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
     steps:
@@ -43,6 +43,7 @@ jobs:
           cargo test --locked --offline --lib agent_ipc::tests -- --test-threads=2
           cargo test --locked --offline --test local_control debug_inspection_is_canonical_read_only_and_correlated -- --nocapture
           cargo test --locked --offline --test local_control agent_ipc_client_runs_real_core_probes_without_browser_or_write_access -- --nocapture
+          cargo test --locked --offline --test local_control agent_ipc_client_waits_for_real_core_terminal_success -- --nocapture
           cargo test --locked --offline --test local_control discovery_matches_executable_commands_and_all_control_replies_are_correlated -- --nocapture
           cargo test --locked --offline --lib -- --test-threads=1
           git fetch origin main
