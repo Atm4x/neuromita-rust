@@ -1319,6 +1319,7 @@ impl ApplicationLifecycle {
         let settings_task = Some(tokio::spawn(settings.run(settings_stop.clone())));
         let server_stop = CancellationToken::new();
         let bindings = Arc::new(ApiBindings {
+            core_instance_id: id,
             chat: api,
             timeline: Arc::clone(&timeline),
             characters,

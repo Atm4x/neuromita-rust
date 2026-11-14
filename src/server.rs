@@ -684,6 +684,7 @@ async fn client(
                             };
                             Ok(json!({
                                 "core_phase": phase,
+                                "core_instance_id": api.core_instance_id,
                                 "local_control_running": state.running,
                                 "connected_clients": state.connected_clients,
                                 "accepted_connections": state.accepted_connections,

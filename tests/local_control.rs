@@ -1467,6 +1467,34 @@ async fn game_link_captures_world_context_at_admission_and_restores_revision() {
 }
 
 #[tokio::test]
+async fn lifecycle_probe_identifies_distinct_real_core_instances() {
+    let first = Fixture::start(|_| {}).await;
+    let mut first_client = first.connect().await;
+    let query = command("debug_inspect");
+    let mut command = query.clone();
+    command["scope"] = json!("lifecycle");
+    first_client.send(command.clone()).await;
+    let before = first_client
+        .until(|frame| frame["command_id"] == command["command_id"])
+        .await;
+    let first_id = uuid(&before["snapshot"]["core_instance_id"]);
+    assert_eq!(before["snapshot"]["core_phase"], "running");
+    drop(first_client);
+    first.shutdown().await;
+
+    let second = Fixture::start(|_| {}).await;
+    let mut second_client = second.connect().await;
+    second_client.send(command.clone()).await;
+    let after = second_client
+        .until(|frame| frame["command_id"] == command["command_id"])
+        .await;
+    let second_id = uuid(&after["snapshot"]["core_instance_id"]);
+    assert_ne!(first_id, second_id);
+    assert_eq!(after["snapshot"]["core_phase"], "running");
+    second.shutdown().await;
+}
+
+#[tokio::test]
 async fn game_link_audio_chunks_delivery_ack_and_ptt_survive_resume() {
     let mut fixture = Fixture::with_voice(8, |_| {}, true).await;
     let address = fixture.app.game_link().unwrap().address();

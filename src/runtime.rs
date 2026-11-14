@@ -17,6 +17,7 @@ pub enum ApplicationStatus {
 }
 
 pub(crate) struct ApiBindings {
+    pub(crate) core_instance_id: Uuid,
     pub(crate) chat: Arc<ChatApiState>,
     pub(crate) timeline: Arc<Mutex<crate::timeline::SessionTimeline>>,
     pub(crate) characters: CharacterRegistry,

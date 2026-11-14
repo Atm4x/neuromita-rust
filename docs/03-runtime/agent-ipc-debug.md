@@ -262,3 +262,16 @@ acknowledge its event, inspect by session/request ID through LocalControl,
 reconnect with the real session credential, then inspect again. Unknown sessions
 and request-without-session cases fail closed without disclosing payloads.
 The Unity-side fixture/agent remains responsible for proving who sent that ACK.
+
+## Verifying that a new Core instance actually started
+
+`inspect_core(scope="lifecycle")` now includes `core_instance_id`: a new random
+identity assigned by the authoritative `RuntimeLease` on each successful Core
+start. When testing memory or Guide persistence, capture this identity **before**
+shutdown and **after** the new Core starts. Fail the acceptance sequence if the
+IDs are equal; then independently requery the same EventId through
+`inspect_event_visibility`, or the Guide values and `persisted_revision` through
+`inspect_onboarding`. This avoids incorrectly treating two polls of one still-
+running Core as restart evidence. It is an **application-instance identity**,
+not the OS process PID, nor proof that Unity or the GUI restarted. Neither
+memory durability nor settings durability is inferred solely from changed IDs.
