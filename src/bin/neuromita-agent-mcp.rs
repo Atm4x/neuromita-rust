@@ -47,7 +47,7 @@ impl ServerHandler for NeuroMita {
                 "Read a live sanitized Presenter snapshot. Chat requires character.",
                 &["surface"],
                 json!({
-                    "surface": {"type":"string", "enum":["chat","ai_runtime","connections","speech","releases","audio_input","voice","guide"]},
+                    "surface": {"type":"string", "enum":["chat","ai_runtime","connections","speech","releases","audio_input","voice","guide","presets"]},
                     "character": {"type":"string", "description":"Canonical character ID for surface=chat"}
                 }),
             ),
@@ -146,6 +146,18 @@ impl ServerHandler for NeuroMita {
                     ("type".into(),json!("object")),("additionalProperties".into(),json!(false)),
                     ("required".into(),json!(["volume"])),
                     ("properties".into(),json!({"volume":{"type":"integer","minimum":0,"maximum":100}})),
+                ])
+            ).with_annotations(ToolAnnotations::new().read_only(false)),
+            Tool::new("presenter_presets",
+                "Manage the real PresetsPresenter catalog: select existing, create unconfigured, move or delete. Use inspect_presenter(surface=presets) for names/IDs. Requires --allow-write.",
+                serde_json::Map::from_iter([
+                    ("type".into(),json!("object")),("additionalProperties".into(),json!(false)),
+                    ("required".into(),json!(["action"])),
+                    ("properties".into(),json!({
+                        "action":{"type":"string","enum":["select","create_unconfigured","move","delete"]},
+                        "preset_id":{"type":"integer","minimum":0,"maximum":4294967295_u64},
+                        "step":{"type":"integer","enum":[-1,1]}
+                    })),
                 ])
             ).with_annotations(ToolAnnotations::new().read_only(false)),
             Tool::new("presenter_refresh",
@@ -353,6 +365,7 @@ impl ServerHandler for NeuroMita {
                 | "presenter_guide"
                 | "presenter_voice"
                 | "presenter_refresh"
+                | "presenter_presets"
         ) && !self.allow_write
         {
             return Err(ErrorData::invalid_params(
@@ -551,6 +564,38 @@ fn command_for_tool(name: &str, mut args: Map<String, Value>) -> Result<Value, E
                 .filter(|n| *n <= 100)
                 .ok_or_else(|| ErrorData::invalid_params("volume must be 0..100", None))?;
             json!({"command":"presenter_action","action":{"action":"voice_set_volume","volume":volume}})
+        }
+        "presenter_presets" => {
+            let action = string(&mut args, "action")?;
+            let mut payload = json!({"action":format!("preset_{action}")});
+            match action.as_str() {
+                "create_unconfigured" => {}
+                "select" | "move" | "delete" => {
+                    let id = args
+                        .remove("preset_id")
+                        .and_then(|v| v.as_u64())
+                        .and_then(|v| u32::try_from(v).ok())
+                        .ok_or_else(|| ErrorData::invalid_params("preset_id must be u32", None))?;
+                    payload["preset_id"] = json!(id);
+                    if action == "move" {
+                        let step = args
+                            .remove("step")
+                            .and_then(|v| v.as_i64())
+                            .filter(|v| matches!(v, -1 | 1))
+                            .ok_or_else(|| {
+                                ErrorData::invalid_params("step must be -1 or 1", None)
+                            })?;
+                        payload["step"] = json!(step);
+                    }
+                }
+                _ => {
+                    return Err(ErrorData::invalid_params(
+                        "unknown presenter preset action",
+                        None,
+                    ));
+                }
+            }
+            json!({"command":"presenter_action","action":payload})
         }
         "presenter_refresh" => {
             let surface = string(&mut args, "surface")?;

@@ -60,6 +60,17 @@ pub(crate) enum PresenterAction {
     GuideSetCompleted {
         completed: bool,
     },
+    PresetSelect {
+        preset_id: u32,
+    },
+    PresetCreateUnconfigured {},
+    PresetMove {
+        preset_id: u32,
+        step: i32,
+    },
+    PresetDelete {
+        preset_id: u32,
+    },
 }
 
 impl PresenterAction {
@@ -87,6 +98,7 @@ pub(crate) enum PresenterSurface {
     AudioInput,
     Voice,
     Guide,
+    Presets,
 }
 
 #[derive(Clone)]
@@ -99,6 +111,8 @@ pub(crate) struct PresenterProbe {
     voice: VoiceSettingsPresenter,
     guide: OnboardingSettingsPresenter,
     conversation: super::ConversationPresenter,
+    presets: super::PresetsPresenter,
+    preset_selection: super::PresetsSettingsPresenter,
 }
 
 impl PresenterProbe {
@@ -111,6 +125,8 @@ impl PresenterProbe {
         voice: VoiceSettingsPresenter,
         guide: OnboardingSettingsPresenter,
         conversation: super::ConversationPresenter,
+        presets: super::PresetsPresenter,
+        preset_selection: super::PresetsSettingsPresenter,
     ) -> Self {
         Self {
             chat,
@@ -121,6 +137,8 @@ impl PresenterProbe {
             voice,
             guide,
             conversation,
+            presets,
+            preset_selection,
         }
     }
 
@@ -266,6 +284,37 @@ impl PresenterProbe {
                     .set(completed)
                     .map_err(|e| e.to_string())?;
                 json!({"action":"guide_set_completed","completed":completed})
+            }
+            PresetSelect { preset_id } => {
+                let id = crate::generation::PresetId(preset_id);
+                self.presets.require(id).map_err(|e| e.to_string())?;
+                self.preset_selection
+                    .active
+                    .set(id)
+                    .map_err(|e| e.to_string())?;
+                json!({"action":"preset_select","preset_id":preset_id})
+            }
+            PresetCreateUnconfigured {} => {
+                let (id, record) = self
+                    .presets
+                    .create_unconfigured()
+                    .map_err(|e| e.to_string())?;
+                json!({"action":"preset_create_unconfigured","preset_id":id.0,"name":record.name})
+            }
+            PresetMove { preset_id, step } => {
+                if !matches!(step, -1 | 1) {
+                    return Err("preset move must be -1 or +1".into());
+                }
+                self.presets
+                    .move_one(crate::generation::PresetId(preset_id), step)
+                    .map_err(|e| e.to_string())?;
+                json!({"action":"preset_move","preset_id":preset_id,"step":step})
+            }
+            PresetDelete { preset_id } => {
+                self.presets
+                    .delete(crate::generation::PresetId(preset_id))
+                    .map_err(|e| e.to_string())?;
+                json!({"action":"preset_delete","preset_id":preset_id})
             }
         };
         Ok(PresenterActionResult::Snapshot(json!({
@@ -446,6 +495,23 @@ impl PresenterProbe {
                     "running":status.running,"level":status.level,
                     "device":status.device,"has_error":status.error.is_some(),
                     "privacy":"no audio samples or error text"}),
+                )
+            }
+            PresenterSurface::Presets => {
+                if character.is_some() {
+                    return Err("presets does not accept character");
+                }
+                let records = self
+                    .presets
+                    .list()
+                    .into_iter()
+                    .take(256)
+                    .map(|(id, record)| json!({"id":id.0,"name":record.name}))
+                    .collect::<Vec<_>>();
+                Ok(
+                    json!({"schema_version":1,"surface":"presets","source":"presets_presenter",
+                    "active_preset_id":self.preset_selection.active.get().0,"records":records,
+                    "privacy":"no provider credentials or prompt templates"}),
                 )
             }
             PresenterSurface::Voice => {

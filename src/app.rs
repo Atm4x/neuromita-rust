@@ -1453,6 +1453,7 @@ impl ApplicationLifecycle {
             Arc::clone(&bindings.settings),
             Arc::clone(&presets),
         );
+        let presets_presenter = PresetsPresenter::new(Arc::clone(&presets));
         owner.server_task = Some(tokio::spawn(server_lifecycle.run_with_presenter(
             owner.server_stop.clone(),
             Arc::clone(&bindings),
@@ -1465,6 +1466,8 @@ impl ApplicationLifecycle {
                 settings_presenter.voice.clone(),
                 settings_presenter.onboarding.clone(),
                 conversation_presenter.clone(),
+                presets_presenter.clone(),
+                settings_presenter.presets.clone(),
             )),
         )));
         let stop = CancellationToken::new();
@@ -1488,7 +1491,7 @@ impl ApplicationLifecycle {
                 conversation: conversation_presenter,
                 chat,
                 settings: settings_presenter,
-                presets: PresetsPresenter::new(Arc::clone(&presets)),
+                presets: presets_presenter,
                 characters: CharactersPresenter::new(bindings.characters.clone()),
             },
             bindings,

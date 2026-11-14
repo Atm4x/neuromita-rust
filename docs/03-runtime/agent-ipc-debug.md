@@ -298,6 +298,7 @@ Presenter tools added to the existing catalog:
 | `presenter_audio_input` | `AudioInputPresenter` | `start_test(backend,identity)`, `stop_test()`; levels/error flag via `inspect_presenter(surface=audio_input)` |
 | `presenter_guide` | `OnboardingSettingsPresenter` | `level`, `page`, `completed` via existing validated BoundProperties |
 | `presenter_voice` | `VoiceSettingsPresenter` | Set volume 0–100 |
+| `presenter_presets` | `PresetsPresenter` and active preset BoundProperty | Create unconfigured, select, move (-1/+1), delete; read names/IDs via `inspect_presenter(surface=presets)` |
 | `presenter_refresh` | `ReleasesPresenter` / `RuntimeStatePresenter` | Queue release refresh or refresh actual AI runtime status |
 | `core_debug_command` | Typed Core LocalControl | Explicit allowlisted raw Core commands; `--core-debug` required |
 
@@ -315,4 +316,4 @@ Extended `inspect_presenter` with surfaces `audio_input`, `voice`, and `guide`. 
 {"tool":"core_debug_command","arguments":{"method":"debug_inspect","params":{"scope":"timeline"}}}
 ```
 
-Do not mark a full-stack gate PASS solely because a Presenter action returned success: verify the actual displayed UI/Unity event/device result using the main agent's independent observation. Direct Core commands intentionally **do not** simulate UI clicks. Pending wider coverage: full Preset catalog editing, detailed Character/Memory Presenter operations, model installation, real ASR capture/transcription, and UI-specific navigation/actions not yet exposed by their current presenter APIs.
+Do not mark a full-stack gate PASS solely because a Presenter action returned success: verify the actual displayed UI/Unity event/device result using the main agent's independent observation. Direct Core commands intentionally **do not** simulate UI clicks. Pending wider coverage: configured Preset connection editing, detailed Character/Memory Presenter operations, model installation, real ASR capture/transcription, and UI-specific navigation/actions not yet exposed by their current presenter APIs.

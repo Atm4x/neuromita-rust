@@ -128,6 +128,7 @@ impl TtsSettingsPresenter {
     }
 }
 
+#[derive(Clone)]
 pub struct PresetsSettingsPresenter {
     pub active: BoundProperty<PresetId>,
 }

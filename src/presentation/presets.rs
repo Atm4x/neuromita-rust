@@ -72,6 +72,7 @@ pub trait PresetsApi: Send + Sync {
     fn require(&self, id: PresetId) -> Result<(), PresetCatalogError>;
 }
 
+#[derive(Clone)]
 pub struct PresetsPresenter {
     catalog: Arc<PresetCatalog>,
 }
