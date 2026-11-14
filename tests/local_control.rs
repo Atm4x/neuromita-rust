@@ -2104,3 +2104,121 @@ async fn agent_ipc_binary_executes_jsonl_against_running_core() {
     assert!(fixture.calls.try_recv().is_err());
     fixture.shutdown().await;
 }
+
+#[tokio::test]
+async fn presenter_ipc_projects_live_gui_presenters_without_private_payloads() {
+    let mut fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+    let observed_revision = fixture.app.presenter().chat.snapshot().revision;
+
+    for (surface, character, source) in [
+        ("chat", Some("Crazy"), "chat_presenter_snapshot"),
+        ("ai_runtime", None, "runtime_state_presenter_snapshot"),
+        ("connections", None, "connections_presenter_server_handle"),
+    ] {
+        let mut request = command("presenter_inspect");
+        request["surface"] = json!(surface);
+        if let Some(character) = character {
+            request["character"] = json!(character);
+        }
+        client.send(request.clone()).await;
+        let response = client
+            .until(|row| row["command_id"] == request["command_id"])
+            .await;
+        assert_eq!(response["type"], "presenter_inspect", "{response}");
+        assert_eq!(response["surface"], surface);
+        assert_eq!(response["snapshot"]["source"], source);
+        assert_eq!(response["snapshot"]["schema_version"], 1);
+        assert_eq!(response["evidence_level"], "core_ipc_only");
+        let text = response.to_string();
+        assert!(!text.contains("unused-fixture-key"));
+        assert!(!text.contains("RIFF-fixture"));
+        if surface == "chat" {
+            assert_eq!(response["snapshot"]["revision"], observed_revision);
+            assert_eq!(response["snapshot"]["character"], "Crazy");
+            assert_eq!(response["snapshot"]["requests"]["total"], 0);
+        } else if surface == "ai_runtime" {
+            let services = response["snapshot"]["services"].as_array().unwrap();
+            assert_eq!(services.len(), 5);
+            assert!(services.iter().all(|service| service["phase"].is_string()));
+            assert!(
+                services
+                    .iter()
+                    .all(|service| service.get("last_error").is_none())
+            );
+            assert!(
+                services
+                    .iter()
+                    .all(|service| service.get("active_model").is_none())
+            );
+        } else {
+            assert!(response["snapshot"]["connected_clients"].as_u64().unwrap() >= 1);
+        }
+    }
+
+    let mut invalid = command("presenter_inspect");
+    invalid["surface"] = json!("chat");
+    client.send(invalid.clone()).await;
+    let missing = client
+        .until(|r| r["command_id"] == invalid["command_id"])
+        .await;
+    assert_eq!(missing["code"], "invalid_value");
+    let mut invalid = command("presenter_inspect");
+    invalid["surface"] = json!("arbitrary_core_memory");
+    client.send(invalid.clone()).await;
+    let rejected = client
+        .until(|r| r["command_id"] == invalid["command_id"])
+        .await;
+    assert_eq!(rejected["code"], "invalid_command");
+
+    let mut observable = fixture.app.presenter().chat.observe();
+    let mut initiate = command("initiate");
+    initiate["character"] = json!("Crazy");
+    client.send(initiate.clone()).await;
+    let accepted = client.accepted(uuid(&initiate["command_id"])).await;
+    let id = uuid(&accepted["request_id"]);
+    fixture.call().await.finish("private fixture response");
+    assert_eq!(client.terminal(id).await["outcome"], "success");
+    bounded(async {
+        loop {
+            if observable
+                .borrow()
+                .requests
+                .iter()
+                .any(|r| r.metadata.id == RequestId(id) && r.snapshot.state.is_terminal())
+            {
+                break;
+            }
+            observable.changed().await.expect("presenter still running");
+        }
+    })
+    .await;
+    let view = fixture.app.presenter().chat.snapshot();
+    assert!(view.revision > observed_revision);
+    let mut request = command("presenter_inspect");
+    request["surface"] = json!("chat");
+    request["character"] = json!("Crazy");
+    client.send(request.clone()).await;
+    let response = client
+        .until(|r| r["command_id"] == request["command_id"])
+        .await;
+    assert_eq!(response["snapshot"]["revision"], view.revision);
+    assert_eq!(response["snapshot"]["requests"]["terminal"], 1);
+    assert!(!response.to_string().contains("private fixture response"));
+
+    neuromita::agent_ipc::run([
+        "--addr".into(),
+        fixture.app.server().address().to_string(),
+        "--expect".into(),
+        json!({"type":"presenter_inspect", "snapshot":{
+            "schema_version":1,"surface":"chat","requests":{"terminal":1}
+        }})
+        .to_string(),
+        "presenter".into(),
+        "chat".into(),
+        "Crazy".into(),
+    ])
+    .await
+    .unwrap();
+    fixture.shutdown().await;
+}
