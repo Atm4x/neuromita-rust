@@ -1245,7 +1245,9 @@ impl CharacterHandler {
         events: Vec<EventId>,
     ) -> GameReceipt {
         GameReceipt {
-            game: slot.active_game().unwrap_or(crate::games::GameId::SeaBattle),
+            game: slot
+                .active_game()
+                .unwrap_or(crate::games::GameId::SeaBattle),
             key: slot.key(),
             view,
             chess: slot.chess_projection(),

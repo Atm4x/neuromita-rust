@@ -37,7 +37,9 @@ use neuromita::{
     },
     remote_voice::{FishAudioClient, RemoteVoiceConfig, RemoteVoicePreset, RemoteVoiceStore},
     request::{CancelResult, RequestId},
-    settings::{AsrPreferences, PresetId, PresetSelection, SettingsApi, TtsBackend, TtsPreferences, Volume},
+    settings::{
+        AsrPreferences, PresetId, PresetSelection, SettingsApi, TtsBackend, TtsPreferences, Volume,
+    },
     telegram_sidecar::TelethonSession,
     telegram_voice::{
         DynamicTelegramVoice, FfmpegTelegramDecoder, TelegramConfig, TelegramError,
@@ -2045,4 +2047,3 @@ mod speech_dispatch_tests {
         ));
     }
 }
-

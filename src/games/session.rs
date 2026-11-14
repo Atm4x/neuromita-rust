@@ -236,7 +236,10 @@ impl std::fmt::Debug for GameSlot {
 
 impl GameSlot {
     pub fn key(&self) -> Option<GameKey> {
-        self.chess.as_ref().map(ChessSession::key).or_else(|| self.current.as_ref().map(Session::key))
+        self.chess
+            .as_ref()
+            .map(ChessSession::key)
+            .or_else(|| self.current.as_ref().map(Session::key))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -455,7 +458,6 @@ React briefly in character and put exactly one legal MakeMove,<coordinate> comma
         Ok(applied)
     }
 
-
     fn apply_chess(
         &mut self,
         branch: BranchId,
@@ -474,7 +476,9 @@ React briefly in character and put exactly one legal MakeMove,<coordinate> comma
                 auto_engine,
                 auto_reactions,
             } => {
-                let next = self.next_generation.checked_add(1)
+                let next = self
+                    .next_generation
+                    .checked_add(1)
                     .ok_or(GameError::Invalid("game generation overflow"))?;
                 if let Some(previous) = self.current.take() {
                     applied.facts.push(GameFact::Ended {
@@ -495,7 +499,12 @@ React briefly in character and put exactly one legal MakeMove,<coordinate> comma
                     });
                 }
                 let session = ChessSession::new(
-                    branch, self.next_generation, player_white, difficulty, auto_engine, auto_reactions,
+                    branch,
+                    self.next_generation,
+                    player_white,
+                    difficulty,
+                    auto_engine,
+                    auto_reactions,
                 );
                 applied.facts.push(GameFact::ChessStarted {
                     session: session.id,
@@ -517,9 +526,20 @@ React briefly in character and put exactly one legal MakeMove,<coordinate> comma
                         return Err(GameError::StaleState);
                     }
                 }
-                let view = session.game.view().map_err(|error| GameError::Internal(error.to_string()))?;
-                let player_side = if session.player_white { ChessSide::White } else { ChessSide::Black };
-                let expected_side = if engine { player_side.opposite() } else { player_side };
+                let view = session
+                    .game
+                    .view()
+                    .map_err(|error| GameError::Internal(error.to_string()))?;
+                let player_side = if session.player_white {
+                    ChessSide::White
+                } else {
+                    ChessSide::Black
+                };
+                let expected_side = if engine {
+                    player_side.opposite()
+                } else {
+                    player_side
+                };
                 if view.turn != expected_side {
                     return Err(GameError::NotYourTurn);
                 }
@@ -528,7 +548,9 @@ React briefly in character and put exactly one legal MakeMove,<coordinate> comma
                     ChessError::IllegalMove => GameError::Invalid("illegal chess move"),
                     _ => GameError::Internal(error.to_string()),
                 })?;
-                session.revision = session.revision.checked_add(1)
+                session.revision = session
+                    .revision
+                    .checked_add(1)
                     .ok_or(GameError::Invalid("chess revision overflow"))?;
                 applied.facts.push(GameFact::ChessMoved {
                     session: session.id,
@@ -546,8 +568,11 @@ React briefly in character and put exactly one legal MakeMove,<coordinate> comma
                         result: format!("{finished:?}"),
                     });
                     applied.invite = Self::auto_invite(
-                        session.auto_reactions, InviteCause::Fact(applied.facts.len() - 1),
-                        format!("[Chess] The match finished: {finished:?}. React briefly, do not make another move."),
+                        session.auto_reactions,
+                        InviteCause::Fact(applied.facts.len() - 1),
+                        format!(
+                            "[Chess] The match finished: {finished:?}. React briefly, do not make another move."
+                        ),
                     );
                 } else if !engine {
                     applied.invite = Self::auto_invite(
@@ -559,19 +584,25 @@ React briefly in character and put exactly one legal MakeMove,<coordinate> comma
             ChessUserCommand::SetDifficulty(value) => {
                 let session = self.chess.as_mut().ok_or(GameError::NoActiveGame)?;
                 session.difficulty = value;
-                session.revision = session.revision.checked_add(1)
+                session.revision = session
+                    .revision
+                    .checked_add(1)
                     .ok_or(GameError::Invalid("chess revision overflow"))?;
             }
             ChessUserCommand::SetAutoEngine(enabled) => {
                 let session = self.chess.as_mut().ok_or(GameError::NoActiveGame)?;
                 session.auto_engine = enabled;
-                session.revision = session.revision.checked_add(1)
+                session.revision = session
+                    .revision
+                    .checked_add(1)
                     .ok_or(GameError::Invalid("chess revision overflow"))?;
             }
             ChessUserCommand::SetAutoReactions(enabled) => {
                 let session = self.chess.as_mut().ok_or(GameError::NoActiveGame)?;
                 session.auto_reactions = enabled;
-                session.revision = session.revision.checked_add(1)
+                session.revision = session
+                    .revision
+                    .checked_add(1)
                     .ok_or(GameError::Invalid("chess revision overflow"))?;
             }
             ChessUserCommand::Close => {

@@ -56,21 +56,26 @@ impl GuideChange {
         match self {
             Self::Language(language) => {
                 if !stored.settings.onboarding.eula_accepted {
-                    return Err(SettingsError::Validation("Guide requires EULA acceptance".into()));
+                    return Err(SettingsError::Validation(
+                        "Guide requires EULA acceptance".into(),
+                    ));
                 }
                 stored.settings.interface.language = language.clone();
             }
             _ => self.edit_onboarding(&mut stored.settings.onboarding)?,
         }
-        stored.revision = stored.revision.checked_add(1).ok_or_else(|| {
-            SettingsError::Storage("settings revision exhausted".into())
-        })?;
+        stored.revision = stored
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| SettingsError::Storage("settings revision exhausted".into()))?;
         repo.save_with_owner(&stored, &lease)
     }
 
     fn edit_onboarding(&self, state: &mut OnboardingSettings) -> Result<(), SettingsError> {
         if !state.eula_accepted {
-            return Err(SettingsError::Validation("Guide requires EULA acceptance".into()));
+            return Err(SettingsError::Validation(
+                "Guide requires EULA acceptance".into(),
+            ));
         }
         match self {
             Self::Page(page) => {
@@ -244,11 +249,17 @@ mod tests {
         drop(lease);
         assert!(GuideChange::Page(99).persist_offline(&dir.0).is_err());
         assert_eq!(startup_state(&dir.0).unwrap().guide_page, 1);
-        GuideChange::Level(GuideLevel::Full).persist_offline(&dir.0).unwrap();
+        GuideChange::Level(GuideLevel::Full)
+            .persist_offline(&dir.0)
+            .unwrap();
         assert_eq!(startup_state(&dir.0).unwrap().guide_page, 0);
-        GuideChange::Language(Language::Russian).persist_offline(&dir.0).unwrap();
+        GuideChange::Language(Language::Russian)
+            .persist_offline(&dir.0)
+            .unwrap();
         GuideChange::Complete.persist_offline(&dir.0).unwrap();
-        let stored = JsonSettingsRepository::new(dir.0.join("settings.json")).load().unwrap();
+        let stored = JsonSettingsRepository::new(dir.0.join("settings.json"))
+            .load()
+            .unwrap();
         assert_eq!(stored.settings.interface.language, Language::Russian);
         assert!(stored.settings.onboarding.guide_completed);
     }

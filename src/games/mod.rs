@@ -255,7 +255,9 @@ pub enum GameFact {
 impl GameFact {
     pub const fn game(&self) -> GameId {
         match self {
-            Self::ChessStarted { .. } | Self::ChessMoved { .. } | Self::ChessEnded { .. } => GameId::Chess,
+            Self::ChessStarted { .. } | Self::ChessMoved { .. } | Self::ChessEnded { .. } => {
+                GameId::Chess
+            }
             _ => GameId::SeaBattle,
         }
     }
@@ -295,12 +297,25 @@ impl GameFact {
                 payload.insert("event".into(), json!("started"));
                 payload.insert("auto_reactions".into(), json!(auto_reactions));
             }
-            Self::ChessMoved { revision, actor, .. } => {
+            Self::ChessMoved {
+                revision, actor, ..
+            } => {
                 payload.insert("event".into(), json!("move"));
                 payload.insert("revision".into(), json!(revision));
-                payload.insert("actor".into(), json!(match actor { chess::ChessSide::White => "white", chess::ChessSide::Black => "black" }));
+                payload.insert(
+                    "actor".into(),
+                    json!(match actor {
+                        chess::ChessSide::White => "white",
+                        chess::ChessSide::Black => "black",
+                    }),
+                );
             }
-            Self::ChessEnded { revision, reason, result, .. } => {
+            Self::ChessEnded {
+                revision,
+                reason,
+                result,
+                ..
+            } => {
                 payload.insert("event".into(), json!("ended"));
                 payload.insert("revision".into(), json!(revision));
                 payload.insert("reason".into(), json!(reason.code()));

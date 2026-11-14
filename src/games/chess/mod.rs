@@ -72,7 +72,12 @@ pub struct ChessProjection {
 
 impl ChessProjection {
     pub fn player_turn(&self) -> bool {
-        self.view.turn == if self.player_white { ChessSide::White } else { ChessSide::Black }
+        self.view.turn
+            == if self.player_white {
+                ChessSide::White
+            } else {
+                ChessSide::Black
+            }
     }
 
     pub fn status_line(&self) -> String {
