@@ -23,8 +23,8 @@ struct Options {
 
 fn config() -> io::Result<Options> {
     let mut args = env::args().skip(1);
-    let mut listen = "127.0.0.1:8766".parse().unwrap();
-    let mut core = "127.0.0.1:8765".parse().unwrap();
+    let mut listen: SocketAddr = "127.0.0.1:8766".parse().unwrap();
+    let mut core: SocketAddr = "127.0.0.1:8765".parse().unwrap();
     let mut allow_write = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -123,15 +123,25 @@ async fn read_request(stream: &mut TcpStream) -> io::Result<HttpRequest> {
         let name = name.trim().to_ascii_lowercase();
         let value = value.trim().to_owned();
         match name.as_str() {
-            "host" if host.replace(value).is_some() => return Err(invalid("duplicate Host")),
-            "authorization" if auth.replace(value).is_some() => {
-                return Err(invalid("duplicate Authorization"));
+            "host" => {
+                if host.replace(value).is_some() {
+                    return Err(invalid("duplicate Host"));
+                }
             }
-            "content-length" if length.replace(value).is_some() => {
-                return Err(invalid("duplicate Content-Length"));
+            "authorization" => {
+                if auth.replace(value).is_some() {
+                    return Err(invalid("duplicate Authorization"));
+                }
             }
-            "content-type" if content_type.replace(value).is_some() => {
-                return Err(invalid("duplicate Content-Type"));
+            "content-length" => {
+                if length.replace(value).is_some() {
+                    return Err(invalid("duplicate Content-Length"));
+                }
+            }
+            "content-type" => {
+                if content_type.replace(value).is_some() {
+                    return Err(invalid("duplicate Content-Type"));
+                }
             }
             "transfer-encoding" => return Err(invalid("chunked HTTP is not supported")),
             _ => {}
