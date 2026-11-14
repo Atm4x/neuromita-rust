@@ -667,6 +667,7 @@ mod routing_tests {
         );
         let options = VoiceOptions {
             voice: "speaker".into(),
+            character: None,
             volume: crate::settings::Volume::new(50).unwrap(),
         };
         assert_eq!(

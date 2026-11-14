@@ -1687,6 +1687,7 @@ async fn observe(
                                 InstallAction::Wheel { .. } => ("Один wheel-stage установлен и проверен. Это не готовность backend, модели или worker.".into(), String::new(), "wheel-installed".into()),
                             },
                             Err(InstallPreviewError::ReviewChanged) => (String::new(), "Исходный план изменился после подтверждения — установка остановлена.".into(), "failed".into()),
+                            Err(InstallPreviewError::Cancelled) => ("Установка отменена.".into(), String::new(), "cancelled".into()),
                             Err(InstallPreviewError::UnsupportedInstall) => (String::new(), "Этот план требует дополнительного подтверждения backend или файлов модели.".into(), "failed".into()),
                             Err(_) => (String::new(), "Core не смог завершить установку. Подробности доступны в диагностике установщика.".into(), "failed".into()),
                         };
@@ -1733,6 +1734,8 @@ async fn observe(
                                 "Полученный план не прошёл проверку зависимостей, backend или путей.".into(), false, "failed".into()),
                             Err(InstallPreviewError::ReviewChanged) => (String::new(),
                                 "План или исходник изменился во время проверки.".into(), false, "failed".into()),
+                            Err(InstallPreviewError::Cancelled) => ("Проверка отменена.".into(),
+                                String::new(), false, "cancelled".into()),
                             Err(InstallPreviewError::UnsupportedInstall) => (String::new(),
                                 "Для этого плана пока не поддерживается установка.".into(), false, "failed".into()),
                             Err(InstallPreviewError::WheelPin | InstallPreviewError::WheelExecution) => (String::new(),

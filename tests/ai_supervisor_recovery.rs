@@ -326,6 +326,7 @@ async fn application_recovery_revalidates_generation_host_and_selection_guard() 
                 Arc::from("CRASH"),
                 VoiceOptions {
                     voice: "default".into(),
+                    character: None,
                     volume: Volume::new(50).unwrap(),
                 },
             )

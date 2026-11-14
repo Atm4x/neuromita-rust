@@ -493,6 +493,7 @@ mod tests {
                     Arc::from("hello"),
                     VoiceOptions {
                         voice: "mita".into(),
+                        character: None,
                         volume: crate::settings::Volume::new(100).unwrap(),
                     },
                 )

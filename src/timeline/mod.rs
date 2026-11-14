@@ -2639,13 +2639,7 @@ impl SessionTimeline {
                     drafts.push(handoff);
                 }
                 AppliedEffect::GameAdvanced(fact) => {
-                    let kind = match &fact {
-                        crate::games::GameFact::Started { .. } => EventKind::GameStarted,
-                        crate::games::GameFact::PhaseChanged { .. }
-                        | crate::games::GameFact::Shot { .. } => EventKind::GameAction,
-                        crate::games::GameFact::Ended { .. } => EventKind::GameEnded,
-                    };
-                    let mut game = EventDraft::new(kind);
+                    let mut game = EventDraft::new(Self::game_event_kind(&fact));
                     game.actor = Some(character.to_string());
                     game.observers.insert(character);
                     game.links.push(CausalLink {
@@ -2725,6 +2719,18 @@ impl SessionTimeline {
         })
     }
 
+    fn game_event_kind(fact: &crate::games::GameFact) -> EventKind {
+        use crate::games::GameFact;
+
+        match fact {
+            GameFact::Started { .. } | GameFact::ChessStarted { .. } => EventKind::GameStarted,
+            GameFact::PhaseChanged { .. } | GameFact::Shot { .. } | GameFact::ChessMoved { .. } => {
+                EventKind::GameAction
+            }
+            GameFact::Ended { .. } | GameFact::ChessEnded { .. } => EventKind::GameEnded,
+        }
+    }
+
     /// Commit an owner command and its private state in one guarded batch.
     pub(crate) fn append_game_facts(
         &mut self,
@@ -2736,13 +2742,7 @@ impl SessionTimeline {
         let selected = self.selection();
         let mut drafts = Vec::with_capacity(facts.len());
         for fact in facts {
-            let kind = match fact {
-                crate::games::GameFact::Started { .. } => EventKind::GameStarted,
-                crate::games::GameFact::PhaseChanged { .. }
-                | crate::games::GameFact::Shot { .. } => EventKind::GameAction,
-                crate::games::GameFact::Ended { .. } => EventKind::GameEnded,
-            };
-            let mut draft = EventDraft::new(kind);
+            let mut draft = EventDraft::new(Self::game_event_kind(fact));
             draft.actor = Some(character.to_string());
             draft.observers.insert(character);
             for (key, value) in fact.payload() {
