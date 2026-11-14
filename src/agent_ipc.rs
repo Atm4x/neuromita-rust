@@ -135,6 +135,7 @@ fn is_read_only(method: &str) -> bool {
             | "methods"
             | "server_status"
             | "debug_inspect"
+            | "presenter_inspect"
             | "diagnostics"
             | "diagnostics_recent"
             | "diagnostics_errors"
@@ -422,6 +423,18 @@ pub async fn run(args: impl IntoIterator<Item = String>) -> Result<(), AgentErro
             }
             vec![command]
         }
+        "presenter" => {
+            if !(1..=2).contains(&opts.positional.len()) {
+                return Err(AgentError::Usage(
+                    "presenter <chat|ai_runtime|connections> [character]".into(),
+                ));
+            }
+            let mut command = json!({"command":"presenter_inspect", "surface":opts.positional[0]});
+            if let Some(character) = opts.positional.get(1) {
+                command["character"] = json!(character);
+            }
+            vec![command]
+        }
         "call" => {
             if opts.positional.len() != 1 {
                 return Err(AgentError::Usage("call '<JSON command>'".into()));
@@ -487,6 +500,7 @@ mod tests {
     #[test]
     fn explicit_mutation_gate_and_loopback_only() {
         assert!(is_read_only("debug_inspect"));
+        assert!(is_read_only("presenter_inspect"));
         assert!(!is_read_only("initiate"));
         assert!(!is_read_only("arbitrary_unknown_method"));
         assert!(matches!(

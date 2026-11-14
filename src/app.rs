@@ -1407,9 +1407,14 @@ impl ApplicationLifecycle {
                 lifecycle.run_with_api(owner.server_stop.clone(), Arc::clone(&bindings)),
             ));
         }
-        owner.server_task = Some(tokio::spawn(
-            server_lifecycle.run_with_api(owner.server_stop.clone(), Arc::clone(&bindings)),
-        ));
+        owner.server_task = Some(tokio::spawn(server_lifecycle.run_with_presenter(
+            owner.server_stop.clone(),
+            Arc::clone(&bindings),
+            Some(crate::presentation::PresenterProbe::new(
+                chat.clone(),
+                ai_runtime_status.clone(),
+            )),
+        )));
         let stop = CancellationToken::new();
         let stopped = stop.clone();
         let (completed, completion) = oneshot::channel();
