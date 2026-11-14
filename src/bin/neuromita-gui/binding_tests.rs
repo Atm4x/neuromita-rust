@@ -2321,7 +2321,11 @@ fn failed_gui_shutdown_and_cancellation_report_both_errors_as_pending() {
 
 #[test]
 fn guide_navigation_ack_is_correlated_and_does_not_advance_before_persistence() {
-    use super::super::{memory::MemoryEditor, runtime::Update, sandbox::apply_with_pager};
+    use super::super::{
+        memory::MemoryEditor,
+        runtime::{GuideChange, Update},
+        sandbox::apply_with_pager,
+    };
     use std::sync::{Arc, Mutex, atomic::AtomicU64};
 
     slint::platform::set_platform(Box::new(TestPlatform)).unwrap();
@@ -2335,9 +2339,9 @@ fn guide_navigation_ack_is_correlated_and_does_not_advance_before_persistence() 
     let revision = Arc::new(AtomicU64::new(0));
     apply_with_pager(
         &window,
-        Update::GuidePagePersisted {
+        Update::GuidePersisted {
             request_id: 16,
-            page: 2,
+            change: GuideChange::Page(2),
         },
         &editor,
         &revision,
@@ -2348,7 +2352,7 @@ fn guide_navigation_ack_is_correlated_and_does_not_advance_before_persistence() 
 
     apply_with_pager(
         &window,
-        Update::GuidePageFailed {
+        Update::GuideFailed {
             request_id: 17,
             error: "simulated flush failure".into(),
         },
@@ -2364,9 +2368,9 @@ fn guide_navigation_ack_is_correlated_and_does_not_advance_before_persistence() 
     window.set_onboarding_guide_saving(true);
     apply_with_pager(
         &window,
-        Update::GuidePagePersisted {
+        Update::GuidePersisted {
             request_id: 18,
-            page: 1,
+            change: GuideChange::Page(1),
         },
         &editor,
         &revision,
@@ -2375,4 +2379,107 @@ fn guide_navigation_ack_is_correlated_and_does_not_advance_before_persistence() 
     assert_eq!(window.get_onboarding_guide_page(), 1);
     assert!(!window.get_onboarding_guide_saving());
     assert!(!window.get_onboarding_guide_save_failed());
+}
+
+#[test]
+fn guide_level_language_and_completion_require_correlated_durable_ack() {
+    use super::super::{
+        memory::MemoryEditor,
+        runtime::{GuideChange, Update},
+        sandbox::apply_with_pager,
+    };
+    use neuromita::settings::{GuideLevel, Language};
+    use std::sync::{Arc, Mutex, atomic::AtomicU64};
+
+    slint::platform::set_platform(Box::new(TestPlatform)).unwrap();
+    let window = AppWindow::new().unwrap();
+    let editor = Arc::new(Mutex::new(MemoryEditor::default()));
+    let revision = Arc::new(AtomicU64::new(0));
+
+    window.set_onboarding_guide_level(0);
+    window.set_onboarding_guide_page(2);
+    window.set_onboarding_guide_visible(true);
+    window.set_onboarding_guide_request_id(19);
+    window.set_onboarding_guide_saving(true);
+    apply_with_pager(
+        &window,
+        Update::GuidePersisted {
+            request_id: 18,
+            change: GuideChange::Level(GuideLevel::Full),
+        },
+        &editor,
+        &revision,
+        None,
+    );
+    assert_eq!(window.get_onboarding_guide_level(), 0);
+    assert_eq!(window.get_onboarding_guide_page(), 2);
+
+    apply_with_pager(
+        &window,
+        Update::GuidePersisted {
+            request_id: 19,
+            change: GuideChange::Level(GuideLevel::Full),
+        },
+        &editor,
+        &revision,
+        None,
+    );
+    assert_eq!(window.get_onboarding_guide_level(), 2);
+    assert_eq!(window.get_onboarding_guide_page(), 0);
+    assert!(!window.get_onboarding_guide_saving());
+
+    window.set_onboarding_guide_request_id(20);
+    window.set_onboarding_guide_saving(true);
+    apply_with_pager(
+        &window,
+        Update::GuideFailed {
+            request_id: 20,
+            error: "persist EN failed".into(),
+        },
+        &editor,
+        &revision,
+        None,
+    );
+    assert_eq!(window.get_onboarding_language().as_str(), "ru");
+    assert!(window.get_onboarding_guide_save_failed());
+
+    window.set_onboarding_guide_request_id(21);
+    window.set_onboarding_guide_saving(true);
+    apply_with_pager(
+        &window,
+        Update::GuidePersisted {
+            request_id: 21,
+            change: GuideChange::Language(Language::English),
+        },
+        &editor,
+        &revision,
+        None,
+    );
+    assert_eq!(window.get_onboarding_language().as_str(), "en");
+    assert!(!window.get_onboarding_guide_save_failed());
+
+    window.set_onboarding_guide_request_id(22);
+    window.set_onboarding_guide_saving(true);
+    apply_with_pager(
+        &window,
+        Update::GuidePersisted {
+            request_id: 21,
+            change: GuideChange::Complete,
+        },
+        &editor,
+        &revision,
+        None,
+    );
+    assert!(window.get_onboarding_guide_visible());
+    apply_with_pager(
+        &window,
+        Update::GuidePersisted {
+            request_id: 22,
+            change: GuideChange::Complete,
+        },
+        &editor,
+        &revision,
+        None,
+    );
+    assert!(!window.get_onboarding_guide_visible());
 }

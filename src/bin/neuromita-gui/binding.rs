@@ -279,6 +279,36 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
             }
         }
     });
+    let retry_window = window.as_weak();
+    let retry_runtime = desktop.clone();
+    window.on_onboarding_guide_retry(move || {
+        let Some(window) = retry_window.upgrade() else {
+            return;
+        };
+        if !window.get_onboarding_guide_save_failed() || window.get_onboarding_guide_saving() {
+            return;
+        }
+        let runtime = retry_runtime.borrow();
+        let Some(runtime) = runtime.as_ref() else {
+            window.set_notice("Cannot retry Guide saving without Core".into());
+            return;
+        };
+        let request_id = window
+            .get_onboarding_guide_request_id()
+            .checked_add(1)
+            .unwrap_or(1);
+        match runtime
+            .commands
+            .try_send(super::runtime::Command::RetryGuideChange {
+                request_id: request_id as u64,
+            }) {
+            Ok(()) => {
+                window.set_onboarding_guide_request_id(request_id);
+                window.set_onboarding_guide_saving(true);
+            }
+            Err(error) => window.set_notice(format!("Cannot retry Guide saving: {error}").into()),
+        }
+    });
     let guide_window = window.as_weak();
     let guide_runtime = desktop.clone();
     window.on_onboarding_guide_navigate(move |index| {
@@ -288,11 +318,6 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
         if window.get_onboarding_guide_saving() {
             return;
         }
-        let runtime = guide_runtime.borrow();
-        let Some(runtime) = runtime.as_ref() else {
-            window.set_notice("Guide position cannot be saved until Core starts".into());
-            return;
-        };
         let level = neuromita::onboarding::guide::GuideLevel::from_index(
             window.get_onboarding_guide_level(),
         );
@@ -300,24 +325,12 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
         if i32::from(page) == window.get_onboarding_guide_page() {
             return;
         }
-        let request_id = window
-            .get_onboarding_guide_request_id()
-            .checked_add(1)
-            .unwrap_or(1);
-        match runtime
-            .commands
-            .try_send(super::runtime::Command::SetGuidePage {
-                request_id: request_id as u64,
-                page,
-            }) {
-            Ok(()) => {
-                window.set_onboarding_guide_request_id(request_id);
-                window.set_onboarding_guide_saving(true);
-            }
-            Err(error) => {
-                window.set_notice(format!("Failed to queue Guide position: {error}").into())
-            }
-        }
+        let runtime = guide_runtime.borrow();
+        queue_guide_change(
+            &window,
+            runtime.as_ref(),
+            super::runtime::GuideChange::Page(page),
+        );
     });
     let guide_window = window.as_weak();
     let guide_runtime = desktop.clone();
@@ -329,16 +342,11 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
             return;
         }
         let runtime = guide_runtime.borrow();
-        let Some(runtime) = runtime.as_ref() else {
-            window.set_notice("Guide completion requires a running Core".into());
-            return;
-        };
-        if let Err(error) = runtime
-            .commands
-            .try_send(super::runtime::Command::CompleteGuide)
-        {
-            window.set_notice(format!("Failed to save Guide completion: {error}").into());
-        }
+        queue_guide_change(
+            &window,
+            runtime.as_ref(),
+            super::runtime::GuideChange::Complete,
+        );
     });
     let guide_window = window.as_weak();
     window.on_onboarding_guide_select_step(move |number| {
@@ -386,20 +394,14 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
             return;
         }
         let runtime = guide_runtime.borrow();
-        let Some(runtime) = runtime.as_ref() else {
-            window.set_notice("Guide settings are unavailable until the runtime starts".into());
-            return;
-        };
-        if let Err(error) = runtime
-            .commands
-            .try_send(super::runtime::Command::SetGuideLevel(level))
-        {
-            window.set_notice(format!("Failed to queue Guide level change: {error}").into());
-        }
+        queue_guide_change(
+            &window,
+            runtime.as_ref(),
+            super::runtime::GuideChange::Level(level),
+        );
     });
     let language_window = window.as_weak();
     let language_runtime = desktop.clone();
-    let language_dispatch = dispatch.clone();
     window.on_onboarding_language_selected(move |code| {
         let Some(window) = language_window.upgrade() else {
             return;
@@ -416,21 +418,16 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
             }
         };
         if !window.get_onboarding_required() {
+            if window.get_onboarding_language() == code {
+                return;
+            }
             let runtime = language_runtime.borrow();
-            let Some(runtime) = runtime.as_ref() else {
-                window.set_notice("Guide language cannot be saved until Core starts".into());
-                return;
-            };
-            if let Err(error) = runtime
-                .commands
-                .try_send(super::runtime::Command::SetGuideLanguage(language))
-            {
-                window.set_notice(format!("Failed to queue Guide language: {error}").into());
-                return;
-            }
-            if let Ok(locale) = LocaleId::new(&code) {
-                language_dispatch(ShellCommand::SelectLanguage(locale));
-            }
+            queue_guide_change(
+                &window,
+                runtime.as_ref(),
+                super::runtime::GuideChange::Language(language),
+            );
+            return;
         }
         if window.get_onboarding_language() != code {
             reset_guide_image_view(&window);
@@ -615,6 +612,42 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn queue_guide_change(
+    window: &AppWindow,
+    runtime: Option<&super::runtime::DesktopRuntime>,
+    change: super::runtime::GuideChange,
+) {
+    if window.get_onboarding_guide_saving() {
+        return;
+    }
+    if window.get_onboarding_guide_save_failed() {
+        window.set_notice("Retry the previous Guide save before changing anything else".into());
+        return;
+    }
+    let Some(runtime) = runtime else {
+        window.set_notice("Guide changes require a running Core".into());
+        return;
+    };
+    let request_id = window
+        .get_onboarding_guide_request_id()
+        .checked_add(1)
+        .unwrap_or(1);
+    match runtime
+        .commands
+        .try_send(super::runtime::Command::ChangeGuide {
+            request_id: request_id as u64,
+            change,
+        }) {
+        Ok(()) => {
+            window.set_onboarding_guide_request_id(request_id);
+            window.set_onboarding_guide_saving(true);
+        }
+        Err(error) => {
+            window.set_notice(format!("Cannot queue Guide change: {error}").into());
+        }
+    }
+}
+
 pub(super) fn sync_guide_position(
     window: &AppWindow,
     level: neuromita::onboarding::guide::GuideLevel,
@@ -633,7 +666,7 @@ pub(super) fn sync_guide_position(
     }
 }
 
-fn reset_guide_image_view(window: &AppWindow) {
+pub(super) fn reset_guide_image_view(window: &AppWindow) {
     window.set_onboarding_guide_sizing_mode(0);
     window.set_onboarding_guide_zoom(1.0);
     window.set_onboarding_guide_pan_x(0.0);
@@ -672,7 +705,7 @@ fn set_guide_focus(window: &AppWindow, number: i32) {
     }
 }
 
-fn update_guide(window: &AppWindow, requested_index: i32) {
+pub(super) fn update_guide(window: &AppWindow, requested_index: i32) {
     use neuromita::onboarding::guide::{self, GuideLevel};
 
     let level = GuideLevel::from_index(window.get_onboarding_guide_level());

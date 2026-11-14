@@ -550,6 +550,126 @@ mod tests {
             PersistenceState::Pending
         );
     }
+    struct GuideFailOnce {
+        attempts: std::sync::atomic::AtomicUsize,
+        saved: Mutex<Option<StoredSettings>>,
+    }
+
+    impl SettingsRepository for GuideFailOnce {
+        fn migrate(&self) -> Result<(), SettingsError> {
+            Ok(())
+        }
+
+        fn load(&self) -> Result<StoredSettings, SettingsError> {
+            self.saved
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or_else(|| SettingsError::Storage("no durable snapshot".into()))
+        }
+
+        fn save(&self, snapshot: &StoredSettings) -> Result<(), SettingsError> {
+            use std::sync::atomic::Ordering;
+            if self.attempts.fetch_add(1, Ordering::SeqCst) == 1 {
+                return Err(SettingsError::Storage("injected disk failure".into()));
+            }
+            *self.saved.lock().unwrap() = Some(snapshot.clone());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn guide_level_and_page_survive_failed_save_only_after_retry() {
+        let repository = Arc::new(GuideFailOnce {
+            attempts: std::sync::atomic::AtomicUsize::new(0),
+            saved: Mutex::new(None),
+        });
+        let lifecycle = SettingsLifecycle::prepare(SettingsConfig {
+            source: SettingsSource::initial(AppSettings::initial_profile()),
+            repository: repository.clone(),
+        })
+        .await
+        .unwrap();
+        lifecycle.persist().await.unwrap();
+        let owner = lifecycle.owner();
+        let baseline = repository.load().unwrap();
+        let before = owner.snapshot_all().unwrap().revision;
+
+        owner
+            .edit::<OnboardingSettings>(|state| {
+                state.guide_level = GuideLevel::Full;
+                state.guide_page = 2;
+            })
+            .unwrap();
+        assert_eq!(owner.snapshot_all().unwrap().revision, before + 1);
+        let error = lifecycle.persist().await.unwrap_err();
+        assert!(error.to_string().contains("injected disk failure"));
+        let after_failure = owner.snapshot_all().unwrap();
+        assert_eq!(
+            after_failure.values.onboarding.guide_level,
+            GuideLevel::Full
+        );
+        assert_eq!(after_failure.values.onboarding.guide_page, 2);
+        assert_eq!(after_failure.persisted_revision, Some(before));
+        assert_eq!(repository.load().unwrap(), baseline);
+        assert!(matches!(
+            after_failure.persistence,
+            PersistenceState::Failed { revision, .. } if revision == before + 1
+        ));
+
+        owner.request_save().unwrap();
+        lifecycle.persist().await.unwrap();
+        let durable = repository.load().unwrap();
+        assert_eq!(durable.revision, before + 1);
+        assert_eq!(durable.settings.onboarding.guide_level, GuideLevel::Full);
+        assert_eq!(durable.settings.onboarding.guide_page, 2);
+        let after_retry = owner.snapshot_all().unwrap();
+        assert_eq!(after_retry.persisted_revision, Some(after_retry.revision));
+        assert_eq!(after_retry.persistence, PersistenceState::Saved(before + 1));
+    }
+
+    #[tokio::test]
+    async fn failed_guide_retry_includes_intervening_unrelated_settings_edit() {
+        let repository = Arc::new(GuideFailOnce {
+            attempts: std::sync::atomic::AtomicUsize::new(0),
+            saved: Mutex::new(None),
+        });
+        let lifecycle = SettingsLifecycle::prepare(SettingsConfig {
+            source: SettingsSource::initial(AppSettings::initial_profile()),
+            repository: repository.clone(),
+        })
+        .await
+        .unwrap();
+        lifecycle.persist().await.unwrap();
+        let owner = lifecycle.owner();
+        owner
+            .edit::<OnboardingSettings>(|state| {
+                state.guide_level = GuideLevel::Full;
+                state.guide_page = 2;
+            })
+            .unwrap();
+        assert!(lifecycle.persist().await.is_err());
+        assert_eq!(repository.load().unwrap().revision, 0);
+
+        owner
+            .edit::<InterfaceSettings>(|interface| {
+                interface.language = Language::English;
+            })
+            .unwrap();
+        let pending = owner.snapshot_all().unwrap();
+        assert_eq!(pending.revision, 2);
+        assert_eq!(pending.persisted_revision, Some(0));
+        owner.request_save().unwrap();
+        lifecycle.persist().await.unwrap();
+
+        let saved = repository.load().unwrap();
+        assert_eq!(saved.revision, 2);
+        assert_eq!(saved.settings.onboarding.guide_level, GuideLevel::Full);
+        assert_eq!(saved.settings.onboarding.guide_page, 2);
+        assert_eq!(saved.settings.interface.language, Language::English);
+        assert_eq!(owner.snapshot_all().unwrap().persisted_revision, Some(2));
+    }
+
     #[tokio::test]
     async fn maintenance_freeze_requires_a_durably_saved_revision() {
         let lifecycle = SettingsLifecycle::prepare(SettingsConfig {

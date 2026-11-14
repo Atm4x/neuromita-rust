@@ -777,37 +777,69 @@ fn apply_with_catalog(
             }
         }
         Update::AdminSaved => super::settings::saved(window, None),
-        Update::GuideError(error) => window.set_notice(format!("Guide not saved: {error}").into()),
-        Update::GuidePagePersisted { request_id, page } => {
+        Update::GuidePersisted { request_id, change } => {
             if window.get_onboarding_guide_saving()
                 && window.get_onboarding_guide_request_id() as u64 == request_id
             {
                 window.set_onboarding_guide_saving(false);
                 window.set_onboarding_guide_save_failed(false);
-                let level = neuromita::onboarding::guide::GuideLevel::from_index(
-                    window.get_onboarding_guide_level(),
-                );
-                super::binding::sync_guide_position(window, level, page);
+                match change {
+                    super::runtime::GuideChange::Page(page) => {
+                        let level = neuromita::onboarding::guide::GuideLevel::from_index(
+                            window.get_onboarding_guide_level(),
+                        );
+                        super::binding::sync_guide_position(window, level, page);
+                    }
+                    super::runtime::GuideChange::Level(level) => {
+                        super::binding::sync_guide_position(window, level, 0);
+                    }
+                    super::runtime::GuideChange::Language(language) => {
+                        let code = match language {
+                            neuromita::settings::Language::Russian => "ru",
+                            neuromita::settings::Language::English => "en",
+                        };
+                        if window.get_onboarding_language().as_str() != code {
+                            super::binding::reset_guide_image_view(window);
+                        }
+                        window.set_onboarding_language(code.into());
+                        window.set_onboarding_eula_text(
+                            neuromita::onboarding::eula_text(code).into(),
+                        );
+                        super::binding::update_guide(window, window.get_onboarding_guide_page());
+                        window.invoke_language_selected(code.into());
+                    }
+                    super::runtime::GuideChange::Complete => {
+                        window.set_onboarding_guide_visible(false);
+                    }
+                }
             }
         }
-        Update::GuidePageFailed { request_id, error } => {
+        Update::GuideFailed { request_id, error } => {
             if window.get_onboarding_guide_saving()
                 && window.get_onboarding_guide_request_id() as u64 == request_id
             {
                 window.set_onboarding_guide_saving(false);
                 window.set_onboarding_guide_save_failed(true);
-                window
-                    .set_notice(format!("Guide page not saved; retry navigation: {error}").into());
+                window.set_notice(format!("Guide change not saved; retry: {error}").into());
             }
         }
-        Update::GuideCompleted => window.set_onboarding_guide_visible(false),
+        Update::GuideRejected { request_id, error } => {
+            if window.get_onboarding_guide_saving()
+                && window.get_onboarding_guide_request_id() as u64 == request_id
+            {
+                window.set_onboarding_guide_saving(false);
+                window.set_onboarding_guide_save_failed(false);
+                window.set_notice(format!("Guide change rejected: {error}").into());
+            }
+        }
         Update::PresetSaved(id) => super::settings::saved(window, Some(id)),
         Update::Stopped => {
             if window.get_onboarding_guide_saving() {
                 window.set_onboarding_guide_saving(false);
                 window.set_onboarding_guide_save_failed(true);
                 window.set_notice(
-                    "Guide page was not confirmed before Core stopped; retry after restart".into(),
+                    "Guide change was not confirmed before Core stopped; retry after restart"
+                        .into(),
                 );
             }
             super::ai_hub::stopped(window);
