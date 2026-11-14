@@ -13,6 +13,7 @@ mod chat;
 mod connections;
 mod conversation;
 pub mod hardware;
+mod ipc;
 mod presets;
 mod releases;
 mod runtime;
@@ -30,6 +31,7 @@ pub use conversation::{
     ConversationChange, ConversationChangePreview, ConversationError, ConversationHistoryPage,
     ConversationPresenter, ConversationSnapshot, RegeneratePreview,
 };
+pub(crate) use ipc::{PresenterProbe, PresenterSurface};
 pub use presets::{
     PresetParameterOption, PresetView, PresetsApi, PresetsPresenter, PresetsView, ProviderOption,
 };

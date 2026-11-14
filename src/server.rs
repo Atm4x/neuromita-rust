@@ -21,6 +21,7 @@ use crate::{
     character::CharacterId,
     identity::EventId,
     lifecycle::Lifecycle,
+    presentation::{PresenterProbe, PresenterSurface},
     request::{
         DiagnosticLookupError, DiagnosticScope, DiagnosticSection, InitiateRequest,
         ProcessingStage, ReactRequest, ReplyRequest, RequestHandle, RequestId, RequestOutcome,
@@ -140,6 +141,15 @@ impl ServerLifecycle {
         stop: CancellationToken,
         api: Arc<ApiBindings>,
     ) -> io::Result<()> {
+        self.run_with_presenter(stop, api, None).await
+    }
+
+    pub(crate) async fn run_with_presenter(
+        self,
+        stop: CancellationToken,
+        api: Arc<ApiBindings>,
+        presenter: Option<PresenterProbe>,
+    ) -> io::Result<()> {
         let clients_stop = CancellationToken::new();
         let mut clients: JoinSet<io::Result<()>> = JoinSet::new();
         self.state.change(|state| state.running = true);
@@ -164,10 +174,11 @@ impl ServerLifecycle {
                             let config = Arc::clone(&self.config);
                             let stop = clients_stop.clone();
                             let api = Arc::clone(&api);
+                            let presenter = presenter.clone();
                             let server = ServerHandle { address: self.listener.local_addr()?, state: Arc::clone(&self.state) };
                             clients.spawn(async move {
                                 let _connected = Connected(state);
-                                client(stream, config, stop, api, server).await
+                                client(stream, config, stop, api, server, presenter).await
                             });
                         }
                         Err(error) => { failure = Some(error); break; }
@@ -209,6 +220,11 @@ macro_rules! commands {
 
 commands! {
     Ping {}, Methods {}, ServerStatus {},
+    PresenterInspect {
+        surface: PresenterSurface,
+        #[serde(default)]
+        character: Option<CharacterId>,
+    },
     DebugInspect {
         scope: DebugScope,
         #[serde(default)]
@@ -290,6 +306,7 @@ enum ErrorCode {
     ReceiptCapacity,
     OwnershipDenied,
     DiagnosticsUnavailable,
+    PresenterUnavailable,
     DiagnosticsNotFound,
     DiagnosticsExpired,
     CoreUnavailable,
@@ -493,6 +510,7 @@ async fn client(
     parent_stop: CancellationToken,
     api: Arc<ApiBindings>,
     server: ServerHandle,
+    presenter: Option<PresenterProbe>,
 ) -> io::Result<()> {
     let stop = parent_stop.child_token();
     let client_id = Uuid::new_v4();
@@ -582,11 +600,27 @@ async fn client(
                         "limits":{"max_clients":config.max_clients, "outbound_capacity":config.outbound_capacity,
                             "max_command_bytes":config.max_command_bytes, "receipt_capacity":config.receipt_capacity}}), &stop).await?;
                 }
+                Command::PresenterInspect { surface, character } => {
+                    let response = match &presenter {
+                        Some(presenter) => match presenter.inspect(surface, character, &server) {
+                            Ok(snapshot) => json!({"type":"presenter_inspect",
+                                "command_id":envelope.command_id,"surface":surface,
+                                "evidence_level":"core_ipc_only", "snapshot":snapshot}),
+                            Err(message) => error_response(Some(envelope.command_id), ErrorCode::InvalidValue, message),
+                        },
+                        None => error_response(Some(envelope.command_id), ErrorCode::PresenterUnavailable,
+                            "application presenter is not attached"),
+                    };
+                    send(&outbound, response, &stop).await?;
+                }
                 Command::DebugInspect { scope, character } => {
                     let snapshot = match scope {
                         DebugScope::Capabilities => Ok(json!({
                             "protocol": "local_control_jsonl_v1",
                             "capabilities": ["lifecycle", "timeline", "character", "requests"],
+                            "presenter_surfaces": ["chat", "ai_runtime", "connections"],
+                            "presenter_requires_core_lifecycle": true,
+                            "server_authorized_deep_writes": false,
                             "mutating_commands": ["publish_message", "reply", "react", "initiate", "cancel", "set_volume"],
                             "acceptance_issue": 442,
                             "evidence_level": "core_ipc_only",

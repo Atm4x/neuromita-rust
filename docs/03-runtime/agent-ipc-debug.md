@@ -48,3 +48,36 @@ Batch example (`jsonl`):
 | E2E-12…15 | Precise correlation/errors of supported LocalControl commands | Device/model inference readiness, asset validation, GUI snapshots, update rollback |
 
 For true #442 PASS, add **real Unity and GUI evidence and exact SHAs**. Do not close #442 or #95 based on an IPC smoke pass.
+
+
+## Presenter IPC: read-only phase 2 (`presenter_inspect`)
+
+This is a **typed projection of the already-running presenters**. `ApplicationLifecycle`
+passes a clone of the existing `ChatPresenter` watch state and `RuntimeStatePresenter`
+handles into LocalControl. It does not construct a second presenter, own a new
+Timeline, or replay messages. The server reports `presenter_unavailable` rather
+than fabricating a snapshot if no application presenter is attached.
+
+```bash
+neuromita-agent --addr 127.0.0.1:8765 presenter chat Crazy
+neuromita-agent --addr 127.0.0.1:8765 presenter ai_runtime
+neuromita-agent --addr 127.0.0.1:8765 presenter connections
+neuromita-agent --addr 127.0.0.1:8765 call '{"command":"presenter_inspect","surface":"chat","character":"Crazy"}'
+```
+
+The server uses a **closed `PresenterSurface` enum** (`chat`, `ai_runtime`,
+`connections`). `chat` requires an explicit character, and reports only
+presenter revision, pending/processing/terminal request *counts*, closed flag
+and presence of discovery errors. `ai_runtime` returns the five known service
+phases, generation correlation and readiness/error **booleans**, not plugin IDs,
+model paths, credentials or provider text. `connections` projects the existing
+`ServerHandle` consumed by `ConnectionsPresenter`, omitting client addresses
+and last error contents. Each reply has a `command_id`, `schema_version: 1`
+and `evidence_level: core_ipc_only`.
+
+These views do **not** prove GUI rendering or live Unity witnesses. The `revision`
+is an observable presentation revision, not a durable Timeline receipt.
+No privileged write-methods or server debug token are introduced: any
+future deep-debug mutation MUST have explicit server-side authorization,
+separate from client `--allow-write`. Loopback is not authentication; do not
+expose this LocalControl port to untrusted local processes.
