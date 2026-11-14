@@ -1,4 +1,4 @@
-name: Git Bridge IPC Presenter Control source import
+name: Git Bridge IPC Presenter Presets source import
 on:
   push:
     branches:
@@ -16,18 +16,18 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true
-      - name: Verify exact Presenter Control bundle
+      - name: Verify exact GUI Presets Presenter delta
         shell: bash
         run: |
           set -euo pipefail
-          BASE=f860ab109185247a56f121d8ed2068e9f3ff24e0
-          EXPECTED=6ee28c5d502162c50d9ed47666edd80c24e16d03
+          BASE=6ee28c5d502162c50d9ed47666edd80c24e16d03
+          EXPECTED=dde762960bd2448edde25dbafa496439ce62947e
           git fetch origin refs/heads/bridge/ipc-cycle4-candidate-20261114:refs/remotes/origin/ipc-candidate
           test "$(git rev-parse refs/remotes/origin/ipc-candidate)" = "$BASE"
-          base64 -d .bridge/ipc-cycle4-outgoing.b64 > /tmp/presenter-control.bundle
-          echo "ddc81ce7aa5dd5526dd45f11027423047d985926ca8619d2e75bcf8d263c08aa  /tmp/presenter-control.bundle" | sha256sum -c -
-          git bundle verify /tmp/presenter-control.bundle
-          git fetch /tmp/presenter-control.bundle refs/heads/codex/mcp-presenter-control-20261114:refs/heads/ipc-presenter-imported
-          test "$(git rev-parse refs/heads/ipc-presenter-imported)" = "$EXPECTED"
+          base64 -d .bridge/ipc-cycle4-outgoing.b64 > /tmp/presenter-presets.bundle
+          echo "20354291a9d0c4f7817e46a95b2091e005d58cea63484391184562322ede9dcf  /tmp/presenter-presets.bundle" | sha256sum -c -
+          git bundle verify /tmp/presenter-presets.bundle
+          git fetch /tmp/presenter-presets.bundle refs/heads/codex/mcp-presenter-control-20261114:refs/heads/ipc-presenter-presets-imported
+          test "$(git rev-parse refs/heads/ipc-presenter-presets-imported)" = "$EXPECTED"
           git merge-base --is-ancestor "$BASE" "$EXPECTED"
-          git push origin refs/heads/ipc-presenter-imported:refs/heads/bridge/ipc-presenter-cycle7-staged-20261114
+          git push origin refs/heads/ipc-presenter-presets-imported:refs/heads/bridge/ipc-presenter-presets-cycle7-staged-20261114
