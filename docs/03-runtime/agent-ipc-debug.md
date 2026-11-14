@@ -81,3 +81,41 @@ No privileged write-methods or server debug token are introduced: any
 future deep-debug mutation MUST have explicit server-side authorization,
 separate from client `--allow-write`. Loopback is not authentication; do not
 expose this LocalControl port to untrusted local processes.
+
+## Optional loopback HTTP gateway
+
+Start \`neuromita-agent-http\` explicitly; it is **not** launched by the
+GUI or Core automatically. Set \`NEUROMITA_AGENT_HTTP_TOKEN\` in the
+gateway process environment to a random ASCII secret of at least 32 bytes.
+It never accepts non-loopback bindings or Core addresses, rejects foreign
+Host headers, does not enable CORS, bounds headers/bodies/frames/timeouts,
+and requires \`Authorization: Bearer <secret>\` on **every** request.
+
+\`\`\`sh
+NEUROMITA_AGENT_HTTP_TOKEN="$TOKEN" neuromita-agent-http \
+  --listen 127.0.0.1:8766 --core 127.0.0.1:8765
+curl --fail-with-body -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:8766/v1/presenter/chat/Crazy
+curl --fail-with-body -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:8766/v1/timeline
+\`\`\`
+
+Read-only GET endpoints:
+\`/v1/ping\`, \`/v1/methods\`, \`/v1/server\`,
+\`/v1/capabilities\`, \`/v1/lifecycle\`, \`/v1/timeline\`,
+\`/v1/characters\`, \`/v1/character/{id}\`, \`/v1/requests\`,
+\`/v1/presenter/{chat|ai_runtime|connections}\`.
+
+POST \`/v1/commands\` accepts the canonical Core JSON command schema.
+Only \`ping\`, \`methods\`, \`server_status\` and \`debug_inspect\` are
+admitted by default. Launching the **gateway** with \`--allow-write\`
+additionally admits \`publish_message\`, \`reply\`, \`react\`,
+\`initiate\` and \`set_volume\`. Each POST is an independent Core
+connection; this HTTP phase supports command ACK, not sessionful
+\`cancel\` or terminal result subscriptions. For those, use the
+persistent JSONL \`neuromita-agent\` batch client.
+
+The gateway authenticates **its own** requests, but the underlying Core
+LocalControl loopback socket does not yet have server-side authentication.
+Do not bind it on a remote interface or claim this is a secure local-user
+boundary. Use an isolated disposable data root for mutation acceptance.

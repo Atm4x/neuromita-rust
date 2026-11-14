@@ -1,0 +1,46 @@
+name: Agent IPC and HTTP Acceptance (Rust 1.100)
+
+on:
+  pull_request:
+    paths:
+      - 'src/agent_ipc.rs'
+      - 'src/bin/neuromita-agent.rs'
+      - 'src/bin/neuromita-agent-http.rs'
+      - 'src/app.rs'
+      - 'src/runtime.rs'
+      - 'src/presentation/runtime.rs'
+      - 'src/server.rs'
+      - 'tests/local_control.rs'
+      - '.github/workflows/agent-ipc-http-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ipc-http:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Native dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq pkg-config libasound2-dev
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.100.0'
+          components: rustfmt
+      - name: Formatting
+        run: cargo fmt --all -- --check
+      - name: IPC and HTTP checks
+        env:
+          CARGO_BUILD_JOBS: '2'
+          CARGO_INCREMENTAL: '0'
+        run: |
+          cargo check --locked --offline --all-targets
+          cargo test --locked --offline --bin neuromita-agent-http -- --test-threads=1
+          cargo test --locked --offline --lib agent_ipc::tests -- --test-threads=1
+          cargo test --locked --offline --test local_control presenter_ipc_projects_live_gui_presenters_without_private_payloads -- --test-threads=1
+          cargo test --locked --offline --test local_control optional_http_gateway_rejects_untrusted_clients_and_probes_real_core -- --test-threads=1
+          cargo test --locked --offline --test local_control agent_ipc_binary_executes_jsonl_against_running_core -- --test-threads=1
