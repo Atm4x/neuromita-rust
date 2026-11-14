@@ -1,4 +1,4 @@
-name: Git Bridge IPC MCP source import
+name: Git Bridge IPC GameLink source import
 on:
   push:
     branches:
@@ -16,18 +16,18 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true
-      - name: Verify local Git bundle and publish isolated import ref
+      - name: Verify one local commit and publish isolated candidate
         shell: bash
         run: |
           set -euo pipefail
-          BASE=540a6f92aee2a14c5b9bca2bb4253dbe578bc6a2
-          EXPECTED=fe808f32cc5af9a0c4e3884d2b97a1a75052b55f
+          BASE=fe808f32cc5af9a0c4e3884d2b97a1a75052b55f
+          EXPECTED=c28bfbadafc0c62b870e1ff555eadfd429923322
           git fetch origin refs/heads/bridge/ipc-cycle4-candidate-20261114:refs/remotes/origin/ipc-candidate
           test "$(git rev-parse refs/remotes/origin/ipc-candidate)" = "$BASE"
-          base64 -d .bridge/ipc-cycle4-outgoing.b64 > /tmp/ipc-mcp.bundle
-          echo "d2caca4f52bc3cbfafff0eaed5b938886b93a4c6241f60ea76e1a67f88ddc2b5  /tmp/ipc-mcp.bundle" | sha256sum -c -
-          git bundle verify /tmp/ipc-mcp.bundle
-          git fetch /tmp/ipc-mcp.bundle refs/heads/ipc-cycle4-integrate:refs/heads/ipc-mcp-imported
-          test "$(git rev-parse refs/heads/ipc-mcp-imported)" = "$EXPECTED"
+          base64 -d .bridge/ipc-cycle4-outgoing.b64 > /tmp/ipc-cycle6.bundle
+          echo "3038607dbb00afdd4eeb0f219080fe94106b473a6c6f509bf1d5fe071385d1b1  /tmp/ipc-cycle6.bundle" | sha256sum -c -
+          git bundle verify /tmp/ipc-cycle6.bundle
+          git fetch /tmp/ipc-cycle6.bundle refs/heads/ipc-cycle6-export:refs/heads/ipc-cycle6-imported
+          test "$(git rev-parse refs/heads/ipc-cycle6-imported)" = "$EXPECTED"
           git merge-base --is-ancestor "$BASE" "$EXPECTED"
-          git push origin refs/heads/ipc-mcp-imported:refs/heads/bridge/ipc-mcp-imported-20261114
+          git push origin refs/heads/ipc-cycle6-imported:refs/heads/bridge/ipc-cycle6-staged-20261114
