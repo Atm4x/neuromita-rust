@@ -1993,6 +1993,46 @@ async fn debug_inspection_is_canonical_read_only_and_correlated() {
     fixture.shutdown().await;
 }
 
+
+#[tokio::test]
+async fn actual_presenter_projections_are_read_only_and_versioned() {
+    let fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+    for (surface, key) in [
+        ("chat", "revision"),
+        ("ai_runtime", "services"),
+        ("connections", "running"),
+    ] {
+        let mut cmd = command("debug_inspect");
+        cmd["scope"] = json!("presenter");
+        cmd["surface"] = json!(surface);
+        client.send(cmd.clone()).await;
+        let response = client.until(|frame| frame["command_id"] == cmd["command_id"]).await;
+        assert_eq!(response["type"], "debug_inspect", "{response}");
+        assert_eq!(response["snapshot"]["schema_version"], 1);
+        assert_eq!(response["snapshot"]["source"], "gui_presenter_watch");
+        assert_eq!(response["snapshot"]["surface"], surface);
+        assert_eq!(response["snapshot"]["evidence_level"], "core_ipc_only");
+        assert_eq!(response["snapshot"]["full_stack_e2e_verified"], false);
+        assert!(!response["snapshot"][key].is_null(), "{response}");
+        assert!(response["snapshot"].get("text").is_none());
+    }
+    for bad in [
+        json!({"scope":"presenter","surface":"anything"}),
+        json!({"scope":"presenter"}),
+        json!({"scope":"lifecycle","surface":"chat"}),
+    ] {
+        let mut cmd = command("debug_inspect");
+        for (key, value) in bad.as_object().unwrap() {
+            cmd[key] = value.clone();
+        }
+        client.send(cmd.clone()).await;
+        let response = client.until(|frame| frame["command_id"] == cmd["command_id"]).await;
+        assert_eq!(response["type"], "error", "{response}");
+    }
+    fixture.shutdown().await;
+}
+
 #[tokio::test]
 async fn agent_ipc_client_runs_real_core_probes_without_browser_or_write_access() {
     let fixture = Fixture::start(|_| {}).await;

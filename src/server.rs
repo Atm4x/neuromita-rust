@@ -26,7 +26,7 @@ use crate::{
         ProcessingStage, ReactRequest, ReplyRequest, RequestHandle, RequestId, RequestOutcome,
         RequestSnapshot, RequestSource, RequestState, SubmitError,
     },
-    runtime::{self, ApiBindings},
+    runtime::{self, ApiBindings, PresenterSurface},
     settings::{SettingsError, VoiceSettings, Volume},
     timeline::conversation::{ConversationAudience, ConversationMessage, ConversationSpeaker},
 };
@@ -213,6 +213,8 @@ commands! {
         scope: DebugScope,
         #[serde(default)]
         character: Option<CharacterId>,
+        #[serde(default)]
+        surface: Option<PresenterSurface>,
     },
     PublishMessage {
         event_id: Uuid,
@@ -276,6 +278,7 @@ enum DebugScope {
     Timeline,
     Character,
     Requests,
+    Presenter,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -582,11 +585,19 @@ async fn client(
                         "limits":{"max_clients":config.max_clients, "outbound_capacity":config.outbound_capacity,
                             "max_command_bytes":config.max_command_bytes, "receipt_capacity":config.receipt_capacity}}), &stop).await?;
                 }
-                Command::DebugInspect { scope, character } => {
+                Command::DebugInspect { scope, character, surface } => {
+                    if (!matches!(scope, DebugScope::Presenter) && surface.is_some())
+                        || (matches!(scope, DebugScope::Presenter) && character.is_some())
+                    {
+                        send(&outbound, error_response(Some(envelope.command_id),
+                            ErrorCode::InvalidValue, "surface/character not applicable to this scope"), &stop).await?;
+                        continue;
+                    }
                     let snapshot = match scope {
                         DebugScope::Capabilities => Ok(json!({
                             "protocol": "local_control_jsonl_v1",
-                            "capabilities": ["lifecycle", "timeline", "character", "requests"],
+                            "capabilities": ["lifecycle", "timeline", "character", "requests", "presenter"],
+                            "presenter_surfaces": ["chat", "ai_runtime", "connections"],
                             "mutating_commands": ["publish_message", "reply", "react", "initiate", "cancel", "set_volume"],
                             "acceptance_issue": 442,
                             "evidence_level": "core_ipc_only",
@@ -648,6 +659,12 @@ async fn client(
                                 },
                             }
                         }
+                        DebugScope::Presenter => match surface {
+                            Some(surface) => api.presenter_probe.get()
+                                .map(|probe| probe.snapshot(surface))
+                                .ok_or("presenter projection unavailable"),
+                            None => Err("presenter surface required"),
+                        },
                         DebugScope::Requests => Ok(json!({
                             "ownership": "connection_local_receipts_only",
                             "tracked": receipts.iter().map(|receipt| match &receipt.result {

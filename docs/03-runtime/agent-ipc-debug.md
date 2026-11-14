@@ -48,3 +48,24 @@ Batch example (`jsonl`):
 | E2E-12…15 | Precise correlation/errors of supported LocalControl commands | Device/model inference readiness, asset validation, GUI snapshots, update rollback |
 
 For true #442 PASS, add **real Unity and GUI evidence and exact SHAs**. Do not close #442 or #95 based on an IPC smoke pass.
+
+
+## Presenter-owned projections (phase 2)
+
+The existing application lifecycle registers a single read-only \`PresenterProbe\`
+before publishing the Core runtime. It reuses the actual ChatPresenter, AI runtime
+presenter and ConnectionsPresenter watch-backed state. It does not create a second
+timeline, an alternate GUI lifecycle or an event bus.
+
+\`\`\`sh
+neuromita-agent --addr 127.0.0.1:PORT inspect presenter chat
+neuromita-agent --addr 127.0.0.1:PORT inspect presenter ai_runtime
+neuromita-agent --addr 127.0.0.1:PORT inspect presenter connections
+\`\`\`
+
+All surfaces are typed, use schema_version 1 and expose structure only: chat
+request IDs/revisions/phases, worker generations and presence flags, connection
+counts. No prompts, model names, personal message text, raw errors or audio.
+An unknown surface or misplaced parameter fails closed. Snapshots are read at
+the time of the Core request, not a claim that a GUI widget rendered anything.
+For issue #442 these are still \`core_ipc_only\` evidence, not Unity/GUI E2E.

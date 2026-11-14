@@ -412,13 +412,21 @@ pub async fn run(args: impl IntoIterator<Item = String>) -> Result<(), AgentErro
         "inspect" => {
             if !(1..=2).contains(&opts.positional.len()) {
                 return Err(AgentError::Usage(
-                    "inspect <capabilities|lifecycle|timeline|character|requests> [character]"
+                    "inspect <capabilities|lifecycle|timeline|character|requests|presenter> [character|surface]"
                         .into(),
                 ));
             }
             let mut command = json!({"command":"debug_inspect", "scope":opts.positional[0]});
-            if let Some(character) = opts.positional.get(1) {
-                command["character"] = json!(character);
+            match (opts.positional[0].as_str(), opts.positional.get(1)) {
+                ("presenter", Some(surface)) => command["surface"] = json!(surface),
+                ("presenter", None) => return Err(AgentError::Usage(
+                    "inspect presenter <chat|ai_runtime|connections>".into()
+                )),
+                ("character", Some(character)) => command["character"] = json!(character),
+                (_, Some(_)) => return Err(AgentError::Usage(
+                    "only character and presenter accept a second argument".into()
+                )),
+                _ => {}
             }
             vec![command]
         }
