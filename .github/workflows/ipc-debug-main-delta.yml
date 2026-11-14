@@ -1,0 +1,38 @@
+name: IPC debug bridge fetch main
+on:
+  push:
+    branches: [bridge/ipc-debug-main-delta-20261114]
+    paths: [.github/workflows/ipc-debug-main-delta.yml]
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - name: Export incremental source bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin '+refs/heads/main:refs/remotes/origin/main'
+          BASE=8ba7fb68eb4b4bd506a6a7d043490a345f50f266
+          HEAD_SHA=$(git rev-parse refs/remotes/origin/main)
+          git cat-file -e "$BASE^{commit}"
+          git merge-base --is-ancestor "$BASE" "$HEAD_SHA"
+          git bundle create /tmp/ipc-main-delta.bundle refs/remotes/origin/main "^$BASE"
+          cp /tmp/ipc-main-delta.bundle ./ipc-main-delta.bundle
+          printf 'BASE=%s\nHEAD=%s\n' "$BASE" "$HEAD_SHA" > ipc-main-delta.refs
+          sha256sum ipc-main-delta.bundle ipc-main-delta.refs > SHA256SUMS
+          cat ipc-main-delta.refs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ipc-main-delta-20261114
+          path: |
+            ipc-main-delta.bundle
+            ipc-main-delta.refs
+            SHA256SUMS
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 2
