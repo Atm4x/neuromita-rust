@@ -823,6 +823,15 @@ fn apply_with_catalog(
                 window.set_notice(format!("Guide change not saved; retry: {error}").into());
             }
         }
+        Update::GuideRejected { request_id, error } => {
+            if window.get_onboarding_guide_saving()
+                && window.get_onboarding_guide_request_id() as u64 == request_id
+            {
+                window.set_onboarding_guide_saving(false);
+                window.set_onboarding_guide_save_failed(false);
+                window.set_notice(format!("Guide change rejected: {error}").into());
+            }
+        }
         Update::PresetSaved(id) => super::settings::saved(window, Some(id)),
         Update::Stopped => {
             if window.get_onboarding_guide_saving() {

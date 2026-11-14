@@ -279,6 +279,36 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
             }
         }
     });
+    let retry_window = window.as_weak();
+    let retry_runtime = desktop.clone();
+    window.on_onboarding_guide_retry(move || {
+        let Some(window) = retry_window.upgrade() else {
+            return;
+        };
+        if !window.get_onboarding_guide_save_failed() || window.get_onboarding_guide_saving() {
+            return;
+        }
+        let runtime = retry_runtime.borrow();
+        let Some(runtime) = runtime.as_ref() else {
+            window.set_notice("Cannot retry Guide saving without Core".into());
+            return;
+        };
+        let request_id = window
+            .get_onboarding_guide_request_id()
+            .checked_add(1)
+            .unwrap_or(1);
+        match runtime
+            .commands
+            .try_send(super::runtime::Command::RetryGuideChange {
+                request_id: request_id as u64,
+            }) {
+            Ok(()) => {
+                window.set_onboarding_guide_request_id(request_id);
+                window.set_onboarding_guide_saving(true);
+            }
+            Err(error) => window.set_notice(format!("Cannot retry Guide saving: {error}").into()),
+        }
+    });
     let guide_window = window.as_weak();
     let guide_runtime = desktop.clone();
     window.on_onboarding_guide_navigate(move |index| {
@@ -588,6 +618,10 @@ fn queue_guide_change(
     change: super::runtime::GuideChange,
 ) {
     if window.get_onboarding_guide_saving() {
+        return;
+    }
+    if window.get_onboarding_guide_save_failed() {
+        window.set_notice("Retry the previous Guide save before changing anything else".into());
         return;
     }
     let Some(runtime) = runtime else {

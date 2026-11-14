@@ -93,6 +93,7 @@ export component AppWindow inherits Window {
     callback onboarding-guide-navigate(int);
     callback onboarding-guide-reopen();
     callback onboarding-guide-finish();
+    callback onboarding-guide-retry();
     callback onboarding-guide-select-level(int);
     in property <ComponentCard> backend;
     in property <ComponentCard> client;
@@ -374,8 +375,23 @@ export component AppWindow inherits Window {
                     color: Theme.text; font-size: 23px; font-weight: 700;
                 }
                 if root.onboarding-guide-saving: Text {
-                    text: root.onboarding-language == "ru" ? "Сохраняется позиция руководства…" : "Saving Guide position…";
+                    text: root.onboarding-language == "ru" ? "Сохранение руководства…" : "Saving Guide…";
                     color: Theme.muted; font-size: 12px;
+                }
+                if root.onboarding-guide-save-failed: HorizontalLayout {
+                    spacing: 8px; height: 34px;
+                    Text {
+                        text: root.onboarding-language == "ru" ? "Изменение не сохранено" : "Change not saved";
+                        color: Theme.text; vertical-alignment: center;
+                    }
+                    ActionSurface {
+                        width: 132px; height: 30px;
+                        label: "Retry Guide save";
+                        background: Theme.selected;
+                        Label { text: root.onboarding-language == "ru" ? "Повторить" : "Retry save"; horizontal-alignment: center; }
+                        activated => { root.onboarding-guide-retry(); }
+                    }
+                    Rectangle { horizontal-stretch: 1; background: transparent; }
                 }
                 HorizontalLayout {
                     spacing: 8px;

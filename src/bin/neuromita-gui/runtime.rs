@@ -75,6 +75,19 @@ impl GuideChange {
         }
     }
 
+    fn matches_current(&self) -> Result<bool, SettingsError> {
+        let snapshot = SettingsApi::snapshot_all()?;
+        Ok(match self {
+            Self::Page(page) => snapshot.values.onboarding.guide_page == *page,
+            Self::Level(level) => {
+                snapshot.values.onboarding.guide_level == *level
+                    && snapshot.values.onboarding.guide_page == 0
+            }
+            Self::Language(language) => snapshot.values.interface.language == *language,
+            Self::Complete => snapshot.values.onboarding.guide_completed,
+        })
+    }
+
     fn apply(&self) -> Result<(), SettingsError> {
         match self {
             Self::Page(page) => {
@@ -192,6 +205,9 @@ pub enum Command {
         request_id: u64,
         change: GuideChange,
     },
+    RetryGuideChange {
+        request_id: u64,
+    },
     SetToolOption(ToolOption, bool),
     SetToolDepth(u8),
     SetMemoryDedupEnabled(bool),
@@ -297,6 +313,10 @@ pub enum Update {
         change: GuideChange,
     },
     GuideFailed {
+        request_id: u64,
+        error: String,
+    },
+    GuideRejected {
         request_id: u64,
         error: String,
     },
@@ -683,6 +703,7 @@ async fn observe(
         neuromita::knowledge::maintenance::GraphMaintenancePreview,
     )> = None;
     let mut pending: Option<(ChatOrigin, ConversationChangePreview)> = None;
+    let mut failed_guide_change: Option<GuideChange> = None;
     let mut character = CharacterId::Crazy;
     let mut selection_revision = 0;
     let mut speech_owner: Option<ChatOrigin> = None;
@@ -786,14 +807,71 @@ async fn observe(
                     }
                 },
                 Some(Command::ChangeGuide { request_id, change }) => {
-                    let result = change.apply();
-                    let result = match result {
-                        Ok(()) => SettingsApi::flush().await.map_err(|error| error.to_string()),
-                        Err(error) => Err(error.to_string()),
+                    if failed_guide_change.is_some() {
+                        publish(Update::GuideFailed {
+                            request_id,
+                            error: "A previous Guide change is not persisted; retry it first".into(),
+                        });
+                        continue;
+                    }
+                    match change.apply() {
+                        Err(error) => publish(Update::GuideRejected {
+                            request_id,
+                            error: error.to_string(),
+                        }),
+                        Ok(()) => match SettingsApi::flush().await {
+                            Ok(()) => match change.matches_current() {
+                                Ok(true) => publish(Update::GuidePersisted { request_id, change }),
+                                Ok(false) => publish(Update::GuideRejected {
+                                    request_id,
+                                    error: "Guide was concurrently changed; reopen to reconcile".into(),
+                                }),
+                                Err(error) => publish(Update::GuideRejected {
+                                    request_id,
+                                    error: error.to_string(),
+                                }),
+                            },
+                            Err(error) => {
+                                failed_guide_change = Some(change);
+                                publish(Update::GuideFailed {
+                                    request_id,
+                                    error: error.to_string(),
+                                });
+                            }
+                        },
+                    }
+                },
+                Some(Command::RetryGuideChange { request_id }) => {
+                    let Some(change) = failed_guide_change.clone() else {
+                        publish(Update::GuideRejected {
+                            request_id,
+                            error: "No failed Guide change to retry".into(),
+                        });
+                        continue;
+                    };
+                    let result = match SettingsApi::retry_save() {
+                        Ok(()) => SettingsApi::flush().await,
+                        Err(error) => Err(error),
                     };
                     match result {
-                        Ok(()) => publish(Update::GuidePersisted { request_id, change }),
-                        Err(error) => publish(Update::GuideFailed { request_id, error }),
+                        Ok(()) => {
+                            failed_guide_change = None;
+                            match change.matches_current() {
+                                Ok(true) => publish(Update::GuidePersisted { request_id, change }),
+                                Ok(false) => publish(Update::GuideRejected {
+                                    request_id,
+                                    error: "Guide changed concurrently; restart to reconcile".into(),
+                                }),
+                                Err(error) => publish(Update::GuideRejected {
+                                    request_id,
+                                    error: error.to_string(),
+                                }),
+                            }
+                        }
+                        Err(error) => publish(Update::GuideFailed {
+                            request_id,
+                            error: error.to_string(),
+                        }),
                     }
                 },
                 Some(command @ (Command::DeletePreset(_) | Command::MovePreset(..) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::AssignAllPresets(..) | Command::SelectPromptSet(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_) | Command::SectionVisibility(..) | Command::HidePrivate(_) | Command::StructuredDisplay(_) | Command::SetToolOption(..) | Command::SetToolDepth(_) | Command::SetMemoryDedupEnabled(_) | Command::SetMemoryDedupThreshold(_) | Command::SaveTts(_) | Command::SaveAsr(..) | Command::SaveCharacterVoice(..) | Command::SelectAsrRecognizer(_))) => {
