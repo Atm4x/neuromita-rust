@@ -1,0 +1,35 @@
+name: Git Bridge MCP Acceptance Export
+on:
+  push:
+    branches:
+      - bridge/mcp-acceptance-export-20261114
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export exact main and candidate history
+        run: |
+          set -euo pipefail
+          git fetch origin refs/heads/main:refs/remotes/origin/main
+          git fetch origin refs/heads/bridge/ipc-cycle4-candidate-20261114:refs/remotes/origin/ipc-candidate
+          git branch main-export refs/remotes/origin/main
+          git branch ipc-candidate refs/remotes/origin/ipc-candidate
+          git bundle create neuromita-mcp-acceptance.bundle refs/heads/main-export refs/heads/ipc-candidate
+          git bundle verify neuromita-mcp-acceptance.bundle
+          sha256sum neuromita-mcp-acceptance.bundle > neuromita-mcp-acceptance.bundle.sha256
+          printf 'MAIN_HEAD=%s\nCANDIDATE_HEAD=%s\n' "$(git rev-parse main-export)" "$(git rev-parse ipc-candidate)" > manifest.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neuromita-mcp-acceptance-bundle
+          path: |
+            neuromita-mcp-acceptance.bundle
+            neuromita-mcp-acceptance.bundle.sha256
+            manifest.txt
+          if-no-files-found: error
+          retention-days: 3
