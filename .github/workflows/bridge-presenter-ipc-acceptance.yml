@@ -1,0 +1,53 @@
+name: Presenter IPC acceptance (#442)
+on:
+  push:
+    branches: [bridge/agent-presenter-ipc-cycle3-ci-20261114]
+    paths: [.github/workflows/bridge-presenter-ipc-acceptance.yml]
+permissions:
+  contents: read
+jobs:
+  rust-agent-ipc:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 23
+    env:
+      SOURCE_SHA: 34a1979bb1b14bc913fceefa932ab9b6f84307b7
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev pkg-config libfontconfig1-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-0
+      - name: Rust 1.100.0
+        run: |
+          rustup toolchain install 1.100.0 --profile minimal --component rustfmt
+          rustup default 1.100.0
+          rustc --version
+      - name: Build acceptance tree and verify agent IPC
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'Agent IPC QA'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin '+refs/heads/main:refs/remotes/origin/main'
+          git fetch origin '+refs/pull/445/head:refs/remotes/origin/agent-ipc'
+          BASE_SHA=$(git rev-parse refs/remotes/origin/main)
+          test "$(git rev-parse refs/remotes/origin/agent-ipc)" = "$SOURCE_SHA"
+          git checkout -B accept-ipc "$BASE_SHA"
+          git merge --no-ff --no-edit "$SOURCE_SHA"
+          git diff --check "$BASE_SHA"
+          cargo fmt --all -- --check
+          cargo check --locked --offline --all-targets
+          cargo test --locked --offline --lib agent_ipc::tests -- --test-threads=2
+          cargo test --locked --offline --test local_control debug_inspection_is_canonical_read_only_and_correlated -- --nocapture
+          cargo test --locked --offline --test local_control agent_ipc_client_runs_real_core_probes_without_browser_or_write_access -- --nocapture
+          cargo test --locked --offline --test local_control agent_ipc_client_waits_for_real_core_terminal_success -- --nocapture
+          cargo test --locked --offline --test local_control agent_ipc_binary_executes_jsonl_against_running_core -- --nocapture
+          cargo test --locked --offline --test local_control discovery_matches_executable_commands_and_all_control_replies_are_correlated -- --nocapture
+          cargo test --locked --offline --test local_control presenter_ipc_projects_live_gui_presenters_without_private_payloads -- --nocapture
+          cargo test --locked --offline --lib -- --test-threads=2
+          git fetch origin main
+          test "$(git rev-parse refs/remotes/origin/main)" = "$BASE_SHA" || { echo 'main advanced; recheck required'; exit 3; }
+          echo "PRESENTER IPC VERIFIED BASE=$BASE_SHA SOURCE=$SOURCE_SHA"
