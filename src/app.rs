@@ -1471,6 +1471,7 @@ impl ApplicationLifecycle {
                 Arc::clone(&settings_presenter),
                 CharactersPresenter::new(bindings.characters.clone()),
                 ai_hub_native.clone(),
+                ai_hub_install.clone(),
             )),
         )));
         let stop = CancellationToken::new();

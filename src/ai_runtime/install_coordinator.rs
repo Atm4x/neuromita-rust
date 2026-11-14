@@ -6,7 +6,12 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use tokio::{sync::Mutex as AsyncMutex, sync::mpsc, task::JoinHandle};
+use serde::Serialize;
+use tokio::{
+    sync::Mutex as AsyncMutex,
+    sync::{mpsc, watch},
+    task::JoinHandle,
+};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -20,6 +25,49 @@ use super::{
     installation_owner::{InstallComponentKind, InstallationOwner, InstallationTarget},
     speech_catalog::SpeechModelCatalog,
 };
+
+#[derive(Clone, Debug, Serialize)]
+pub struct InstallStatus {
+    pub revision: u64,
+    pub category: String,
+    pub id: String,
+    pub token: i32,
+    pub stage: &'static str,
+    pub can_install: bool,
+    pub operation_id: Option<Uuid>,
+    pub action: Option<&'static str>,
+    pub error_code: Option<&'static str>,
+}
+
+impl Default for InstallStatus {
+    fn default() -> Self {
+        Self {
+            revision: 0,
+            category: String::new(),
+            id: String::new(),
+            token: 0,
+            stage: "idle",
+            can_install: false,
+            operation_id: None,
+            action: None,
+            error_code: None,
+        }
+    }
+}
+
+fn install_error_code(error: &InstallPreviewError) -> &'static str {
+    match error {
+        InstallPreviewError::Cancelled => "cancelled",
+        InstallPreviewError::InvalidSelection => "invalid_selection",
+        InstallPreviewError::Sdk(_) => "sdk_unavailable",
+        InstallPreviewError::PythonVersion | InstallPreviewError::Python(_) => "python_unavailable",
+        InstallPreviewError::Plan(_) | InstallPreviewError::InvalidPlan(_) => "invalid_plan",
+        InstallPreviewError::ReviewChanged => "review_changed",
+        InstallPreviewError::UnsupportedInstall => "unsupported_install",
+        InstallPreviewError::WheelPin => "wheel_pin",
+        InstallPreviewError::WheelExecution => "wheel_execution",
+    }
+}
 
 pub enum InstallEvent {
     Preview {
@@ -52,6 +100,7 @@ pub struct AiHubInstallCoordinator {
     catalog: SpeechModelCatalog,
     state: AsyncMutex<InstallState>,
     events: mpsc::UnboundedSender<InstallEvent>,
+    status: watch::Sender<InstallStatus>,
     receiver: Mutex<Option<mpsc::UnboundedReceiver<InstallEvent>>>,
     stop: CancellationToken,
     installation: Arc<InstallationOwner>,
@@ -68,6 +117,7 @@ impl AiHubInstallCoordinator {
         installation: Arc<InstallationOwner>,
     ) -> Arc<Self> {
         let (events, receiver) = mpsc::unbounded_channel();
+        let (status, _) = watch::channel(InstallStatus::default());
         Arc::new(Self {
             catalog: SpeechModelCatalog::for_desktop(root.clone()),
             root,
@@ -79,10 +129,24 @@ impl AiHubInstallCoordinator {
                 active: None,
             }),
             events,
+            status,
             receiver: Mutex::new(Some(receiver)),
             stop: CancellationToken::new(),
             installation,
         })
+    }
+
+    pub fn status(&self) -> InstallStatus {
+        self.status.borrow().clone()
+    }
+
+    pub fn observe_status(&self) -> watch::Receiver<InstallStatus> {
+        self.status.subscribe()
+    }
+
+    fn publish_status(&self, mut status: InstallStatus) {
+        status.revision = self.status.borrow().revision.wrapping_add(1);
+        self.status.send_replace(status);
     }
 
     pub fn take_events(&self) -> Option<mpsc::UnboundedReceiver<InstallEvent>> {
@@ -90,9 +154,28 @@ impl AiHubInstallCoordinator {
     }
 
     pub async fn preview(self: &Arc<Self>, category: String, id: String, token: i32) {
+        if self.stop.is_cancelled() {
+            return;
+        }
         let mut state = self.state.lock().await;
+        if state
+            .active
+            .as_ref()
+            .is_some_and(|(_, task)| task.is_finished())
+        {
+            if let Some((_, task)) = state.active.take() {
+                let _ = task.await;
+            }
+        }
         state.gate.invalidate();
         state.visible_preview = Some((category.clone(), id.clone(), token));
+        self.publish_status(InstallStatus {
+            category: category.clone(),
+            id: id.clone(),
+            token,
+            stage: "previewing",
+            ..InstallStatus::default()
+        });
         let (request, generation) = state.fence.begin();
         if let Some(task) = state.preview.take() {
             task.abort();
@@ -114,6 +197,14 @@ impl AiHubInstallCoordinator {
             false
         };
         if !valid {
+            self.publish_status(InstallStatus {
+                category: category.clone(),
+                id: id.clone(),
+                token,
+                stage: "failed",
+                error_code: Some("invalid_selection"),
+                ..InstallStatus::default()
+            });
             let _ = self.events.send(InstallEvent::Preview {
                 category,
                 id,
@@ -149,6 +240,31 @@ impl AiHubInstallCoordinator {
                 }
                 _ => false,
             };
+            let action = result
+                .as_ref()
+                .ok()
+                .and_then(|review| review.action.as_ref());
+            let action = action.map(|action| match action {
+                InstallAction::Overlay => "overlay",
+                InstallAction::Wheel { .. } => "wheel",
+            });
+            let stage = match (&result, action, admitted) {
+                (Err(_), _, _) => "failed",
+                (Ok(_), Some("wheel"), true) => "wheel_review",
+                (Ok(_), _, true) => "review",
+                _ => "not_installable",
+            };
+            let error_code = result.as_ref().err().map(install_error_code);
+            owner.publish_status(InstallStatus {
+                category: category.clone(),
+                id: id.clone(),
+                token,
+                stage,
+                can_install: admitted,
+                action,
+                error_code,
+                ..InstallStatus::default()
+            });
             let _ = owner.events.send(InstallEvent::Preview {
                 category,
                 id,
@@ -164,6 +280,14 @@ impl AiHubInstallCoordinator {
         state.fence.catalog_replaced();
         state.gate.invalidate();
         state.visible_preview = None;
+        let status = self.status();
+        self.publish_status(InstallStatus {
+            stage: "invalidated",
+            category: status.category,
+            id: status.id,
+            token: status.token,
+            ..InstallStatus::default()
+        });
         if let Some(task) = state.preview.take() {
             task.abort();
             let _ = task.await;
@@ -189,6 +313,15 @@ impl AiHubInstallCoordinator {
         let mut state = self.state.lock().await;
         if self.stop.is_cancelled() {
             return Err("Приложение завершает работу");
+        }
+        if state
+            .active
+            .as_ref()
+            .is_some_and(|(_, task)| task.is_finished())
+        {
+            if let Some((_, task)) = state.active.take() {
+                let _ = task.await;
+            }
         }
         if state.active.is_some() {
             return Err("Установка уже выполняется");
@@ -228,9 +361,23 @@ impl AiHubInstallCoordinator {
             })
             .map_err(|_| "Установка уже выполняется либо журнал недоступен")?;
         let operation = permit.operation();
+        let action_name = match &action {
+            InstallAction::Overlay => "overlay",
+            InstallAction::Wheel { .. } => "wheel",
+        };
+        self.publish_status(InstallStatus {
+            category: category.clone(),
+            id: id.clone(),
+            token,
+            stage: "installing",
+            operation_id: Some(operation),
+            action: Some(action_name),
+            ..InstallStatus::default()
+        });
         let action_for_worker = action.clone();
         let root = self.root.clone();
         let events = self.events.clone();
+        let owner = Arc::downgrade(self);
         let stop = self.stop.clone();
         let task = tokio::spawn(async move {
             let result = tokio::select! {
@@ -257,6 +404,22 @@ impl AiHubInstallCoordinator {
                 },
             };
             if !stop.is_cancelled() {
+                if let Some(owner) = owner.upgrade() {
+                    owner.publish_status(InstallStatus {
+                        category: category.clone(),
+                        id: id.clone(),
+                        token,
+                        stage: match &result {
+                            Ok(_) => "installed",
+                            Err(InstallPreviewError::Cancelled) => "cancelled",
+                            Err(_) => "failed",
+                        },
+                        operation_id: Some(operation),
+                        action: Some(action_name),
+                        error_code: result.as_ref().err().map(install_error_code),
+                        ..InstallStatus::default()
+                    });
+                }
                 let _ = events.send(InstallEvent::Finished {
                     operation,
                     category,
@@ -284,6 +447,14 @@ impl AiHubInstallCoordinator {
 
     pub async fn shutdown(&self) {
         self.stop.cancel();
+        let status = self.status();
+        self.publish_status(InstallStatus {
+            category: status.category,
+            id: status.id,
+            token: status.token,
+            stage: "closed",
+            ..InstallStatus::default()
+        });
         let mut state = self.state.lock().await;
         state.fence.catalog_replaced();
         state.gate.invalidate();
@@ -332,6 +503,38 @@ mod tests {
                 .is_err()
         );
         owner.shutdown().await;
+        assert!(!root.exists());
+    }
+
+    #[tokio::test]
+    async fn status_observer_reports_invalid_preview_and_revoked_gate() {
+        let root = std::env::temp_dir().join(format!("nm-hub-status-{}", Uuid::new_v4()));
+        let owner = AiHubInstallCoordinator::new(root.clone());
+        let mut observer = owner.observe_status();
+        assert_eq!(observer.borrow().stage, "idle");
+        owner.preview("tts".into(), "missing".into(), 42).await;
+        observer.changed().await.unwrap();
+        let result = observer.borrow_and_update().clone();
+        assert_eq!(result.stage, "failed");
+        assert_eq!(result.error_code, Some("invalid_selection"));
+        assert_eq!(result.token, 42);
+        assert!(!result.can_install);
+        assert!(
+            owner
+                .confirm("tts".into(), "missing".into(), 42)
+                .await
+                .is_err()
+        );
+        owner.invalidate().await;
+        observer.changed().await.unwrap();
+        let revoked = observer.borrow_and_update().clone();
+        assert!(revoked.revision > result.revision);
+        assert_eq!(revoked.stage, "invalidated");
+        assert!(!revoked.can_install);
+        owner.shutdown().await;
+        assert_eq!(owner.status().stage, "closed");
+        owner.preview("tts".into(), "missing".into(), 43).await;
+        assert_eq!(owner.status().stage, "closed");
         assert!(!root.exists());
     }
 

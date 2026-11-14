@@ -89,6 +89,7 @@ pub(crate) enum WaitTarget {
     Chat,
     Memory,
     NativeDownload,
+    AiHubInstall,
 }
 
 fn default_limit() -> usize {
@@ -371,6 +372,40 @@ impl PresenterProbe {
                 }
                 let deadline = std::time::Duration::from_millis(timeout_ms);
                 match target {
+                    WaitTarget::AiHubInstall => {
+                        if character.is_some()
+                            || after_version.is_some()
+                            || after_revision.is_none()
+                        {
+                            return Err("ai_hub_install wait needs after_revision without character/version".into());
+                        }
+                        let owner = self
+                            .ai_hub_install
+                            .as_ref()
+                            .ok_or("AI Hub installation is not configured")?;
+                        let mut updates = owner.observe_status();
+                        let threshold = after_revision.expect("validated");
+                        let wait = async {
+                            loop {
+                                let status = updates.borrow_and_update().clone();
+                                if status.revision != threshold || status.stage == "closed" {
+                                    return Ok::<_, String>(
+                                        json!({"changed":status.revision!=threshold,
+                                        "target":"ai_hub_install","status":status}),
+                                    );
+                                }
+                                updates.changed().await.map_err(|_| {
+                                    "AI Hub installation observer stopped".to_string()
+                                })?;
+                            }
+                        };
+                        match tokio::time::timeout(deadline, wait).await {
+                            Ok(result) => result,
+                            Err(_) => Ok(
+                                json!({"changed":false,"timed_out":true,"target":"ai_hub_install"}),
+                            ),
+                        }
+                    }
                     WaitTarget::NativeDownload => {
                         if character.is_some()
                             || after_version.is_some()

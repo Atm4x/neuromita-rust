@@ -47,7 +47,7 @@ impl ServerHandler for NeuroMita {
                 "Read a live sanitized Presenter snapshot. Chat requires character.",
                 &["surface"],
                 json!({
-                    "surface": {"type":"string", "enum":["chat","ai_runtime","connections","speech","releases","audio_input","voice","guide","presets"]},
+                    "surface": {"type":"string", "enum":["chat","ai_runtime","connections","speech","releases","audio_input","voice","guide","presets","ai_hub_install"]},
                     "character": {"type":"string", "description":"Canonical character ID for surface=chat"}
                 }),
             ),
@@ -181,6 +181,19 @@ impl ServerHandler for NeuroMita {
                     ("properties".into(),json!({"surface":{"type":"string","enum":["releases","ai_runtime"]}})),
                 ])
             ).with_annotations(ToolAnnotations::new().read_only(false)),
+            Tool::new("presenter_ai_hub_install",
+                "Preview a verified Python AI Hub installation, then confirm the EXACT admitted token after the owner reports can_install=true. Uses GUI's installation coordinator; requires --allow-write.",
+                serde_json::Map::from_iter([
+                    ("type".into(),json!("object")),("additionalProperties".into(),json!(false)),
+                    ("required".into(),json!(["action","category","id","token"])),
+                    ("properties".into(),json!({
+                        "action":{"type":"string","enum":["preview","confirm"]},
+                        "category":{"type":"string","enum":["tts","asr"]},
+                        "id":{"type":"string","minLength":1,"maxLength":256},
+                        "token":{"type":"integer","minimum":0,"maximum":2147483647}
+                    })),
+                ])
+            ).with_annotations(ToolAnnotations::new().read_only(false)),
             inspection_tool("presenter_native_inventory",
                 "Read exact native model revisions, selections and worker state from the same AI Hub service used by GUI.",
                 &[],json!({"refresh":{"type":"boolean"}})),
@@ -196,7 +209,7 @@ impl ServerHandler for NeuroMita {
                 })),
             inspection_tool("presenter_wait",
                 "Wait for an actual Settings/Chat/CharacterMemory observer change (no polling). Timeout max 30s.",
-                &["target"],json!({"target":{"type":"string","enum":["settings","chat","memory","native_download"]},
+                &["target"],json!({"target":{"type":"string","enum":["settings","chat","memory","native_download","ai_hub_install"]},
                     "character":{"type":"string"},"after_revision":{"type":"integer","minimum":0},
                     "after_version":{"type":"string","minLength":64,"maxLength":64},
                     "timeout_ms":{"type":"integer","minimum":1,"maximum":30000}})),
@@ -308,6 +321,7 @@ impl ServerHandler for NeuroMita {
                 | "presenter_conversation_edit"
                 | "presenter_retry_failed"
                 | "presenter_native"
+                | "presenter_ai_hub_install"
         ) && !self.allow_write
         {
             return Err(ErrorData::invalid_params(
@@ -542,6 +556,7 @@ fn command_for_tool(name: &str, mut args: Map<String, Value>) -> Result<Value, E
                     | "voice"
                     | "guide"
                     | "presets"
+                    | "ai_hub_install"
             ) {
                 return Err(ErrorData::invalid_params("unknown presenter surface", None));
             }
@@ -762,6 +777,34 @@ fn command_for_tool(name: &str, mut args: Map<String, Value>) -> Result<Value, E
                 .filter(|n| *n <= 100)
                 .ok_or_else(|| ErrorData::invalid_params("volume must be 0..100", None))?;
             json!({"command":"presenter_action","action":{"action":"voice_set_volume","volume":volume}})
+        }
+        "presenter_ai_hub_install" => {
+            let action = string(&mut args, "action")?;
+            if !matches!(action.as_str(), "preview" | "confirm") {
+                return Err(ErrorData::invalid_params(
+                    "unknown AI Hub install action",
+                    None,
+                ));
+            }
+            let category = string(&mut args, "category")?;
+            if !matches!(category.as_str(), "tts" | "asr") {
+                return Err(ErrorData::invalid_params(
+                    "AI Hub category must be tts or asr",
+                    None,
+                ));
+            }
+            let id = string(&mut args, "id")?;
+            if id.is_empty() || id.len() > 256 || !id.is_ascii() {
+                return Err(ErrorData::invalid_params("invalid AI Hub model ID", None));
+            }
+            let token = args
+                .remove("token")
+                .and_then(|v| v.as_i64())
+                .filter(|n| (0..=i32::MAX as i64).contains(n))
+                .ok_or_else(|| ErrorData::invalid_params("token must be nonnegative i32", None))?;
+            json!({"command":"presenter_action","action":{
+                "action":format!("ai_hub_{action}_install"),"category":category,"id":id,"token":token
+            }})
         }
         "presenter_native_inventory" => {
             let refresh = args.remove("refresh").map_or(Ok(false), |v| {
@@ -1090,6 +1133,34 @@ mod tests {
         assert_eq!(update["action"]["expected_revision"], 7);
         assert!(update["action"].get("api_key").is_none());
         assert!(command_for_tool("inspect_presenter", args(json!({"surface":"presets"}))).is_ok());
+        let preview = command_for_tool(
+            "presenter_ai_hub_install",
+            args(json!({"action":"preview","category":"tts","id":"demo","token":19})),
+        )
+        .unwrap();
+        assert_eq!(preview["action"]["action"], "ai_hub_preview_install");
+        assert_eq!(preview["action"]["token"], 19);
+        let confirm = command_for_tool(
+            "presenter_ai_hub_install",
+            args(json!({"action":"confirm","category":"asr","id":"demo","token":19})),
+        )
+        .unwrap();
+        assert_eq!(confirm["action"]["action"], "ai_hub_confirm_install");
+        assert!(
+            command_for_tool(
+                "inspect_presenter",
+                args(json!({"surface":"ai_hub_install"}))
+            )
+            .is_ok()
+        );
+        for payload in [
+            json!({"action":"confirm","category":"asr","id":"demo","token":-1}),
+            json!({"action":"preview","category":"other","id":"demo","token":5}),
+            json!({"action":"preview","category":"tts","id":"","token":5}),
+            json!({"action":"confirm","category":"tts","id":"demo","token":5,"shell":"rm -rf /"}),
+        ] {
+            assert!(command_for_tool("presenter_ai_hub_install", args(payload)).is_err());
+        }
         let inventory =
             command_for_tool("presenter_native_inventory", args(json!({"refresh":true}))).unwrap();
         assert_eq!(inventory["command"], "presenter_admin_read");

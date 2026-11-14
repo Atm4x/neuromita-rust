@@ -106,6 +106,19 @@ impl Fixture {
         configure: impl FnOnce(&mut ServerConfig),
         enabled: bool,
     ) -> Self {
+        Self::with_voice_and_hub(queue, configure, enabled, None).await
+    }
+
+    async fn with_ai_hub(root: std::path::PathBuf) -> Self {
+        Self::with_voice_and_hub(8, |_| {}, false, Some(root)).await
+    }
+
+    async fn with_voice_and_hub(
+        queue: usize,
+        configure: impl FnOnce(&mut ServerConfig),
+        enabled: bool,
+        hub_root: Option<std::path::PathBuf>,
+    ) -> Self {
         let serial = APPLICATION.lock().await;
         let preset = GenerationPreset::new(ProviderTemplate::Gemini(
             GeminiTemplate::google(
@@ -130,6 +143,9 @@ impl Fixture {
             "127.0.0.1:0".parse().unwrap(),
         );
         configure(&mut config.server);
+        if let Some(root) = hub_root {
+            config.ai_hub_install_root = Some(root);
+        }
         if enabled {
             config.voice = Arc::new(FixtureVoice);
         }
@@ -2331,6 +2347,61 @@ async fn presenter_admin_preset_revision_and_native_service_boundary() {
 }
 
 #[tokio::test]
+async fn mcp_ai_hub_preview_confirm_observes_real_owner_and_rejects_stale_plan() {
+    let root = std::env::temp_dir().join(format!("nm-ipc-ai-hub-{}", Uuid::new_v4()));
+    let fixture = Fixture::with_ai_hub(root.clone()).await;
+    let mut client = fixture.connect().await;
+
+    let mut inspect = command("presenter_inspect");
+    inspect["surface"] = json!("ai_hub_install");
+    client.send(inspect.clone()).await;
+    let initial = client
+        .until(|r| r["command_id"] == inspect["command_id"])
+        .await;
+    assert_eq!(initial["type"], "presenter_inspect", "{initial}");
+    assert_eq!(initial["snapshot"]["status"]["stage"], "idle");
+    let revision = initial["snapshot"]["status"]["revision"].as_u64().unwrap();
+
+    let mut preview = command("presenter_action");
+    preview["action"] = json!({"action":"ai_hub_preview_install", "category":"tts",
+        "id":"unknown-model", "token":910});
+    client.send(preview.clone()).await;
+    let response = client
+        .until(|r| r["command_id"] == preview["command_id"])
+        .await;
+    assert_eq!(response["type"], "presenter_action", "{response}");
+    assert_eq!(response["result"]["result"]["status"]["stage"], "failed");
+    assert_eq!(
+        response["result"]["result"]["status"]["error_code"],
+        "invalid_selection"
+    );
+
+    let mut wait = command("presenter_admin_read");
+    wait["query"] = json!({"query":"wait", "target":"ai_hub_install",
+        "after_revision":revision,"timeout_ms":1000});
+    client.send(wait.clone()).await;
+    let observed = client
+        .until(|r| r["command_id"] == wait["command_id"])
+        .await;
+    assert_eq!(observed["type"], "presenter_admin_read", "{observed}");
+    assert_eq!(observed["snapshot"]["changed"], true, "{observed}");
+    assert_eq!(observed["snapshot"]["status"]["can_install"], false);
+
+    let mut confirm = command("presenter_action");
+    confirm["action"] = json!({"action":"ai_hub_confirm_install", "category":"tts",
+        "id":"unknown-model", "token":910});
+    client.send(confirm.clone()).await;
+    let denied = client
+        .until(|r| r["command_id"] == confirm["command_id"])
+        .await;
+    assert_eq!(denied["type"], "error", "{denied}");
+    assert_eq!(denied["code"], "invalid_value");
+
+    fixture.shutdown().await;
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn agent_scenario_retains_cancel_and_replay_ownership_in_one_connection() {
     use neuromita::agent_ipc::{AgentError, run_local_control_scenario};
     let fixture = Fixture::start(|_| {}).await;
@@ -2523,7 +2594,7 @@ async fn mcp_stdio_probes_the_same_running_core() {
             let result = &response["result"];
             match id {
                 1 => assert_eq!(result["serverInfo"]["name"], "neuromita"),
-                2 => assert_eq!(result["tools"].as_array().unwrap().len(), 30),
+                2 => assert_eq!(result["tools"].as_array().unwrap().len(), 33),
                 3 => {
                     let frame = &result["structuredContent"];
                     assert_eq!(frame["type"], "presenter_inspect");

@@ -93,6 +93,16 @@ pub(crate) enum PresenterAction {
         backend: crate::ai_runtime::native_model::NativeBackend,
     },
     NativeCancelInstall {},
+    AiHubPreviewInstall {
+        category: String,
+        id: String,
+        token: i32,
+    },
+    AiHubConfirmInstall {
+        category: String,
+        id: String,
+        token: i32,
+    },
     PresetUpdateConnection {
         preset_id: u32,
         expected_revision: u64,
@@ -138,6 +148,7 @@ pub(crate) enum PresenterSurface {
     Voice,
     Guide,
     Presets,
+    AiHubInstall,
 }
 
 #[derive(Clone)]
@@ -156,6 +167,8 @@ pub(crate) struct PresenterProbe {
     pub(super) characters: super::CharactersPresenter,
     pub(super) native:
         Option<std::sync::Arc<crate::ai_runtime::native_service::AiHubNativeService>>,
+    pub(super) ai_hub_install:
+        Option<std::sync::Arc<crate::ai_runtime::install_coordinator::AiHubInstallCoordinator>>,
 }
 
 impl PresenterProbe {
@@ -173,6 +186,9 @@ impl PresenterProbe {
         settings: std::sync::Arc<super::SettingsPresenter>,
         characters: super::CharactersPresenter,
         native: Option<std::sync::Arc<crate::ai_runtime::native_service::AiHubNativeService>>,
+        ai_hub_install: Option<
+            std::sync::Arc<crate::ai_runtime::install_coordinator::AiHubInstallCoordinator>,
+        >,
     ) -> Self {
         Self {
             chat,
@@ -188,6 +204,7 @@ impl PresenterProbe {
             settings,
             characters,
             native,
+            ai_hub_install,
         }
     }
 
@@ -458,6 +475,51 @@ impl PresenterProbe {
                 let requested = native.cancel_download().await;
                 json!({"action":"native_cancel_install","cancel_requested":requested})
             }
+            AiHubPreviewInstall {
+                category,
+                id,
+                token,
+            } => {
+                if !matches!(category.as_str(), "tts" | "asr")
+                    || id.is_empty()
+                    || id.len() > 256
+                    || !id.is_ascii()
+                {
+                    return Err("invalid AI Hub installation category or ID".into());
+                }
+                let owner = self
+                    .ai_hub_install
+                    .as_ref()
+                    .ok_or("AI Hub install coordinator is unavailable")?;
+                owner.preview(category, id, token).await;
+                json!({"action":"ai_hub_preview_install", "status":owner.status()})
+            }
+            AiHubConfirmInstall {
+                category,
+                id,
+                token,
+            } => {
+                if !matches!(category.as_str(), "tts" | "asr")
+                    || id.is_empty()
+                    || id.len() > 256
+                    || !id.is_ascii()
+                {
+                    return Err("invalid AI Hub installation category or ID".into());
+                }
+                let owner = self
+                    .ai_hub_install
+                    .as_ref()
+                    .ok_or("AI Hub install coordinator is unavailable")?;
+                let (operation, action) = owner
+                    .confirm(category, id, token)
+                    .await
+                    .map_err(str::to_owned)?;
+                json!({"action":"ai_hub_confirm_install", "operation_id":operation,
+                    "install_action":match action {
+                        crate::ai_runtime::install_admission::InstallAction::Overlay=>"overlay",
+                        crate::ai_runtime::install_admission::InstallAction::Wheel { .. }=>"wheel",
+                    },"status":owner.status()})
+            }
             PresetUpdateConnection {
                 preset_id,
                 expected_revision,
@@ -725,6 +787,18 @@ impl PresenterProbe {
                     "device":status.device,"has_error":status.error.is_some(),
                     "privacy":"no audio samples or error text"}),
                 )
+            }
+            PresenterSurface::AiHubInstall => {
+                if character.is_some() {
+                    return Err("ai_hub_install does not accept character");
+                }
+                let owner = self
+                    .ai_hub_install
+                    .as_ref()
+                    .ok_or("AI Hub installation is not configured")?;
+                Ok(json!({"schema_version":1,"surface":"ai_hub_install",
+                    "source":"ai_hub_install_coordinator", "status":owner.status(),
+                    "privacy":"no installer plan, environment paths or credentials"}))
             }
             PresenterSurface::Presets => {
                 if character.is_some() {

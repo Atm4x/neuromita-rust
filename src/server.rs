@@ -751,7 +751,7 @@ async fn client(
                         DebugScope::Capabilities => Ok(json!({
                             "protocol": "local_control_jsonl_v1",
                             "capabilities": ["lifecycle", "timeline", "character", "requests", "presets", "onboarding"],
-                            "presenter_surfaces": ["chat", "ai_runtime", "connections", "speech", "releases", "audio_input", "voice", "guide"],
+                            "presenter_surfaces": ["chat", "ai_runtime", "connections", "speech", "releases", "audio_input", "voice", "guide", "presets", "ai_hub_install"],
                             "presenter_action": true,
                             "presenter_conversation": true,
                             "character_event_lookup": true,
