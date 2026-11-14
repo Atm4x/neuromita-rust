@@ -384,6 +384,7 @@ async fn discovery_matches_executable_commands_and_all_control_replies_are_corre
         "diagnostics_errors",
         "settings",
         "set_volume",
+        "set_active_preset",
     ];
     assert_eq!(catalog["methods"], json!(expected));
     for name in expected {
@@ -440,6 +441,7 @@ async fn discovery_matches_executable_commands_and_all_control_replies_are_corre
                 cmd["character"] = json!("Crazy");
             }
             "set_volume" => cmd["value"] = json!(42),
+            "set_active_preset" => cmd["preset_id"] = json!(0),
             _ => {}
         }
         client.send(cmd.clone()).await;
@@ -449,6 +451,7 @@ async fn discovery_matches_executable_commands_and_all_control_replies_are_corre
             "reply" | "react" | "initiate" => "accepted",
             "publish_message" => "published",
             "set_volume" => "settings_applied",
+            "set_active_preset" => "preset_selected",
             other => other,
         };
         assert_eq!(response["type"], response_type, "{name}: {response}");
@@ -2150,6 +2153,114 @@ async fn agent_ipc_client_waits_for_real_core_terminal_success() {
 }
 
 #[tokio::test]
+async fn local_control_presets_inspect_and_select_use_real_catalog_and_revision() {
+    let fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+    let mut inspect = command("debug_inspect");
+    inspect["scope"] = json!("presets");
+    client.send(inspect.clone()).await;
+    let first = client
+        .until(|r| r["command_id"] == inspect["command_id"])
+        .await;
+    assert_eq!(first["type"], "debug_inspect");
+    assert_eq!(first["snapshot"]["active_preset_id"], 0);
+    assert_eq!(first["snapshot"]["runtime_bootstrap_preset_id"], 0);
+    assert!(first["snapshot"].get("credentials").is_none());
+    let revision = first["snapshot"]["settings_revision"].as_u64().unwrap();
+
+    let mut invalid = command("set_active_preset");
+    invalid["preset_id"] = json!(99999);
+    client.send(invalid.clone()).await;
+    let rejected = client
+        .until(|r| r["command_id"] == invalid["command_id"])
+        .await;
+    assert_eq!(rejected["code"], "invalid_value");
+
+    let mut conflict = command("set_active_preset");
+    conflict["preset_id"] = json!(0);
+    conflict["expected_revision"] = json!(revision + 100);
+    client.send(conflict.clone()).await;
+    let rejected = client
+        .until(|r| r["command_id"] == conflict["command_id"])
+        .await;
+    assert_eq!(rejected["code"], "settings_conflict");
+
+    let mut select = command("set_active_preset");
+    select["preset_id"] = json!(0);
+    select["expected_revision"] = json!(revision);
+    client.send(select.clone()).await;
+    let selected = client
+        .until(|r| r["command_id"] == select["command_id"])
+        .await;
+    assert_eq!(selected["type"], "preset_selected");
+    assert_eq!(selected["active_preset_id"], 0);
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn agent_scenario_retains_cancel_and_replay_ownership_in_one_connection() {
+    use neuromita::agent_ipc::{AgentError, run_local_control_scenario};
+    let fixture = Fixture::start(|_| {}).await;
+    let address = fixture.app.server().address();
+    let command_id = Uuid::new_v4();
+    let steps = vec![
+        json!({"command":"initiate", "character":"Crazy", "command_id":command_id}),
+        json!({"command":"cancel", "request_id":"$last_request_id"}),
+        json!({"command":"initiate", "character":"Crazy", "command_id":command_id}),
+    ];
+    let denied =
+        run_local_control_scenario(address, Duration::from_secs(5), false, steps.clone()).await;
+    assert!(matches!(denied, Err(AgentError::WriteDenied(_))));
+    let result = bounded(run_local_control_scenario(
+        address,
+        Duration::from_secs(4),
+        true,
+        steps,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(result["ok"], true, "{result}");
+    let records = result["steps"].as_array().unwrap();
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[1]["response"]["type"], "cancel");
+    assert_eq!(records[2]["response"]["replayed"], true);
+    assert_eq!(
+        records[0]["response"]["request_id"],
+        records[2]["response"]["request_id"]
+    );
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn agent_scenario_waits_for_terminal_and_follows_event_id() {
+    use neuromita::agent_ipc::run_local_control_scenario;
+    let mut fixture = Fixture::start(|_| {}).await;
+    let address = fixture.app.server().address();
+    let task = tokio::spawn(run_local_control_scenario(
+        address,
+        Duration::from_secs(4),
+        true,
+        vec![
+            json!({"command":"debug_inspect","scope":"presets"}),
+            json!({"command":"set_active_preset","preset_id":0}),
+            json!({"command":"initiate","character":"Crazy","wait_terminal":true,
+            "expect_terminal":{"state":"finished","outcome":"success"}}),
+            json!({"command":"debug_inspect","scope":"character","character":"Crazy",
+            "event_id":"$last_event_id"}),
+        ],
+    ));
+    fixture.call().await.finish("accepted conversation event");
+    let result = bounded(task).await.unwrap().unwrap();
+    assert_eq!(result["ok"], true, "{result}");
+    let records = result["steps"].as_array().unwrap();
+    assert_eq!(records.len(), 4);
+    assert_eq!(records[2]["terminal"]["outcome"], "success");
+    assert_eq!(records[3]["response"]["snapshot"]["event_visible"], true);
+    assert_eq!(records[2]["terminal"]["text"], "[redacted]");
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
 async fn optional_http_gateway_rejects_untrusted_clients_and_probes_real_core() {
     let mut fixture = Fixture::start(|_| {}).await;
     let core = fixture.app.server().address();
@@ -2238,6 +2349,23 @@ async fn mcp_stdio_probes_the_same_running_core() {
             json!({"name":"inspect_core",
             "arguments":{"scope":"timeline"}}),
         ),
+        (
+            Some(5),
+            "tools/call",
+            json!({"name":"inspect_presets", "arguments":{}}),
+        ),
+        (
+            Some(6),
+            "tools/call",
+            json!({"name":"run_scenario", "arguments":{"steps":[
+                {"command":"ping"},{"command":"debug_inspect","scope":"presets"}
+            ]}}),
+        ),
+        (
+            Some(7),
+            "tools/call",
+            json!({"name":"inspect_onboarding", "arguments":{}}),
+        ),
     ] {
         let mut message = json!({"jsonrpc":"2.0","method":method,"params":params});
         if let Some(id) = id {
@@ -2253,13 +2381,21 @@ async fn mcp_stdio_probes_the_same_running_core() {
             let result = &response["result"];
             match id {
                 1 => assert_eq!(result["serverInfo"]["name"], "neuromita"),
-                2 => assert_eq!(result["tools"].as_array().unwrap().len(), 2),
+                2 => assert_eq!(result["tools"].as_array().unwrap().len(), 8),
                 3 => {
                     let frame = &result["structuredContent"];
                     assert_eq!(frame["type"], "presenter_inspect");
                     assert_eq!(frame["snapshot"]["character"], "Crazy");
                 }
                 4 => assert_eq!(result["structuredContent"]["type"], "debug_inspect"),
+                5 => assert_eq!(
+                    result["structuredContent"]["snapshot"]["active_preset_id"],
+                    0
+                ),
+                6 => assert_eq!(result["structuredContent"]["ok"], true),
+                7 => {
+                    assert!(result["structuredContent"]["snapshot"]["guide_completed"].is_boolean())
+                }
                 _ => unreachable!(),
             }
         }

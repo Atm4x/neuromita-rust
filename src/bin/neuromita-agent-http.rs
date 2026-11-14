@@ -196,6 +196,8 @@ fn get_command(path: &str) -> Option<Value> {
         "/v1/timeline" => Some(json!({"command":"debug_inspect","scope":"timeline"})),
         "/v1/characters" => Some(json!({"command":"debug_inspect","scope":"character"})),
         "/v1/requests" => Some(json!({"command":"debug_inspect","scope":"requests"})),
+        "/v1/presets" => Some(json!({"command":"debug_inspect","scope":"presets"})),
+        "/v1/onboarding" => Some(json!({"command":"debug_inspect","scope":"onboarding"})),
         "/v1/presenter/ai_runtime" => {
             Some(json!({"command":"presenter_inspect","surface":"ai_runtime"}))
         }

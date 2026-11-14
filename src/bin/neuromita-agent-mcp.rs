@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, time::Duration};
 
-use neuromita::agent_ipc::call_local_control;
+use neuromita::agent_ipc::{call_local_control, run_local_control_scenario};
 use rmcp::{
     ErrorData, RoleServer, ServerHandler, ServiceExt,
     model::{
@@ -15,6 +15,8 @@ use uuid::Uuid;
 
 struct NeuroMita {
     core: SocketAddr,
+    allow_write: bool,
+    timeout: Duration,
 }
 
 impl ServerHandler for NeuroMita {
@@ -57,11 +59,50 @@ impl ServerHandler for NeuroMita {
                 }),
             ),
             inspection_tool(
+                "inspect_onboarding",
+                "Inspect persisted revision and Guide state from actual Core settings, not GUI.",
+                &[],
+                json!({}),
+            ),
+            inspection_tool(
+                "inspect_presets",
+                "Read active API preset and saved preset names/IDs without credentials.",
+                &[],
+                json!({}),
+            ),
+            inspection_tool(
                 "inspect_request",
                 "Read a single request's revision, state, and terminal outcome from the real Presenter.",
                 &["request_id"],
                 json!({"request_id": {"type":"string", "format":"uuid"}}),
             ),
+            Tool::new(
+                "select_active_preset",
+                "Change the active API preset; requires MCP --allow-write. Read inspect_presets first.",
+                serde_json::Map::from_iter([
+                    ("type".into(), json!("object")),
+                    ("additionalProperties".into(), json!(false)),
+                    ("required".into(), json!(["preset_id"])),
+                    ("properties".into(), json!({
+                        "preset_id":{"type":"integer","minimum":0,"maximum":4294967295_u64},
+                        "expected_revision":{"type":"integer","minimum":0}
+                    })),
+                ]),
+            ).with_annotations(ToolAnnotations::new().read_only(false)),
+            Tool::new(
+                "run_scenario",
+                "Run 1..32 Core JSONL steps on ONE owner TCP connection. Supports wait_terminal, expect/expect_terminal, $last_request_id and $last_event_id; writes require MCP --allow-write. Sanitized results only.",
+                serde_json::Map::from_iter([
+                    ("type".into(), json!("object")),
+                    ("additionalProperties".into(), json!(false)),
+                    ("required".into(), json!(["steps"])),
+                    ("properties".into(), json!({
+                        "steps":{"type":"array","minItems":1,"maxItems":32,
+                            "items":{"type":"object","required":["command"],
+                                "properties":{"command":{"type":"string"}},"additionalProperties":true}}
+                    })),
+                ]),
+            ).with_annotations(ToolAnnotations::new().read_only(false)),
         ]))
     }
 
@@ -70,9 +111,36 @@ impl ServerHandler for NeuroMita {
         request: CallToolRequestParams,
         _: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
-        let command =
-            command_for_tool(request.name.as_ref(), request.arguments.unwrap_or_default())?;
-        let response = match call_local_control(self.core, Duration::from_secs(10), command).await {
+        let args = request.arguments.unwrap_or_default();
+        if request.name == "run_scenario" {
+            if args.len() != 1 || !args.contains_key("steps") {
+                return Err(ErrorData::invalid_params("expected only steps", None));
+            }
+            let steps = args
+                .get("steps")
+                .and_then(Value::as_array)
+                .ok_or_else(|| ErrorData::invalid_params("steps must be an array", None))?
+                .clone();
+            let response =
+                match run_local_control_scenario(self.core, self.timeout, self.allow_write, steps)
+                    .await
+                {
+                    Ok(value) if value["ok"] == true => CallToolResult::structured(value),
+                    Ok(value) => CallToolResult::structured_error(value),
+                    Err(error) => {
+                        CallToolResult::structured_error(json!({"error":error.to_string()}))
+                    }
+                };
+            return Ok(response.into());
+        }
+        if request.name == "select_active_preset" && !self.allow_write {
+            return Err(ErrorData::invalid_params(
+                "MCP was started without --allow-write",
+                None,
+            ));
+        }
+        let command = command_for_tool(request.name.as_ref(), args)?;
+        let response = match call_local_control(self.core, self.timeout, command).await {
             Ok(response) if response["type"] != "error" => CallToolResult::structured(response),
             Ok(response) => CallToolResult::structured_error(json!({"code": response["code"]})),
             Err(error) => CallToolResult::structured_error(json!({"error": error.to_string()})),
@@ -140,6 +208,26 @@ fn command_for_tool(name: &str, mut args: Map<String, Value>) -> Result<Value, E
             let request_id = uuid_field(&mut args, "request_id")?;
             json!({"command":"debug_inspect", "scope":"request", "request_id":request_id})
         }
+        "inspect_presets" => json!({"command":"debug_inspect", "scope":"presets"}),
+        "inspect_onboarding" => json!({"command":"debug_inspect", "scope":"onboarding"}),
+        "select_active_preset" => {
+            let id = args
+                .remove("preset_id")
+                .and_then(|v| v.as_u64())
+                .and_then(|v| u32::try_from(v).ok())
+                .ok_or_else(|| ErrorData::invalid_params("preset_id must be a u32", None))?;
+            let mut command = json!({"command":"set_active_preset", "preset_id":id});
+            if let Some(revision) = args.remove("expected_revision") {
+                if !revision.is_u64() {
+                    return Err(ErrorData::invalid_params(
+                        "expected_revision must be a u64",
+                        None,
+                    ));
+                }
+                command["expected_revision"] = revision;
+            }
+            command
+        }
         _ => return Err(ErrorData::invalid_params("unknown NeuroMita tool", None)),
     };
     if !args.is_empty() {
@@ -174,15 +262,40 @@ fn inspection_tool(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<_> = std::env::args().skip(1).collect();
-    let core: SocketAddr = match args.as_slice() {
-        [flag, address] if flag == "--core" => address.parse()?,
-        _ => return Err("usage: neuromita-agent-mcp --core LOOPBACK:PORT".into()),
-    };
+    let mut args = std::env::args().skip(1);
+    let mut core = None;
+    let mut allow_write = false;
+    let mut timeout = Duration::from_secs(60);
+    while let Some(argument) = args.next() {
+        match argument.as_str() {
+            "--core" => core = Some(args.next().ok_or("missing --core value")?.parse()?),
+            "--allow-write" => allow_write = true,
+            "--timeout-ms" => {
+                let value: u64 = args.next().ok_or("missing --timeout-ms value")?.parse()?;
+                if !(1..=300_000).contains(&value) {
+                    return Err("invalid timeout".into());
+                }
+                timeout = Duration::from_millis(value);
+            }
+            _ => return Err(
+                "usage: neuromita-agent-mcp --core LOOPBACK:PORT [--allow-write] [--timeout-ms N]"
+                    .into(),
+            ),
+        }
+    }
+    let core: SocketAddr = core.ok_or("--core LOOPBACK:PORT is required")?;
     if !core.ip().is_loopback() {
         return Err("LocalControl address must be loopback".into());
     }
-    NeuroMita { core }.serve(stdio()).await?.waiting().await?;
+    NeuroMita {
+        core,
+        allow_write,
+        timeout,
+    }
+    .serve(stdio())
+    .await?
+    .waiting()
+    .await?;
     Ok(())
 }
 
@@ -209,6 +322,16 @@ mod tests {
         let request =
             command_for_tool("inspect_request", args(json!({"request_id":request_id}))).unwrap();
         assert_eq!(request["scope"], "request");
+        let presets = command_for_tool("inspect_presets", args(json!({}))).unwrap();
+        assert_eq!(presets["scope"], "presets");
+        let selected = command_for_tool(
+            "select_active_preset",
+            args(json!({"preset_id":12,"expected_revision":4})),
+        )
+        .unwrap();
+        assert_eq!(selected["command"], "set_active_preset");
+        assert_eq!(selected["preset_id"], 12);
+        assert!(command_for_tool("select_active_preset", args(json!({"preset_id":-1}))).is_err());
         let speech =
             command_for_tool("inspect_presenter", args(json!({"surface":"speech"}))).unwrap();
         assert_eq!(speech["surface"], "speech");

@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use crate::{
     character::CharacterId,
+    generation::PresetId,
     identity::EventId,
     lifecycle::Lifecycle,
     presentation::{PresenterProbe, PresenterSurface},
@@ -28,7 +29,7 @@ use crate::{
         RequestSnapshot, RequestSource, RequestState, SubmitError,
     },
     runtime::{self, ApiBindings},
-    settings::{SettingsError, VoiceSettings, Volume},
+    settings::{PresetSettings, SettingsError, VoiceSettings, Volume},
     timeline::conversation::{ConversationAudience, ConversationMessage, ConversationSpeaker},
 };
 
@@ -286,6 +287,11 @@ commands! {
     SetVolume {
         value: Volume,
     },
+    SetActivePreset {
+        preset_id: u32,
+        #[serde(default)]
+        expected_revision: Option<u64>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -297,6 +303,8 @@ enum DebugScope {
     Character,
     Requests,
     Request,
+    Presets,
+    Onboarding,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -634,13 +642,13 @@ async fn client(
                     let snapshot = match scope {
                         DebugScope::Capabilities => Ok(json!({
                             "protocol": "local_control_jsonl_v1",
-                            "capabilities": ["lifecycle", "timeline", "character", "requests"],
+                            "capabilities": ["lifecycle", "timeline", "character", "requests", "presets", "onboarding"],
                             "presenter_surfaces": ["chat", "ai_runtime", "connections", "speech", "releases"],
                             "character_event_lookup": true,
                             "request_id_lookup": true,
                             "presenter_requires_core_lifecycle": true,
                             "server_authorized_deep_writes": false,
-                            "mutating_commands": ["publish_message", "reply", "react", "initiate", "cancel", "set_volume"],
+                            "mutating_commands": ["publish_message", "reply", "react", "initiate", "cancel", "set_volume", "set_active_preset"],
                             "acceptance_issue": 442,
                             "evidence_level": "core_ipc_only",
                             "full_stack_e2e_verified": false,
@@ -709,6 +717,29 @@ async fn client(
                                 },
                             }
                         }
+                        DebugScope::Onboarding => api.settings.snapshot_all()
+                            .map(|snapshot| json!({
+                                "settings_revision":snapshot.revision,
+                                "persisted_revision":snapshot.persisted_revision,
+                                "guide_level":snapshot.values.onboarding.guide_level,
+                                "guide_completed":snapshot.values.onboarding.guide_completed,
+                                "guide_page":snapshot.values.onboarding.guide_page,
+                                "eula_accepted":snapshot.values.onboarding.eula_accepted,
+                                "privacy":"read-only settings section; no filesystem or GUI evidence",
+                            })).map_err(|_| "settings unavailable"),
+                        DebugScope::Presets => api.settings.snapshot_all()
+                            .map(|snapshot| {
+                                let entries = api.presets.list().into_iter().map(|(id, record)| {
+                                    json!({"id":id.0, "name":record.name})
+                                }).collect::<Vec<_>>();
+                                json!({
+                                    "active_preset_id":snapshot.values.presets.active.0,
+                                    "settings_revision":snapshot.revision,
+                                    "presets": entries,
+                                    "runtime_bootstrap_preset_id":0,
+                                    "privacy":"no credentials, endpoints or provider configuration",
+                                })
+                            }).map_err(|_| "settings unavailable"),
                         DebugScope::Request => presenter.as_ref()
                             .map(|probe| probe.request_inspect(request_id.expect("validated request ID")))
                             .ok_or("presenter projection unavailable"),
@@ -842,6 +873,23 @@ async fn client(
                     let response = match api.settings.snapshot_all() {
                         Ok(snapshot) => json!({"type":"settings","command_id":envelope.command_id,"revision":snapshot.revision,"settings":snapshot.values}),
                         Err(error) => error_response(Some(envelope.command_id), settings_code(&error), error),
+                    };
+                    send(&outbound, response, &stop).await?;
+                }
+                Command::SetActivePreset { preset_id, expected_revision } => {
+                    let id = PresetId(preset_id);
+                    let response = if !api.presets.contains_id(id) {
+                        error_response(Some(envelope.command_id), ErrorCode::InvalidValue, "preset ID not found in catalog")
+                    } else {
+                        let changed = match expected_revision {
+                            Some(expected) => api.settings.replace::<PresetSettings>(expected, PresetSettings { active: id }),
+                            None => api.settings.edit::<PresetSettings>(|preset| preset.active = id),
+                        };
+                        match changed {
+                            Ok(snapshot) => json!({"type":"preset_selected","command_id":envelope.command_id,
+                                "active_preset_id":snapshot.value.active.0,"revision":snapshot.revision}),
+                            Err(error) => error_response(Some(envelope.command_id), settings_code(&error), error),
+                        }
                     };
                     send(&outbound, response, &stop).await?;
                 }

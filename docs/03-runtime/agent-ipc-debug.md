@@ -139,7 +139,7 @@ loopback address of the running NeuroMita instance in `--core`.
 
 `inspect_core` calls `debug_inspect`. `inspect_presenter` calls
 `presenter_inspect`; the `chat` surface requires a canonical `character` ID.
-Both tools are read-only and return the correlated LocalControl frame as
+The inspection tools are read-only and return the correlated LocalControl frame as
 structured MCP output. The executable uses the Rust MCP SDK and shares the TCP
 client with the CLI and HTTP gateway.
 
@@ -154,3 +154,67 @@ exposing any payload or proving that a hidden event does not exist.
 `GET /v1/presenter/speech` and `/v1/presenter/releases` expose only phase,
 error-presence and structural counters from lifecycle-owned presenters. All
 these probes are read-only and remain `core_ipc_only`, not Unity E2E PASS.
+
+## MCP acceptance orchestration: one connection + active preset
+
+MCP is **read-only by default**. Start `neuromita-agent-mcp --core
+127.0.0.1:8765 --allow-write --timeout-ms 90000` only with a trusted local
+agent and a disposable Core/data root. The opt-in flag gates all mutations,
+including `select_active_preset` and mutating steps inside `run_scenario`.
+This is an *MCP-process permission*, not an authentication mechanism for
+LocalControl, whose loopback endpoint is still available to other local apps.
+
+Additional typed tools:
+
+- `inspect_onboarding` returns Core settings revision, persisted revision and
+  Guide level/completion/page flags. Reading after a **real restart** can help
+  verify persistence, but cannot prove the GUI displayed the intended screen.
+
+- `inspect_presets` returns the live active preset ID, settings revision and
+  persisted preset **names and IDs only**. Runtime preset ID 0 is indicated
+  separately; no credentials, endpoints, models or provider settings are
+  exported. `select_active_preset` accepts `preset_id` and optional
+  `expected_revision` to reject concurrent settings changes; the ID must exist
+  in the real catalog without materializing credentials. Selection changes
+  global Core settings, not one request's ephemeral override. A queued
+  request resolves its selected preset when generation begins.
+- `run_scenario` accepts 1–32 JSONL-equivalent `steps`, using **one** LocalControl
+  TCP connection throughout so `cancel` can act on that connection's request
+  receipts. Each step can set `command_id`, `wait_terminal`, `expect` (subset),
+  `expect_terminal` (subset). `$last_request_id` is supported in `request_id`,
+  and `$last_event_id` in `message_id` or `event_id`; a missing preceding source
+  fails explicitly. Results are sanitized and contain each command's ACK,
+  optional actual terminal status and a failing step index when an assertion or
+  Core command error occurs. A terminal success is never inferred from ACK.
+- The typed `inspect_event_visibility` and `inspect_request` probes continue to
+  use the real Timeline and ChatPresenter by ID. `inspect_presenter` covers
+  speech/AI-runtime/release lifecycle status without microphone data or logs.
+
+Example MCP `run_scenario` arguments for a **single actual generation**:
+
+```json
+{
+  "steps": [
+    {"command": "debug_inspect", "scope": "presets"},
+    {"command": "set_active_preset", "preset_id": 0},
+    {"command": "initiate", "character": "Crazy", "wait_terminal": true,
+      "expect_terminal": {"state": "finished", "outcome": "success"}},
+    {"command": "debug_inspect", "scope": "character", "character": "Crazy",
+      "event_id": "$last_event_id", "expect": {"snapshot": {"event_visible": true}}}
+  ]
+}
+```
+
+A duplicate/cancel probe can use an explicit identical `command_id` for both
+submission attempts and `{"command":"cancel","request_id":"$last_request_id"}`
+between them. The second receipt must be `replayed=true` and retain its
+original request ID. For a cancellation test, do not enable terminal success
+expectations on the first submission. The `cancel` reply establishes only Core
+receipt ownership/cancellation; it is **not** an AI-provider or Unity delivery
+ACK. Error and text fields are redacted even with an opt-in writer.
+
+The MCP acceptance boundary remains limited to Core/Presenter. Real Unity
+GameLink event delivery, mic/device capture, model installation, audible TTS,
+Slint/Guide navigation, persistence **after a physical restart** and automatic
+reconnect require independent actors and explicit evidence. A local inspector
+must not mark #442 full-stack gates PASS for these operations.
