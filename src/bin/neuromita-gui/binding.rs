@@ -299,7 +299,7 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
         queue_guide_change(
             &window,
             runtime.as_ref(),
-            super::runtime::GuideChange::Page(page),
+            neuromita::onboarding::GuideChange::Page(page),
         );
     });
     let guide_window = window.as_weak();
@@ -315,7 +315,7 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
         queue_guide_change(
             &window,
             runtime.as_ref(),
-            super::runtime::GuideChange::Complete,
+            neuromita::onboarding::GuideChange::Complete,
         );
     });
     let guide_window = window.as_weak();
@@ -367,7 +367,7 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
         queue_guide_change(
             &window,
             runtime.as_ref(),
-            super::runtime::GuideChange::Level(level),
+            neuromita::onboarding::GuideChange::Level(level),
         );
     });
     let language_window = window.as_weak();
@@ -395,7 +395,7 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
             queue_guide_change(
                 &window,
                 runtime.as_ref(),
-                super::runtime::GuideChange::Language(language),
+                neuromita::onboarding::GuideChange::Language(language),
             );
             return;
         }
@@ -585,7 +585,7 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
 fn queue_guide_change(
     window: &AppWindow,
     runtime: Option<&super::runtime::DesktopRuntime>,
-    change: super::runtime::GuideChange,
+    change: neuromita::onboarding::GuideChange,
 ) {
     if window.get_onboarding_guide_saving() {
         return;

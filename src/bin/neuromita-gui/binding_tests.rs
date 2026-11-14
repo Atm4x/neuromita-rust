@@ -2323,7 +2323,7 @@ fn failed_gui_shutdown_and_cancellation_report_both_errors_as_pending() {
 fn guide_navigation_ack_is_correlated_and_does_not_advance_before_persistence() {
     use super::super::{
         memory::MemoryEditor,
-        runtime::{GuideChange, Update},
+        runtime::Update,
         sandbox::apply_with_pager,
     };
     use std::sync::{Arc, Mutex, atomic::AtomicU64};
@@ -2385,7 +2385,7 @@ fn guide_navigation_ack_is_correlated_and_does_not_advance_before_persistence() 
 fn guide_level_language_and_completion_require_correlated_durable_ack() {
     use super::super::{
         memory::MemoryEditor,
-        runtime::{GuideChange, Update},
+        runtime::Update,
         sandbox::apply_with_pager,
     };
     use neuromita::settings::{GuideLevel, Language};
