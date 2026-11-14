@@ -1,0 +1,30 @@
+name: Git Bridge IPC cycle4 incoming bundle
+on:
+  push:
+    branches:
+      - bridge/ipc-cycle4-import-20261114
+    paths:
+      - .bridge/ipc-cycle4-outgoing.b64
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Verify exact local Git bundle and publish candidate branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          base64 -d .bridge/ipc-cycle4-outgoing.b64 > /tmp/ipc-cycle4.bundle
+          git bundle verify /tmp/ipc-cycle4.bundle
+          git fetch /tmp/ipc-cycle4.bundle refs/heads/ipc-cycle4-integrate:refs/heads/ipc-cycle4-imported
+          BASE=f6a6f37db94f74b15d22238dfbddff67451c8e65
+          test "$(git merge-base "$BASE" ipc-cycle4-imported)" = "$BASE"
+          git rev-parse ipc-cycle4-imported
+          git push origin refs/heads/ipc-cycle4-imported:refs/heads/bridge/ipc-cycle4-candidate-20261114
