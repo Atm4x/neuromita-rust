@@ -2107,7 +2107,12 @@ async fn optional_http_gateway_rejects_untrusted_clients_and_probes_real_core() 
     let token = "gateway-test-secret-12345678901234567890";
     let binary = env!("CARGO_BIN_EXE_neuromita-agent-http");
     let mut gateway = tokio::process::Command::new(binary)
-        .args(["--listen", &address.to_string(), "--core", &core.to_string()])
+        .args([
+            "--listen",
+            &address.to_string(),
+            "--core",
+            &core.to_string(),
+        ])
         .env("NEUROMITA_AGENT_HTTP_TOKEN", token)
         .spawn()
         .unwrap();
@@ -2135,7 +2140,9 @@ async fn optional_http_gateway_rejects_untrusted_clients_and_probes_real_core() 
         .post(format!("http://{address}/v1/commands"))
         .bearer_auth(token)
         .json(&json!({"command":"initiate","character":"Crazy"}))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
     assert!(fixture.calls.try_recv().is_err());
     gateway.kill().await.unwrap();

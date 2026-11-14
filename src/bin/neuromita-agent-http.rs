@@ -28,12 +28,26 @@ fn config() -> io::Result<Options> {
     let mut allow_write = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--listen" => listen = args.next().ok_or_else(|| invalid("missing --listen address"))?
-                .parse().map_err(|_| invalid("invalid --listen address"))?,
-            "--core" => core = args.next().ok_or_else(|| invalid("missing --core address"))?
-                .parse().map_err(|_| invalid("invalid --core address"))?,
+            "--listen" => {
+                listen = args
+                    .next()
+                    .ok_or_else(|| invalid("missing --listen address"))?
+                    .parse()
+                    .map_err(|_| invalid("invalid --listen address"))?
+            }
+            "--core" => {
+                core = args
+                    .next()
+                    .ok_or_else(|| invalid("missing --core address"))?
+                    .parse()
+                    .map_err(|_| invalid("invalid --core address"))?
+            }
             "--allow-write" => allow_write = true,
-            _ => return Err(invalid("usage: neuromita-agent-http [--listen LOOPBACK:PORT] [--core LOOPBACK:PORT] [--allow-write]")),
+            _ => {
+                return Err(invalid(
+                    "usage: neuromita-agent-http [--listen LOOPBACK:PORT] [--core LOOPBACK:PORT] [--allow-write]",
+                ));
+            }
         }
     }
     if !listen.ip().is_loopback() || !core.ip().is_loopback() {
@@ -44,7 +58,12 @@ fn config() -> io::Result<Options> {
     if token.len() < 32 || !token.is_ascii() {
         return Err(invalid("HTTP token must be at least 32 ASCII bytes"));
     }
-    Ok(Options { listen, core, allow_write, token: token.into() })
+    Ok(Options {
+        listen,
+        core,
+        allow_write,
+        token: token.into(),
+    })
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -79,9 +98,12 @@ async fn read_request(stream: &mut TcpStream) -> io::Result<HttpRequest> {
     if header_end > MAX_HEADERS {
         return Err(invalid("headers too large"));
     }
-    let header = std::str::from_utf8(&raw[..header_end]).map_err(|_| invalid("non-UTF8 headers"))?;
+    let header =
+        std::str::from_utf8(&raw[..header_end]).map_err(|_| invalid("non-UTF8 headers"))?;
     let mut lines = header.split("\r\n");
-    let request_line = lines.next().ok_or_else(|| invalid("missing request line"))?;
+    let request_line = lines
+        .next()
+        .ok_or_else(|| invalid("missing request line"))?;
     let parts = request_line.split_ascii_whitespace().collect::<Vec<_>>();
     if parts.len() != 3 || parts[2] != "HTTP/1.1" {
         return Err(invalid("HTTP/1.1 required"));
@@ -95,20 +117,30 @@ async fn read_request(stream: &mut TcpStream) -> io::Result<HttpRequest> {
     let mut length = None;
     let mut content_type = None;
     for line in lines {
-        let (name, value) = line.split_once(':').ok_or_else(|| invalid("invalid header"))?;
+        let (name, value) = line
+            .split_once(':')
+            .ok_or_else(|| invalid("invalid header"))?;
         let name = name.trim().to_ascii_lowercase();
         let value = value.trim().to_owned();
         match name.as_str() {
             "host" if host.replace(value).is_some() => return Err(invalid("duplicate Host")),
-            "authorization" if auth.replace(value).is_some() => return Err(invalid("duplicate Authorization")),
-            "content-length" if length.replace(value).is_some() => return Err(invalid("duplicate Content-Length")),
-            "content-type" if content_type.replace(value).is_some() => return Err(invalid("duplicate Content-Type")),
+            "authorization" if auth.replace(value).is_some() => {
+                return Err(invalid("duplicate Authorization"));
+            }
+            "content-length" if length.replace(value).is_some() => {
+                return Err(invalid("duplicate Content-Length"));
+            }
+            "content-type" if content_type.replace(value).is_some() => {
+                return Err(invalid("duplicate Content-Type"));
+            }
             "transfer-encoding" => return Err(invalid("chunked HTTP is not supported")),
             _ => {}
         }
     }
     let length: usize = match length {
-        Some(value) => value.parse().map_err(|_| invalid("invalid Content-Length"))?,
+        Some(value) => value
+            .parse()
+            .map_err(|_| invalid("invalid Content-Length"))?,
         None => 0,
     };
     if length > MAX_BODY {
@@ -125,9 +157,12 @@ async fn read_request(stream: &mut TcpStream) -> io::Result<HttpRequest> {
         return Err(invalid("HTTP pipelining is not supported"));
     }
     body.resize(length, 0);
-    stream.read_exact(&mut body[raw.len() - header_end - 4..]).await?;
+    stream
+        .read_exact(&mut body[raw.len() - header_end - 4..])
+        .await?;
     Ok(HttpRequest {
-        method, path,
+        method,
+        path,
         auth: auth.unwrap_or_default(),
         host: host.unwrap_or_default(),
         content_type,
@@ -138,7 +173,8 @@ async fn read_request(stream: &mut TcpStream) -> io::Result<HttpRequest> {
 fn authorized(received: &str, token: &str) -> bool {
     let expected = format!("Bearer {token}");
     received.len() == expected.len()
-        && ring::constant_time::verify_slices_are_equal(received.as_bytes(), expected.as_bytes()).is_ok()
+        && ring::constant_time::verify_slices_are_equal(received.as_bytes(), expected.as_bytes())
+            .is_ok()
 }
 
 fn get_command(path: &str) -> Option<Value> {
@@ -151,11 +187,20 @@ fn get_command(path: &str) -> Option<Value> {
         "/v1/timeline" => Some(json!({"command":"debug_inspect","scope":"timeline"})),
         "/v1/characters" => Some(json!({"command":"debug_inspect","scope":"character"})),
         "/v1/requests" => Some(json!({"command":"debug_inspect","scope":"requests"})),
-        "/v1/presenter/chat" => Some(json!({"command":"debug_inspect","scope":"presenter","surface":"chat"})),
-        "/v1/presenter/ai_runtime" => Some(json!({"command":"debug_inspect","scope":"presenter","surface":"ai_runtime"})),
-        "/v1/presenter/connections" => Some(json!({"command":"debug_inspect","scope":"presenter","surface":"connections"})),
+        "/v1/presenter/chat" => {
+            Some(json!({"command":"debug_inspect","scope":"presenter","surface":"chat"}))
+        }
+        "/v1/presenter/ai_runtime" => {
+            Some(json!({"command":"debug_inspect","scope":"presenter","surface":"ai_runtime"}))
+        }
+        "/v1/presenter/connections" => {
+            Some(json!({"command":"debug_inspect","scope":"presenter","surface":"connections"}))
+        }
         _ => path.strip_prefix("/v1/character/").and_then(|name| {
-            if name.is_empty() || name.len() > 48 || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') {
+            if name.is_empty()
+                || name.len() > 48
+                || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+            {
                 return None;
             }
             Some(json!({"command":"debug_inspect","scope":"character","character":name}))
@@ -164,9 +209,15 @@ fn get_command(path: &str) -> Option<Value> {
 }
 
 fn admitted_post(value: Value, allow_write: bool) -> Result<Value, (u16, &'static str)> {
-    let name = value.get("command").and_then(Value::as_str).ok_or((400, "missing command"))?;
+    let name = value
+        .get("command")
+        .and_then(Value::as_str)
+        .ok_or((400, "missing command"))?;
     let read_only = matches!(name, "ping" | "methods" | "server_status" | "debug_inspect");
-    let mutating = matches!(name, "publish_message" | "reply" | "react" | "initiate" | "set_volume");
+    let mutating = matches!(
+        name,
+        "publish_message" | "reply" | "react" | "initiate" | "set_volume"
+    );
     if !read_only && !mutating {
         return Err((403, "method is not exposed by HTTP gateway"));
     }
@@ -231,8 +282,13 @@ fn body_error(message: &str) -> Value {
 async fn respond(stream: &mut TcpStream, status: u16, payload: &Value) -> io::Result<()> {
     let body = serde_json::to_vec(payload).map_err(io::Error::other)?;
     let status_name = match status {
-        200 => "OK", 400 => "Bad Request", 401 => "Unauthorized", 403 => "Forbidden",
-        404 => "Not Found", 502 => "Bad Gateway", 504 => "Gateway Timeout",
+        200 => "OK",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        502 => "Bad Gateway",
+        504 => "Gateway Timeout",
         _ => "Internal Server Error",
     };
     let headers = format!(
@@ -243,7 +299,13 @@ async fn respond(stream: &mut TcpStream, status: u16, payload: &Value) -> io::Re
     stream.write_all(&body).await
 }
 
-async fn handle(mut client: TcpStream, core: SocketAddr, token: Arc<str>, write_enabled: bool, port: u16) {
+async fn handle(
+    mut client: TcpStream,
+    core: SocketAddr,
+    token: Arc<str>,
+    write_enabled: bool,
+    port: u16,
+) {
     let result = timeout(OPERATION_TIMEOUT, async {
         let request = read_request(&mut client).await.map_err(|_| (400, "invalid HTTP request"))?;
         if !matches!(request.host.as_str(), _ if request.host == format!("127.0.0.1:{port}") || request.host == format!("localhost:{port}")) {
@@ -282,7 +344,11 @@ async fn main() -> io::Result<()> {
         if !peer.ip().is_loopback() {
             continue;
         }
-        let permit = limit.clone().acquire_owned().await.map_err(io::Error::other)?;
+        let permit = limit
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(io::Error::other)?;
         let token = options.token.clone();
         let core = options.core;
         let writes = options.allow_write;
@@ -309,8 +375,17 @@ mod tests {
 
     #[test]
     fn bearer_requires_exact_secret() {
-        assert!(authorized("Bearer 12345678901234567890123456789012", "12345678901234567890123456789012"));
-        assert!(!authorized("Bearer 12345678901234567890123456789011", "12345678901234567890123456789012"));
-        assert!(!authorized("Basic 12345678901234567890123456789012", "12345678901234567890123456789012"));
+        assert!(authorized(
+            "Bearer 12345678901234567890123456789012",
+            "12345678901234567890123456789012"
+        ));
+        assert!(!authorized(
+            "Bearer 12345678901234567890123456789011",
+            "12345678901234567890123456789012"
+        ));
+        assert!(!authorized(
+            "Basic 12345678901234567890123456789012",
+            "12345678901234567890123456789012"
+        ));
     }
 }
