@@ -1,4 +1,4 @@
-name: Git Bridge IPC cycle4 incoming bundle
+name: Git Bridge IPC MCP source import
 on:
   push:
     branches:
@@ -16,15 +16,18 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true
-      - name: Verify exact local Git bundle and publish candidate branch
+      - name: Verify local Git bundle and publish isolated import ref
         shell: bash
         run: |
           set -euo pipefail
-          git fetch origin main
-          base64 -d .bridge/ipc-cycle4-outgoing.b64 > /tmp/ipc-cycle4.bundle
-          git bundle verify /tmp/ipc-cycle4.bundle
-          git fetch /tmp/ipc-cycle4.bundle refs/heads/ipc-cycle4-integrate:refs/heads/ipc-cycle4-imported
-          BASE=f6a6f37db94f74b15d22238dfbddff67451c8e65
-          test "$(git merge-base "$BASE" ipc-cycle4-imported)" = "$BASE"
-          git rev-parse ipc-cycle4-imported
-          git push origin refs/heads/ipc-cycle4-imported:refs/heads/bridge/ipc-cycle4-candidate-20261114
+          BASE=540a6f92aee2a14c5b9bca2bb4253dbe578bc6a2
+          EXPECTED=fe808f32cc5af9a0c4e3884d2b97a1a75052b55f
+          git fetch origin refs/heads/bridge/ipc-cycle4-candidate-20261114:refs/remotes/origin/ipc-candidate
+          test "$(git rev-parse refs/remotes/origin/ipc-candidate)" = "$BASE"
+          base64 -d .bridge/ipc-cycle4-outgoing.b64 > /tmp/ipc-mcp.bundle
+          echo "d2caca4f52bc3cbfafff0eaed5b938886b93a4c6241f60ea76e1a67f88ddc2b5  /tmp/ipc-mcp.bundle" | sha256sum -c -
+          git bundle verify /tmp/ipc-mcp.bundle
+          git fetch /tmp/ipc-mcp.bundle refs/heads/ipc-cycle4-integrate:refs/heads/ipc-mcp-imported
+          test "$(git rev-parse refs/heads/ipc-mcp-imported)" = "$EXPECTED"
+          git merge-base --is-ancestor "$BASE" "$EXPECTED"
+          git push origin refs/heads/ipc-mcp-imported:refs/heads/bridge/ipc-mcp-imported-20261114
