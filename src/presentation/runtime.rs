@@ -11,7 +11,6 @@ use crate::ai_runtime::{
 
 /// Read-only presenter-facing view of the supervisor's latest state.
 /// Subscribers receive coalesced snapshots rather than an event history.
-#[derive(Clone)]
 pub struct RuntimeStatePresenter {
     updates: Option<watch::Receiver<RuntimeSnapshot>>,
     supervisor: Weak<AiSupervisor>,
