@@ -1,0 +1,4 @@
+{"command":"ping","expect":{"type":"pong"}}
+{"command":"server_status","expect":{"type":"server_status","running":true}}
+{"command":"debug_inspect","scope":"timeline","expect":{"type":"debug_inspect","snapshot":{"selection_matches_head":true}}}
+{"command":"debug_inspect","scope":"requests","expect":{"type":"debug_inspect","snapshot":{"ownership":"connection_local_receipts_only"}}}

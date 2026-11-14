@@ -209,6 +209,11 @@ macro_rules! commands {
 
 commands! {
     Ping {}, Methods {}, ServerStatus {},
+    DebugInspect {
+        scope: DebugScope,
+        #[serde(default)]
+        character: Option<CharacterId>,
+    },
     PublishMessage {
         event_id: Uuid,
         occurred_at_unix_ms: u64,
@@ -261,6 +266,16 @@ commands! {
     SetVolume {
         value: Volume,
     },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DebugScope {
+    Capabilities,
+    Lifecycle,
+    Timeline,
+    Character,
+    Requests,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -566,6 +581,92 @@ async fn client(
                         "has_error":snapshot.last_error.is_some(),
                         "limits":{"max_clients":config.max_clients, "outbound_capacity":config.outbound_capacity,
                             "max_command_bytes":config.max_command_bytes, "receipt_capacity":config.receipt_capacity}}), &stop).await?;
+                }
+                Command::DebugInspect { scope, character } => {
+                    let snapshot = match scope {
+                        DebugScope::Capabilities => Ok(json!({
+                            "protocol": "local_control_jsonl_v1",
+                            "capabilities": ["lifecycle", "timeline", "character", "requests"],
+                            "mutating_commands": ["publish_message", "reply", "react", "initiate", "cancel", "set_volume"],
+                            "acceptance_issue": 442,
+                            "evidence_level": "core_ipc_only",
+                            "full_stack_e2e_verified": false,
+                        })),
+                        DebugScope::Lifecycle => {
+                            let state = server.snapshot();
+                            let phase = match runtime::status() {
+                                runtime::ApplicationStatus::Stopped => "stopped",
+                                runtime::ApplicationStatus::Starting => "starting",
+                                runtime::ApplicationStatus::Running => "running",
+                                runtime::ApplicationStatus::Stopping => "stopping",
+                            };
+                            Ok(json!({
+                                "core_phase": phase,
+                                "local_control_running": state.running,
+                                "connected_clients": state.connected_clients,
+                                "accepted_connections": state.accepted_connections,
+                                "server_has_error": state.last_error.is_some(),
+                            }))
+                        }
+                        DebugScope::Timeline => {
+                            let timeline = api.timeline.lock().map_err(|_| "timeline lock poisoned");
+                            timeline.map(|timeline| {
+                                let at = timeline.anchor();
+                                let selection = timeline.selection();
+                                json!({
+                                    "branch_id": at.branch_id,
+                                    "head_sequence": at.through,
+                                    "selection_generation": selection.generation,
+                                    "selection_matches_head": selection.branch_id.0 == at.branch_id,
+                                    "note": "canonical Timeline selection snapshot, not distributed-commit proof",
+                                })
+                            })
+                        }
+                        DebugScope::Character => {
+                            match character {
+                                None => Ok(json!({"available": CharacterId::ALL})),
+                                Some(character) => match api.characters.get(character) {
+                                    None => Err("character unavailable"),
+                                    Some(handle) => {
+                                        let at = api.timeline.lock().map_err(|_| "timeline lock poisoned").map(|t| t.anchor());
+                                        match at {
+                                            Err(error) => Err(error),
+                                            Ok(at) => match tokio::time::timeout(std::time::Duration::from_secs(3), handle.get_context(at)).await {
+                                                Ok(Ok(view)) => Ok(json!({
+                                                    "character": character,
+                                                    "branch_id": at.branch_id,
+                                                    "head_sequence": at.through,
+                                                    "visible_messages": view.view.count(),
+                                                    "visible_world_events": view.view.world_events().len(),
+                                                    "privacy": "counts only; no message content or hidden facts",
+                                                })),
+                                                Ok(Err(_)) => Err("character context unavailable"),
+                                                Err(_) => Err("character context timed out"),
+                                            },
+                                        }
+                                    }
+                                },
+                            }
+                        }
+                        DebugScope::Requests => Ok(json!({
+                            "ownership": "connection_local_receipts_only",
+                            "tracked": receipts.iter().map(|receipt| match &receipt.result {
+                                ReceiptResult::Generation(handle) => {
+                                    let snapshot = handle.snapshot();
+                                    json!({"command_id": receipt.command_id, "request_id": handle.id().0,
+                                        "terminal": snapshot.state.is_terminal(), "revision": snapshot.revision})
+                                }
+                                ReceiptResult::Published(id) => json!({"command_id": receipt.command_id,
+                                    "event_id": id.0, "published": true}),
+                            }).collect::<Vec<_>>(),
+                        })),
+                    };
+                    let response = match snapshot {
+                        Ok(snapshot) => json!({"type":"debug_inspect", "command_id":envelope.command_id,
+                            "scope":scope, "evidence_level":"core_ipc_only", "snapshot": snapshot}),
+                        Err(message) => error_response(Some(envelope.command_id), ErrorCode::CoreUnavailable, message),
+                    };
+                    send(&outbound, response, &stop).await?;
                 }
                 Command::PublishMessage { event_id, occurred_at_unix_ms, speaker, content, audience } => {
                     let mut message = ConversationMessage::new(event_id.to_string(), speaker, content, []);

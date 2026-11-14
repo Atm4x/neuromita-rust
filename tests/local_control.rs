@@ -372,6 +372,7 @@ async fn discovery_matches_executable_commands_and_all_control_replies_are_corre
         "ping",
         "methods",
         "server_status",
+        "debug_inspect",
         "publish_message",
         "reply",
         "react",
@@ -432,6 +433,7 @@ async fn discovery_matches_executable_commands_and_all_control_replies_are_corre
             "diagnostics_recent" | "diagnostics_errors" => {
                 cmd["character"] = json!("Crazy");
             }
+            "debug_inspect" => cmd["scope"] = json!("capabilities"),
             "set_volume" => cmd["value"] = json!(42),
             _ => {}
         }
@@ -1949,5 +1951,44 @@ async fn tcp_replay_treats_audience_sets_as_unordered_without_losing_conflict_de
     provider.finish("only one reply");
     assert_eq!(client.terminal(request_id).await["outcome"], "success");
     assert_eq!(fixture.app.at().through, 2);
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn debug_inspection_is_canonical_read_only_and_correlated() {
+    let fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+    for (scope, key) in [
+        ("capabilities", "protocol"),
+        ("lifecycle", "core_phase"),
+        ("timeline", "branch_id"),
+        ("character", "available"),
+        ("requests", "tracked"),
+    ] {
+        let mut cmd = command("debug_inspect");
+        cmd["scope"] = json!(scope);
+        client.send(cmd.clone()).await;
+        let response = client.until(|r| r["command_id"] == cmd["command_id"]).await;
+        assert_eq!(response["type"], "debug_inspect", "{response}");
+        assert_eq!(response["scope"], scope);
+        assert_eq!(response["evidence_level"], "core_ipc_only");
+        assert!(response["snapshot"][key].is_null() == false, "{response}");
+    }
+    let mut cmd = command("debug_inspect");
+    cmd["scope"] = json!("character");
+    cmd["character"] = json!("Crazy");
+    client.send(cmd.clone()).await;
+    let response = client.until(|r| r["command_id"] == cmd["command_id"]).await;
+    assert_eq!(response["snapshot"]["character"], "Crazy");
+    assert!(response["snapshot"]["visible_messages"].is_number());
+    assert!(response["snapshot"].get("content").is_none());
+    let mut unknown = command("debug_inspect");
+    unknown["scope"] = json!("unsafe_memory_dump");
+    client.send(unknown.clone()).await;
+    let rejected = client
+        .until(|r| r["command_id"] == unknown["command_id"])
+        .await;
+    assert_eq!(rejected["type"], "error");
+    assert_eq!(rejected["code"], "invalid_command");
     fixture.shutdown().await;
 }

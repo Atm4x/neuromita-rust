@@ -1,4 +1,5 @@
 pub mod adapters;
+pub mod agent_ipc;
 pub mod ai_runtime;
 pub mod api;
 pub mod app;
