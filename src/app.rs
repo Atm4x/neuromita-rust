@@ -1446,6 +1446,13 @@ impl ApplicationLifecycle {
                 lifecycle.run_with_api(owner.server_stop.clone(), Arc::clone(&bindings)),
             ));
         }
+        let conversation_presenter = ConversationPresenter::new(
+            chat.clone(),
+            CharactersPresenter::new(bindings.characters.clone()),
+            Arc::clone(&timeline),
+            Arc::clone(&bindings.settings),
+            Arc::clone(&presets),
+        );
         owner.server_task = Some(tokio::spawn(server_lifecycle.run_with_presenter(
             owner.server_stop.clone(),
             Arc::clone(&bindings),
@@ -1454,6 +1461,10 @@ impl ApplicationLifecycle {
                 ai_runtime_status.clone(),
                 speech_view.clone(),
                 releases.clone(),
+                crate::presentation::AudioInputPresenter::new(Arc::clone(&audio_input)),
+                settings_presenter.voice.clone(),
+                settings_presenter.onboarding.clone(),
+                conversation_presenter.clone(),
             )),
         )));
         let stop = CancellationToken::new();
@@ -1474,13 +1485,7 @@ impl ApplicationLifecycle {
                 ai_runtime: ai_runtime_status,
                 releases,
                 connections: ConnectionsPresenter::new(server.clone()),
-                conversation: ConversationPresenter::new(
-                    chat.clone(),
-                    CharactersPresenter::new(bindings.characters.clone()),
-                    Arc::clone(&timeline),
-                    Arc::clone(&bindings.settings),
-                    Arc::clone(&presets),
-                ),
+                conversation: conversation_presenter,
                 chat,
                 settings: settings_presenter,
                 presets: PresetsPresenter::new(Arc::clone(&presets)),

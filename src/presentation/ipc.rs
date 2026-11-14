@@ -7,11 +7,74 @@ use serde_json::{Value, json};
 use crate::{
     ai_runtime::{AiService, runtime_status::RuntimePhase},
     character::CharacterId,
-    request::RequestState,
+    request::{RequestHandle, RequestId, RequestState},
     server::ServerHandle,
+    settings::{GuideLevel, Volume},
 };
 
-use super::{ChatPresenter, RuntimeStatePresenter};
+use super::{
+    AudioInputPresenter, ChatPresenter, OnboardingSettingsPresenter, ReleasesPresenter,
+    RuntimeStatePresenter, VoiceSettingsPresenter,
+};
+
+/// Application-level actions are dispatched to the exact presenters used by the GUI.
+/// Core-debug calls deliberately use a different command and permission boundary.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum PresenterAction {
+    ChatReply {
+        character: CharacterId,
+        text: String,
+    },
+    ChatReact {
+        character: CharacterId,
+        event_id: uuid::Uuid,
+        #[serde(default)]
+        instruction: String,
+    },
+    ChatInitiate {
+        character: CharacterId,
+        #[serde(default)]
+        instruction: String,
+    },
+    ChatCancel {
+        request_id: uuid::Uuid,
+    },
+    AudioDevices {},
+    AudioStartTest {
+        backend: String,
+        identity: String,
+    },
+    AudioStopTest {},
+    ReleasesRefresh {},
+    RuntimeRefresh {},
+    VoiceSetVolume {
+        volume: Volume,
+    },
+    GuideSetLevel {
+        level: GuideLevel,
+    },
+    GuideSetPage {
+        page: u8,
+    },
+    GuideSetCompleted {
+        completed: bool,
+    },
+}
+
+impl PresenterAction {
+    pub(crate) fn generation(&self) -> bool {
+        matches!(
+            self,
+            Self::ChatReply { .. } | Self::ChatReact { .. } | Self::ChatInitiate { .. }
+        )
+    }
+}
+
+pub(crate) enum PresenterActionResult {
+    Request(RequestHandle),
+    Snapshot(Value),
+}
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -21,6 +84,9 @@ pub(crate) enum PresenterSurface {
     Connections,
     Speech,
     Releases,
+    AudioInput,
+    Voice,
+    Guide,
 }
 
 #[derive(Clone)]
@@ -28,7 +94,11 @@ pub(crate) struct PresenterProbe {
     chat: ChatPresenter,
     runtime: RuntimeStatePresenter,
     speech: super::SpeechSessionPresenter,
-    releases: super::ReleasesPresenter,
+    releases: ReleasesPresenter,
+    audio_input: AudioInputPresenter,
+    voice: VoiceSettingsPresenter,
+    guide: OnboardingSettingsPresenter,
+    conversation: super::ConversationPresenter,
 }
 
 impl PresenterProbe {
@@ -36,14 +106,172 @@ impl PresenterProbe {
         chat: ChatPresenter,
         runtime: RuntimeStatePresenter,
         speech: super::SpeechSessionPresenter,
-        releases: super::ReleasesPresenter,
+        releases: ReleasesPresenter,
+        audio_input: AudioInputPresenter,
+        voice: VoiceSettingsPresenter,
+        guide: OnboardingSettingsPresenter,
+        conversation: super::ConversationPresenter,
     ) -> Self {
         Self {
             chat,
             runtime,
             speech,
             releases,
+            audio_input,
+            voice,
+            guide,
+            conversation,
         }
+    }
+
+    pub(crate) async fn conversation_snapshot(
+        &self,
+        character: CharacterId,
+        limit: usize,
+        include_content: bool,
+    ) -> Result<Value, String> {
+        if !(1..=100).contains(&limit) {
+            return Err("conversation limit must be between 1 and 100".into());
+        }
+        let state = self
+            .conversation
+            .snapshot(character)
+            .await
+            .map_err(|e| e.to_string())?;
+        let total = state.messages.len();
+        let messages = state.messages.iter().skip(total.saturating_sub(limit))
+            .map(|message| {
+                let role = match message.role {
+                    crate::timeline::domain::MessageRole::User=>"user",
+                    crate::timeline::domain::MessageRole::Assistant=>"assistant",
+                    crate::timeline::domain::MessageRole::System=>"system",
+                };
+                let mut item = json!({"event_id":message.event_id.0,"request_id":message.request_id.map(|id|id.0),
+                    "sequence":message.sequence,"role":role,"speaker":message.speaker,
+                    "content_length":message.content.chars().count()});
+                if include_content {
+                    item["content"] = json!(message.content.chars().take(4000).collect::<String>());
+                    item["content_truncated"] = json!(message.content.chars().count()>4000);
+                }
+                item
+            }).collect::<Vec<_>>();
+        Ok(
+            json!({"schema_version":1,"source":"conversation_presenter_snapshot",
+            "character":character,"timeline_anchor":state.at,
+            "selection":{"branch_id":state.selection.branch_id.0,"generation":state.selection.generation},
+            "total_visible_messages":total,"returned":messages.len(),"messages":messages,
+            "preset_id":state.preset.0,"preset_name":state.preset_name,
+            "content_included":include_content,"evidence_level":"presenter_snapshot",
+            "full_stack_e2e_verified":false}),
+        )
+    }
+
+    pub(crate) async fn execute(
+        &self,
+        action: PresenterAction,
+    ) -> Result<PresenterActionResult, String> {
+        use PresenterAction::*;
+        let snapshot = match action {
+            ChatReply { character, text } => {
+                return self
+                    .chat
+                    .reply(character, text)
+                    .map(PresenterActionResult::Request)
+                    .map_err(|e| e.to_string());
+            }
+            ChatReact {
+                character,
+                event_id,
+                instruction,
+            } => {
+                return self
+                    .chat
+                    .react(character, crate::identity::EventId(event_id), instruction)
+                    .map(PresenterActionResult::Request)
+                    .map_err(|e| e.to_string());
+            }
+            ChatInitiate {
+                character,
+                instruction,
+            } => {
+                return self
+                    .chat
+                    .initiate(character, instruction)
+                    .map(PresenterActionResult::Request)
+                    .map_err(|e| e.to_string());
+            }
+            ChatCancel { request_id } => {
+                let result = self
+                    .chat
+                    .cancel(RequestId(request_id))
+                    .map_err(|e| e.to_string())?;
+                json!({"action":"chat_cancel","request_id":request_id,"result":format!("{result:?}")})
+            }
+            AudioDevices {} => {
+                let devices = self
+                    .audio_input
+                    .devices()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                json!({"action":"audio_devices","devices":devices.into_iter().take(64)
+                    .map(|d| json!({"id":d.id,"name":d.name,"backend":d.backend})).collect::<Vec<_>>()})
+            }
+            AudioStartTest { backend, identity } => {
+                if backend.len() > 64
+                    || identity.len() > 512
+                    || backend.is_empty()
+                    || identity.is_empty()
+                {
+                    return Err("invalid audio backend or device identity".into());
+                }
+                self.audio_input
+                    .start_test(&backend, &identity)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                json!({"action":"audio_start_test","started":true})
+            }
+            AudioStopTest {} => {
+                self.audio_input
+                    .stop_test()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                json!({"action":"audio_stop_test","stopped":true})
+            }
+            ReleasesRefresh {} => {
+                self.releases.refresh().map_err(|e| e.to_string())?;
+                json!({"action":"releases_refresh","queued":true})
+            }
+            RuntimeRefresh {} => {
+                self.runtime.refresh_status().await;
+                json!({"action":"runtime_refresh","refreshed":true})
+            }
+            VoiceSetVolume { volume } => {
+                self.voice.volume.set(volume).map_err(|e| e.to_string())?;
+                json!({"action":"voice_set_volume","value":volume.get()})
+            }
+            GuideSetLevel { level } => {
+                self.guide
+                    .guide_level
+                    .set(level)
+                    .map_err(|e| e.to_string())?;
+                json!({"action":"guide_set_level","level":level})
+            }
+            GuideSetPage { page } => {
+                self.guide.guide_page.set(page).map_err(|e| e.to_string())?;
+                json!({"action":"guide_set_page","page":page})
+            }
+            GuideSetCompleted { completed } => {
+                self.guide
+                    .guide_completed
+                    .set(completed)
+                    .map_err(|e| e.to_string())?;
+                json!({"action":"guide_set_completed","completed":completed})
+            }
+        };
+        Ok(PresenterActionResult::Snapshot(json!({
+            "source":"gui_presenter", "evidence_level":"presenter_command",
+            "full_stack_e2e_verified":false,"result":snapshot
+        })))
     }
 
     pub(crate) fn request_inspect(&self, request_id: uuid::Uuid) -> Value {
@@ -206,6 +434,40 @@ impl PresenterProbe {
                     "source":"releases_presenter_snapshot","phase":phase,
                     "closed":snapshot.closed,"record_count":snapshot.records.len(),
                     "privacy":"no release body or errors"}))
+            }
+            PresenterSurface::AudioInput => {
+                if character.is_some() {
+                    return Err("audio_input does not accept character");
+                }
+                let monitor = self.audio_input.observe_test();
+                let status = monitor.borrow().clone();
+                Ok(
+                    json!({"schema_version":1,"surface":"audio_input", "source":"audio_input_presenter",
+                    "running":status.running,"level":status.level,
+                    "device":status.device,"has_error":status.error.is_some(),
+                    "privacy":"no audio samples or error text"}),
+                )
+            }
+            PresenterSurface::Voice => {
+                if character.is_some() {
+                    return Err("voice does not accept character");
+                }
+                Ok(
+                    json!({"schema_version":1,"surface":"voice","source":"voice_settings_presenter",
+                    "volume":self.voice.volume.get().get(),
+                    "in_game":self.voice.in_game.get(),"in_launcher":self.voice.in_launcher.get(),
+                    "privacy":"voice configuration, no provider secrets"}),
+                )
+            }
+            PresenterSurface::Guide => {
+                if character.is_some() {
+                    return Err("guide does not accept character");
+                }
+                Ok(
+                    json!({"schema_version":1,"surface":"guide","source":"onboarding_settings_presenter",
+                    "level":self.guide.guide_level.get(),"page":self.guide.guide_page.get(),
+                    "completed":self.guide.guide_completed.get()}),
+                )
             }
             PresenterSurface::Connections => {
                 if character.is_some() {

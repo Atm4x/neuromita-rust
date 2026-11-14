@@ -22,7 +22,7 @@ use crate::{
     generation::PresetId,
     identity::EventId,
     lifecycle::Lifecycle,
-    presentation::{PresenterProbe, PresenterSurface},
+    presentation::{PresenterAction, PresenterActionResult, PresenterProbe, PresenterSurface},
     request::{
         DiagnosticLookupError, DiagnosticScope, DiagnosticSection, InitiateRequest,
         ProcessingStage, ReactRequest, ReplyRequest, RequestHandle, RequestId, RequestOutcome,
@@ -221,6 +221,16 @@ macro_rules! commands {
 
 commands! {
     Ping {}, Methods {}, ServerStatus {},
+    PresenterAction {
+        action: PresenterAction,
+    },
+    PresenterConversation {
+        character: CharacterId,
+        #[serde(default)]
+        include_content: bool,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
     PresenterInspect {
         surface: PresenterSurface,
         #[serde(default)]
@@ -593,7 +603,8 @@ async fn client(
                 }
                 continue;
             }
-            let track = matches!(envelope.command, Command::PublishMessage { .. } | Command::Reply { .. } | Command::React { .. } | Command::Initiate { .. });
+            let track = matches!(envelope.command, Command::PublishMessage { .. } | Command::Reply { .. } | Command::React { .. } | Command::Initiate { .. })
+                || matches!(&envelope.command, Command::PresenterAction { action } if action.generation());
             let eviction = if track && receipts.len() >= config.receipt_capacity.get() {
                 match receipts.iter().position(|receipt| match &receipt.result {
                     ReceiptResult::Published(_) => true,
@@ -618,6 +629,54 @@ async fn client(
                         "has_error":snapshot.last_error.is_some(),
                         "limits":{"max_clients":config.max_clients, "outbound_capacity":config.outbound_capacity,
                             "max_command_bytes":config.max_command_bytes, "receipt_capacity":config.receipt_capacity}}), &stop).await?;
+                }
+                Command::PresenterAction { action } => {
+                    let result = match &presenter {
+                        Some(presenter) => presenter.execute(action).await,
+                        None => Err("application presenter is not attached".into()),
+                    };
+                    match result {
+                        Ok(PresenterActionResult::Request(handle)) => {
+                            if let Some(index) = eviction { receipts.remove(index); }
+                            send(&outbound, json!({"type":"accepted","command_id":envelope.command_id,
+                                "request_id":handle.id().0,"replayed":false,"source":"gui_presenter"}), &stop).await?;
+                            receipts.push_back(Receipt { command_id: envelope.command_id, fingerprint,
+                                result: ReceiptResult::Generation(handle.clone()) });
+                            let outbound = outbound.clone();
+                            let stop = stop.clone();
+                            observers.spawn(async move {
+                                let mut observer = handle.observe();
+                                loop {
+                                    let snapshot = tokio::select! {
+                                        biased;
+                                        _ = stop.cancelled() => break,
+                                        snapshot = observer.next() => match snapshot { Ok(Some(snapshot)) => snapshot, _ => break }
+                                    };
+                                    if send(&outbound, status(&snapshot), &stop).await.is_err() { break; }
+                                }
+                            });
+                        }
+                        Ok(PresenterActionResult::Snapshot(result)) => {
+                            send(&outbound, json!({"type":"presenter_action","command_id":envelope.command_id,
+                                "result":result}), &stop).await?;
+                        }
+                        Err(message) => {
+                            send(&outbound, error_response(Some(envelope.command_id),
+                                ErrorCode::InvalidValue, message), &stop).await?;
+                        }
+                    }
+                }
+                Command::PresenterConversation { character, include_content, limit } => {
+                    let result = match &presenter {
+                        Some(presenter) => presenter.conversation_snapshot(character, limit.unwrap_or(40), include_content).await,
+                        None => Err("application presenter is not attached".into()),
+                    };
+                    let response = match result {
+                        Ok(snapshot) => json!({"type":"presenter_conversation", "command_id":envelope.command_id,
+                            "snapshot":snapshot}),
+                        Err(error) => error_response(Some(envelope.command_id),ErrorCode::InvalidValue,error),
+                    };
+                    send(&outbound, response, &stop).await?;
                 }
                 Command::PresenterInspect { surface, character } => {
                     let response = match &presenter {
@@ -663,7 +722,9 @@ async fn client(
                         DebugScope::Capabilities => Ok(json!({
                             "protocol": "local_control_jsonl_v1",
                             "capabilities": ["lifecycle", "timeline", "character", "requests", "presets", "onboarding"],
-                            "presenter_surfaces": ["chat", "ai_runtime", "connections", "speech", "releases"],
+                            "presenter_surfaces": ["chat", "ai_runtime", "connections", "speech", "releases", "audio_input", "voice", "guide"],
+                            "presenter_action": true,
+                            "presenter_conversation": true,
                             "character_event_lookup": true,
                             "request_id_lookup": true,
                             "game_link_session_delivery_lookup": true,

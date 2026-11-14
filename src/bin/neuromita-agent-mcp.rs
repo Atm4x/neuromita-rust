@@ -16,6 +16,8 @@ use uuid::Uuid;
 struct NeuroMita {
     core: SocketAddr,
     allow_write: bool,
+    core_debug: bool,
+    allow_content: bool,
     timeout: Duration,
 }
 
@@ -45,7 +47,7 @@ impl ServerHandler for NeuroMita {
                 "Read a live sanitized Presenter snapshot. Chat requires character.",
                 &["surface"],
                 json!({
-                    "surface": {"type":"string", "enum":["chat","ai_runtime","connections","speech","releases"]},
+                    "surface": {"type":"string", "enum":["chat","ai_runtime","connections","speech","releases","audio_input","voice","guide"]},
                     "character": {"type":"string", "description":"Canonical character ID for surface=chat"}
                 }),
             ),
@@ -85,6 +87,86 @@ impl ServerHandler for NeuroMita {
                 &["request_id"],
                 json!({"request_id": {"type":"string", "format":"uuid"}}),
             ),
+            inspection_tool(
+                "presenter_conversation",
+                "Read a bounded selection-consistent ConversationPresenter snapshot by character. Message IDs, roles, sequence, active preset; --allow-content additionally enables actual text.",
+                &["character"], json!({
+                    "character":{"type":"string"},
+                    "limit":{"type":"integer","minimum":1,"maximum":100},
+                    "include_content":{"type":"boolean"}
+                }),
+            ),
+            inspection_tool(
+                "presenter_audio_input_devices",
+                "Discover real microphone devices using the application's AudioInputPresenter (does not open any device).",
+                &[], json!({}),
+            ),
+            Tool::new("presenter_chat",
+                "Act through the exact GUI ChatPresenter: reply, react, initiate, or cancel. Separate from low-level Core debug. Mutations need --allow-write. Use inspect_request to observe generation.",
+                serde_json::Map::from_iter([
+                    ("type".into(),json!("object")),("additionalProperties".into(),json!(false)),
+                    ("required".into(),json!(["action"])),
+                    ("properties".into(),json!({
+                        "action":{"type":"string","enum":["reply","react","initiate","cancel"]},
+                        "character":{"type":"string"},
+                        "text":{"type":"string","maxLength":32768},
+                        "event_id":{"type":"string","format":"uuid"},
+                        "request_id":{"type":"string","format":"uuid"},
+                        "instruction":{"type":"string","maxLength":8192}
+                    })),
+                ])
+            ).with_annotations(ToolAnnotations::new().read_only(false)),
+            Tool::new("presenter_audio_input",
+                "Start or stop the real GUI microphone loopback test. Use presenter_audio_input_devices to get backend and identity, then inspect_presenter(surface=audio_input) for level/error.",
+                serde_json::Map::from_iter([
+                    ("type".into(),json!("object")),("additionalProperties".into(),json!(false)),
+                    ("required".into(),json!(["action"])),
+                    ("properties".into(),json!({
+                        "action":{"type":"string","enum":["start_test","stop_test"]},
+                        "backend":{"type":"string","maxLength":64},
+                        "identity":{"type":"string","maxLength":512}
+                    })),
+                ])
+            ).with_annotations(ToolAnnotations::new().read_only(false)),
+            Tool::new("presenter_guide",
+                "Set Guide level, page or completion via the actual OnboardingSettingsPresenter; inspect_presenter(surface=guide) afterwards. Does not claim GUI navigation was rendered.",
+                serde_json::Map::from_iter([
+                    ("type".into(),json!("object")),("additionalProperties".into(),json!(false)),
+                    ("required".into(),json!(["field","value"])),
+                    ("properties".into(),json!({
+                        "field":{"type":"string","enum":["level","page","completed"]},
+                        "value":{"oneOf":[{"type":"string","enum":["basic","advanced","full"]},
+                            {"type":"integer","minimum":0,"maximum":255},{"type":"boolean"}]}
+                    })),
+                ])
+            ).with_annotations(ToolAnnotations::new().read_only(false)),
+            Tool::new("presenter_voice",
+                "Set live voice volume via the GUI VoiceSettingsPresenter; 0..100.",
+                serde_json::Map::from_iter([
+                    ("type".into(),json!("object")),("additionalProperties".into(),json!(false)),
+                    ("required".into(),json!(["volume"])),
+                    ("properties".into(),json!({"volume":{"type":"integer","minimum":0,"maximum":100}})),
+                ])
+            ).with_annotations(ToolAnnotations::new().read_only(false)),
+            Tool::new("presenter_refresh",
+                "Trigger refresh through ReleasesPresenter or RuntimeStatePresenter; read their snapshots separately.",
+                serde_json::Map::from_iter([
+                    ("type".into(),json!("object")),("additionalProperties".into(),json!(false)),
+                    ("required".into(),json!(["surface"])),
+                    ("properties".into(),json!({"surface":{"type":"string","enum":["releases","ai_runtime"]}})),
+                ])
+            ).with_annotations(ToolAnnotations::new().read_only(false)),
+            Tool::new("core_debug_command",
+                "Privileged raw typed Core LocalControl command. Requires --core-debug, and --allow-write for mutation. Strict allowlist, no unrestricted reflection. Use Presenter tools for ordinary UI acceptance.",
+                serde_json::Map::from_iter([
+                    ("type".into(),json!("object")),("additionalProperties".into(),json!(false)),
+                    ("required".into(),json!(["method"])),
+                    ("properties".into(),json!({
+                        "method":{"type":"string", "enum":["ping","methods","server_status","debug_inspect","game_link_inspect","presenter_inspect","settings","publish_message","reply","react","initiate","cancel","diagnostics","diagnostics_recent","diagnostics_errors","set_volume","set_active_preset"]},
+                        "params":{"type":"object","maxProperties":20}
+                    })),
+                ])
+            ).with_annotations(ToolAnnotations::new().read_only(false)),
             Tool::new(
                 "select_active_preset",
                 "Change the active API preset; requires MCP --allow-write. Read inspect_presets first.",
@@ -121,6 +203,94 @@ impl ServerHandler for NeuroMita {
         _: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
         let args = request.arguments.unwrap_or_default();
+        if request.name == "presenter_conversation"
+            && args.get("include_content") == Some(&Value::Bool(true))
+            && !self.allow_content
+        {
+            return Err(ErrorData::invalid_params(
+                "include_content requires --allow-content",
+                None,
+            ));
+        }
+        if request.name == "core_debug_command" {
+            if !self.core_debug {
+                return Err(ErrorData::invalid_params(
+                    "MCP was started without --core-debug",
+                    None,
+                ));
+            }
+            let method = args
+                .get("method")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ErrorData::invalid_params("missing method", None))?;
+            let mut command = args.get("params").cloned().unwrap_or_else(|| json!({}));
+            let object = command
+                .as_object_mut()
+                .ok_or_else(|| ErrorData::invalid_params("params must be an object", None))?;
+            if args.keys().any(|key| key != "method" && key != "params")
+                || object.contains_key("command")
+            {
+                return Err(ErrorData::invalid_params(
+                    "unexpected debug command fields",
+                    None,
+                ));
+            }
+            let allowed = matches!(
+                method,
+                "ping"
+                    | "methods"
+                    | "server_status"
+                    | "debug_inspect"
+                    | "game_link_inspect"
+                    | "presenter_inspect"
+                    | "settings"
+                    | "publish_message"
+                    | "reply"
+                    | "react"
+                    | "initiate"
+                    | "cancel"
+                    | "diagnostics"
+                    | "diagnostics_recent"
+                    | "diagnostics_errors"
+                    | "set_volume"
+                    | "set_active_preset"
+            );
+            if !allowed {
+                return Err(ErrorData::invalid_params("unsupported Core method", None));
+            }
+            let readonly = matches!(
+                method,
+                "ping"
+                    | "methods"
+                    | "server_status"
+                    | "debug_inspect"
+                    | "game_link_inspect"
+                    | "presenter_inspect"
+                    | "settings"
+                    | "diagnostics"
+                    | "diagnostics_recent"
+                    | "diagnostics_errors"
+            );
+            if !readonly && !self.allow_write {
+                return Err(ErrorData::invalid_params(
+                    "Core write requires --allow-write",
+                    None,
+                ));
+            }
+            object.insert("command".into(), json!(method));
+            if serde_json::to_vec(&command).map_or(true, |bytes| bytes.len() > 64 * 1024) {
+                return Err(ErrorData::invalid_params(
+                    "Core command exceeds 64 KiB",
+                    None,
+                ));
+            }
+            let result = match call_local_control(self.core, self.timeout, command).await {
+                Ok(response) if response["type"] != "error" => CallToolResult::structured(response),
+                Ok(response) => CallToolResult::structured_error(json!({"code":response["code"]})),
+                Err(error) => CallToolResult::structured_error(json!({"error":error.to_string()})),
+            };
+            return Ok(result.into());
+        }
         if request.name == "run_scenario" {
             if args.len() != 1 || !args.contains_key("steps") {
                 return Err(ErrorData::invalid_params("expected only steps", None));
@@ -130,6 +300,30 @@ impl ServerHandler for NeuroMita {
                 .and_then(Value::as_array)
                 .ok_or_else(|| ErrorData::invalid_params("steps must be an array", None))?
                 .clone();
+            if !self.allow_content
+                && steps.iter().any(|step| {
+                    step.get("command").and_then(Value::as_str) == Some("presenter_conversation")
+                        && step.get("include_content") == Some(&Value::Bool(true))
+                })
+            {
+                return Err(ErrorData::invalid_params(
+                    "scenario content requires --allow-content",
+                    None,
+                ));
+            }
+            if !self.core_debug
+                && steps.iter().any(|step| {
+                    !matches!(
+                        step.get("command").and_then(Value::as_str),
+                        Some("presenter_action" | "presenter_conversation" | "presenter_inspect")
+                    )
+                })
+            {
+                return Err(ErrorData::invalid_params(
+                    "raw Core scenarios require --core-debug",
+                    None,
+                ));
+            }
             let response =
                 match run_local_control_scenario(self.core, self.timeout, self.allow_write, steps)
                     .await
@@ -141,6 +335,30 @@ impl ServerHandler for NeuroMita {
                     }
                 };
             return Ok(response.into());
+        }
+        if matches!(
+            request.name.as_ref(),
+            "inspect_core" | "inspect_event_visibility" | "inspect_request" | "inspect_gamelink"
+        ) && !self.core_debug
+        {
+            return Err(ErrorData::invalid_params(
+                "direct Core inspection requires --core-debug",
+                None,
+            ));
+        }
+        if matches!(
+            request.name.as_ref(),
+            "presenter_chat"
+                | "presenter_audio_input"
+                | "presenter_guide"
+                | "presenter_voice"
+                | "presenter_refresh"
+        ) && !self.allow_write
+        {
+            return Err(ErrorData::invalid_params(
+                "Presenter actions require --allow-write",
+                None,
+            ));
         }
         if request.name == "select_active_preset" && !self.allow_write {
             return Err(ErrorData::invalid_params(
@@ -189,7 +407,14 @@ fn command_for_tool(name: &str, mut args: Map<String, Value>) -> Result<Value, E
             let surface = string(&mut args, "surface")?;
             if !matches!(
                 surface.as_str(),
-                "chat" | "ai_runtime" | "connections" | "speech" | "releases"
+                "chat"
+                    | "ai_runtime"
+                    | "connections"
+                    | "speech"
+                    | "releases"
+                    | "audio_input"
+                    | "voice"
+                    | "guide"
             ) {
                 return Err(ErrorData::invalid_params("unknown presenter surface", None));
             }
@@ -239,6 +464,102 @@ fn command_for_tool(name: &str, mut args: Map<String, Value>) -> Result<Value, E
                 }
             }
             command
+        }
+        "presenter_conversation" => {
+            let character = string(&mut args, "character")?;
+            let limit = args
+                .remove("limit")
+                .map(|v| v.as_u64())
+                .unwrap_or(Some(40))
+                .filter(|v| (1..=100).contains(v))
+                .ok_or_else(|| ErrorData::invalid_params("limit must be 1..100", None))?;
+            let include_content = args
+                .remove("include_content")
+                .map(|v| v.as_bool())
+                .unwrap_or(Some(false))
+                .ok_or_else(|| {
+                    ErrorData::invalid_params("include_content must be boolean", None)
+                })?;
+            json!({"command":"presenter_conversation","character":character,
+                "limit":limit,"include_content":include_content})
+        }
+        "presenter_audio_input_devices" => {
+            json!({"command":"presenter_action","action":{"action":"audio_devices"}})
+        }
+        "presenter_chat" => {
+            let action = string(&mut args, "action")?;
+            let mut payload = json!({"action":format!("chat_{action}")});
+            match action.as_str() {
+                "reply" => {
+                    payload["character"] = json!(string(&mut args, "character")?);
+                    payload["text"] = json!(string(&mut args, "text")?);
+                }
+                "react" => {
+                    payload["character"] = json!(string(&mut args, "character")?);
+                    payload["event_id"] = json!(uuid_field(&mut args, "event_id")?);
+                    payload["instruction"] = json!(args.remove("instruction").unwrap_or(json!("")));
+                }
+                "initiate" => {
+                    payload["character"] = json!(string(&mut args, "character")?);
+                    payload["instruction"] = json!(args.remove("instruction").unwrap_or(json!("")));
+                }
+                "cancel" => payload["request_id"] = json!(uuid_field(&mut args, "request_id")?),
+                _ => {
+                    return Err(ErrorData::invalid_params(
+                        "unknown presenter_chat action",
+                        None,
+                    ));
+                }
+            }
+            json!({"command":"presenter_action","action":payload})
+        }
+        "presenter_audio_input" => {
+            let action = string(&mut args, "action")?;
+            let payload = match action.as_str() {
+                "start_test" => {
+                    json!({"action":"audio_start_test","backend":string(&mut args,"backend")?,"identity":string(&mut args,"identity")?})
+                }
+                "stop_test" => json!({"action":"audio_stop_test"}),
+                _ => return Err(ErrorData::invalid_params("unknown audio action", None)),
+            };
+            json!({"command":"presenter_action","action":payload})
+        }
+        "presenter_guide" => {
+            let field = string(&mut args, "field")?;
+            let value = args
+                .remove("value")
+                .ok_or_else(|| ErrorData::invalid_params("missing value", None))?;
+            let (action, key) = match field.as_str() {
+                "level" if matches!(value.as_str(), Some("basic" | "advanced" | "full")) => {
+                    ("guide_set_level", "level")
+                }
+                "page" if value.as_u64().is_some_and(|n| n <= 255) => ("guide_set_page", "page"),
+                "completed" if value.is_boolean() => ("guide_set_completed", "completed"),
+                _ => {
+                    return Err(ErrorData::invalid_params(
+                        "invalid Guide field or value",
+                        None,
+                    ));
+                }
+            };
+            json!({"command":"presenter_action","action":{"action":action,key:value}})
+        }
+        "presenter_voice" => {
+            let volume = args
+                .remove("volume")
+                .and_then(|v| v.as_u64())
+                .filter(|n| *n <= 100)
+                .ok_or_else(|| ErrorData::invalid_params("volume must be 0..100", None))?;
+            json!({"command":"presenter_action","action":{"action":"voice_set_volume","volume":volume}})
+        }
+        "presenter_refresh" => {
+            let surface = string(&mut args, "surface")?;
+            let action = match surface.as_str() {
+                "releases" => "releases_refresh",
+                "ai_runtime" => "runtime_refresh",
+                _ => return Err(ErrorData::invalid_params("unknown refresh surface", None)),
+            };
+            json!({"command":"presenter_action","action":{"action":action}})
         }
         "inspect_presets" => json!({"command":"debug_inspect", "scope":"presets"}),
         "inspect_onboarding" => json!({"command":"debug_inspect", "scope":"onboarding"}),
@@ -297,11 +618,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let mut core = None;
     let mut allow_write = false;
+    let mut core_debug = false;
+    let mut allow_content = false;
     let mut timeout = Duration::from_secs(60);
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--core" => core = Some(args.next().ok_or("missing --core value")?.parse()?),
             "--allow-write" => allow_write = true,
+            "--core-debug" => core_debug = true,
+            "--allow-content" => allow_content = true,
             "--timeout-ms" => {
                 let value: u64 = args.next().ok_or("missing --timeout-ms value")?.parse()?;
                 if !(1..=300_000).contains(&value) {
@@ -310,7 +635,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 timeout = Duration::from_millis(value);
             }
             _ => return Err(
-                "usage: neuromita-agent-mcp --core LOOPBACK:PORT [--allow-write] [--timeout-ms N]"
+                "usage: neuromita-agent-mcp --core LOOPBACK:PORT [--allow-write] [--core-debug] [--allow-content] [--timeout-ms N]"
                     .into(),
             ),
         }
@@ -322,6 +647,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     NeuroMita {
         core,
         allow_write,
+        core_debug,
+        allow_content,
         timeout,
     }
     .serve(stdio())
@@ -387,6 +714,36 @@ mod tests {
             )
             .is_err()
         );
+        let chat = command_for_tool(
+            "presenter_chat",
+            args(json!({"action":"reply","character":"Crazy","text":"test"})),
+        )
+        .unwrap();
+        assert_eq!(chat["command"], "presenter_action");
+        assert_eq!(chat["action"]["action"], "chat_reply");
+        assert!(
+            command_for_tool(
+                "presenter_chat",
+                args(json!({"action":"cancel","request_id":"bad"}))
+            )
+            .is_err()
+        );
+        let guide = command_for_tool(
+            "presenter_guide",
+            args(json!({"field":"level","value":"advanced"})),
+        )
+        .unwrap();
+        assert_eq!(guide["action"]["action"], "guide_set_level");
+        assert!(
+            command_for_tool("presenter_guide", args(json!({"field":"page","value":999}))).is_err()
+        );
+        let conversation = command_for_tool(
+            "presenter_conversation",
+            args(json!({"character":"Crazy","limit":20})),
+        )
+        .unwrap();
+        assert_eq!(conversation["command"], "presenter_conversation");
+        assert_eq!(conversation["include_content"], false);
         let speech =
             command_for_tool("inspect_presenter", args(json!({"surface":"speech"}))).unwrap();
         assert_eq!(speech["surface"], "speech");

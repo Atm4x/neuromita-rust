@@ -372,6 +372,8 @@ async fn discovery_matches_executable_commands_and_all_control_replies_are_corre
         "ping",
         "methods",
         "server_status",
+        "presenter_action",
+        "presenter_conversation",
         "presenter_inspect",
         "game_link_inspect",
         "debug_inspect",
@@ -437,6 +439,8 @@ async fn discovery_matches_executable_commands_and_all_control_replies_are_corre
                 cmd["character"] = json!("Crazy");
             }
             "debug_inspect" => cmd["scope"] = json!("capabilities"),
+            "presenter_action" => cmd["action"] = json!({"action":"voice_set_volume","volume":42}),
+            "presenter_conversation" => cmd["character"] = json!("Crazy"),
             "presenter_inspect" => {
                 cmd["surface"] = json!("chat");
                 cmd["character"] = json!("Crazy");
@@ -2405,7 +2409,11 @@ async fn optional_http_gateway_rejects_untrusted_clients_and_probes_real_core() 
 async fn mcp_stdio_probes_the_same_running_core() {
     let fixture = Fixture::start(|_| {}).await;
     let mut process = tokio::process::Command::new(env!("CARGO_BIN_EXE_neuromita-agent-mcp"))
-        .args(["--core", &fixture.app.server().address().to_string()])
+        .args([
+            "--core",
+            &fixture.app.server().address().to_string(),
+            "--core-debug",
+        ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .kill_on_drop(true)
@@ -2474,7 +2482,7 @@ async fn mcp_stdio_probes_the_same_running_core() {
             let result = &response["result"];
             match id {
                 1 => assert_eq!(result["serverInfo"]["name"], "neuromita"),
-                2 => assert_eq!(result["tools"].as_array().unwrap().len(), 9),
+                2 => assert_eq!(result["tools"].as_array().unwrap().len(), 17),
                 3 => {
                     let frame = &result["structuredContent"];
                     assert_eq!(frame["type"], "presenter_inspect");
@@ -2669,5 +2677,129 @@ async fn presenter_ipc_projects_live_gui_presenters_without_private_payloads() {
     ])
     .await
     .unwrap();
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn mcp_presenter_controls_use_actual_gui_owners_and_snapshot_observations() {
+    let mut fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+
+    for (action, surface, key, value) in [
+        (
+            json!({"action":"voice_set_volume","volume":63}),
+            "voice",
+            "volume",
+            json!(63),
+        ),
+        (
+            json!({"action":"guide_set_level","level":"advanced"}),
+            "guide",
+            "level",
+            json!("advanced"),
+        ),
+        (
+            json!({"action":"guide_set_page","page":2}),
+            "guide",
+            "page",
+            json!(2),
+        ),
+        (
+            json!({"action":"guide_set_completed","completed":true}),
+            "guide",
+            "completed",
+            json!(true),
+        ),
+    ] {
+        let mut operation = command("presenter_action");
+        operation["action"] = action;
+        client.send(operation.clone()).await;
+        let accepted = client
+            .until(|frame| frame["command_id"] == operation["command_id"])
+            .await;
+        assert_eq!(accepted["type"], "presenter_action", "{accepted}");
+        let mut inspect = command("presenter_inspect");
+        inspect["surface"] = json!(surface);
+        client.send(inspect.clone()).await;
+        let snapshot = client
+            .until(|frame| frame["command_id"] == inspect["command_id"])
+            .await;
+        assert_eq!(snapshot["snapshot"][key], value, "{snapshot}");
+    }
+
+    let mut response = command("presenter_conversation");
+    response["character"] = json!("Crazy");
+    response["limit"] = json!(20);
+    client.send(response.clone()).await;
+    let empty = client
+        .until(|frame| frame["command_id"] == response["command_id"])
+        .await;
+    assert_eq!(empty["type"], "presenter_conversation");
+    assert_eq!(empty["snapshot"]["total_visible_messages"], 0);
+
+    let mut operation = command("presenter_action");
+    operation["action"] =
+        json!({"action":"chat_reply","character":"Crazy","text":"presenter hello"});
+    client.send(operation.clone()).await;
+    let accepted = client.accepted(uuid(&operation["command_id"])).await;
+    assert_eq!(accepted["source"], "gui_presenter");
+    let request_id = uuid(&accepted["request_id"]);
+    let generation = fixture.call().await;
+    generation.finish("actual presenter answer");
+    assert_eq!(client.terminal(request_id).await["outcome"], "success");
+
+    let mut conversation = command("presenter_conversation");
+    conversation["character"] = json!("Crazy");
+    conversation["include_content"] = json!(true);
+    client.send(conversation.clone()).await;
+    let history = client
+        .until(|frame| frame["command_id"] == conversation["command_id"])
+        .await;
+    assert_eq!(history["type"], "presenter_conversation", "{history}");
+    assert!(
+        history["snapshot"]["total_visible_messages"]
+            .as_u64()
+            .unwrap()
+            >= 2
+    );
+    assert!(
+        history["snapshot"]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["content"] == "actual presenter answer")
+    );
+    assert!(
+        history["snapshot"]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["content"] == "presenter hello")
+    );
+
+    let mut no_text = command("presenter_conversation");
+    no_text["character"] = json!("Crazy");
+    client.send(no_text.clone()).await;
+    let redacted = client
+        .until(|frame| frame["command_id"] == no_text["command_id"])
+        .await;
+    assert!(!redacted.to_string().contains("actual presenter answer"));
+    assert!(!redacted.to_string().contains("presenter hello"));
+
+    let replay = operation.clone();
+    client.send(replay.clone()).await;
+    let receipt = client.accepted(uuid(&replay["command_id"])).await;
+    assert_eq!(receipt["replayed"], true);
+    assert_eq!(receipt["request_id"], accepted["request_id"]);
+    assert!(fixture.calls.try_recv().is_err());
+
+    let mut invalid = command("presenter_action");
+    invalid["action"] =
+        json!({"action":"audio_start_test","backend":"pulse","identity":"mic","secret":"injected"});
+    client.send(invalid).await;
+    assert_eq!(
+        client.error("unknown field").await["code"],
+        "invalid_command"
+    );
     fixture.shutdown().await;
 }

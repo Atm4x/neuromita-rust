@@ -136,6 +136,7 @@ fn is_read_only(method: &str) -> bool {
             | "server_status"
             | "debug_inspect"
             | "presenter_inspect"
+            | "presenter_conversation"
             | "game_link_inspect"
             | "diagnostics"
             | "diagnostics_recent"
@@ -277,6 +278,8 @@ pub async fn run_local_control_scenario(
                 | "server_status"
                 | "debug_inspect"
                 | "presenter_inspect"
+                | "presenter_conversation"
+                | "presenter_action"
                 | "game_link_inspect"
                 | "settings"
                 | "publish_message"
@@ -317,6 +320,21 @@ pub async fn run_local_control_scenario(
                     AgentError::Protocol(format!("{marker} has no preceding source"))
                 })?;
                 object.insert(key.to_owned(), value);
+            }
+        }
+        if command.get("command").and_then(Value::as_str) == Some("presenter_action") {
+            if let Some(action) = command.get_mut("action").and_then(Value::as_object_mut) {
+                for (key, marker, selected) in [
+                    ("request_id", "$last_request_id", &last_request_id),
+                    ("event_id", "$last_event_id", &last_event_id),
+                ] {
+                    if action.get(key).and_then(Value::as_str) == Some(marker) {
+                        let value = selected.clone().ok_or_else(|| {
+                            AgentError::Protocol(format!("{marker} has no preceding source"))
+                        })?;
+                        action.insert(key.to_owned(), value);
+                    }
+                }
             }
         }
         let id = command_id(&mut command)?;

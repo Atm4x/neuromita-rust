@@ -275,3 +275,44 @@ IDs are equal; then independently requery the same EventId through
 running Core as restart evidence. It is an **application-instance identity**,
 not the OS process PID, nor proof that Unity or the GUI restarted. Neither
 memory durability nor settings durability is inferred solely from changed IDs.
+
+## MCP Presenter Control and separate Core Debug boundary
+
+The MCP adapter is for **the main acceptance agent to operate the running application**. It does not execute Unity, prove rendering, or certify an E2E scenario on its own. The primary path for ordinary acceptance is the *same* `ChatPresenter`, `ConversationPresenter`, `AudioInputPresenter`, `VoiceSettingsPresenter`, `OnboardingSettingsPresenter`, `ReleasesPresenter`, and `RuntimeStatePresenter` used by the desktop host. A cloned presenter handle shares its authoritative owner and watch state; no replacement presenter or event store is constructed.
+
+Build with Rust 1.100.0 and feature `mcp`. Connect the main agent to:
+
+```text
+neuromita-agent-mcp --core 127.0.0.1:<actual-port> --allow-write --allow-content --timeout-ms 90000
+```
+
+`--allow-write` authorizes application actions through this **MCP process**; leave it off for a read-only agent. `--allow-content` separately permits request text in `presenter_conversation`. Low-level Core access is off by default; use `--core-debug` for `core_debug_command`, `inspect_core`, `inspect_event_visibility`, `inspect_request`, `inspect_gamelink`, and Core JSONL steps in `run_scenario`. Mutating Core-debug calls also need `--allow-write`. These are *adapter-level* permissions, **not TCP server authentication**: the underlying LocalControl loopback trust boundary remains a separate security task. Use a disposable test profile when enabling writes or content export.
+
+Presenter tools added to the existing catalog:
+
+| MCP tool | Actual owner | Supported operations |
+|---|---|---|
+| `presenter_chat` | `ChatPresenter` | `reply(character,text)`, `react(character,event_id,instruction)`, `initiate(character,instruction)`, `cancel(request_id)` |
+| `presenter_conversation` | `ConversationPresenter` | Read a branch/selection-consistent visible-message page (last 1–100), `EventId`, `RequestId`, role, sequence, active preset; optional content (max 4,000 chars/message) |
+| `presenter_audio_input_devices` | `AudioInputPresenter` | List backend and device identity for a real microphone test |
+| `presenter_audio_input` | `AudioInputPresenter` | `start_test(backend,identity)`, `stop_test()`; levels/error flag via `inspect_presenter(surface=audio_input)` |
+| `presenter_guide` | `OnboardingSettingsPresenter` | `level`, `page`, `completed` via existing validated BoundProperties |
+| `presenter_voice` | `VoiceSettingsPresenter` | Set volume 0–100 |
+| `presenter_refresh` | `ReleasesPresenter` / `RuntimeStatePresenter` | Queue release refresh or refresh actual AI runtime status |
+| `core_debug_command` | Typed Core LocalControl | Explicit allowlisted raw Core commands; `--core-debug` required |
+
+Extended `inspect_presenter` with surfaces `audio_input`, `voice`, and `guide`. `presenter_conversation` returns structural metadata by default, and only exports content under `--allow-content`. Use a tool's returned `request_id` and `EventId` to correlate with the real UI, GameLink and Timeline. The `run_scenario` tool supports `presenter_action` steps (including `wait_terminal`), same-connection deduplication and nested `$last_request_id` / `$last_event_id` references; low-level Core steps require `--core-debug`.
+
+**Examples for the main agent:**
+
+```json
+{"tool":"presenter_chat","arguments":{"action":"reply","character":"Crazy","text":"Hello"}}
+{"tool":"presenter_conversation","arguments":{"character":"Crazy","limit":20,"include_content":true}}
+{"tool":"presenter_guide","arguments":{"field":"level","value":"advanced"}}
+{"tool":"presenter_audio_input_devices","arguments":{}}
+{"tool":"presenter_audio_input","arguments":{"action":"start_test","backend":"<returned-backend>","identity":"<returned-id>"}}
+{"tool":"inspect_presenter","arguments":{"surface":"audio_input"}}
+{"tool":"core_debug_command","arguments":{"method":"debug_inspect","params":{"scope":"timeline"}}}
+```
+
+Do not mark a full-stack gate PASS solely because a Presenter action returned success: verify the actual displayed UI/Unity event/device result using the main agent's independent observation. Direct Core commands intentionally **do not** simulate UI clicks. Pending wider coverage: full Preset catalog editing, detailed Character/Memory Presenter operations, model installation, real ASR capture/transcription, and UI-specific navigation/actions not yet exposed by their current presenter APIs.

@@ -31,7 +31,7 @@ pub use conversation::{
     ConversationChange, ConversationChangePreview, ConversationError, ConversationHistoryPage,
     ConversationPresenter, ConversationSnapshot, RegeneratePreview,
 };
-pub(crate) use ipc::{PresenterProbe, PresenterSurface};
+pub(crate) use ipc::{PresenterAction, PresenterActionResult, PresenterProbe, PresenterSurface};
 pub use presets::{
     PresetParameterOption, PresetView, PresetsApi, PresetsPresenter, PresetsView, ProviderOption,
 };

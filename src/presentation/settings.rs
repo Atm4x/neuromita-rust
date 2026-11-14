@@ -91,6 +91,7 @@ impl<T: Clone + PartialEq> PropertyObserver<T> {
     }
 }
 
+#[derive(Clone)]
 pub struct VoiceSettingsPresenter {
     pub volume: BoundProperty<Volume>,
     pub in_launcher: BoundProperty<bool>,
@@ -314,6 +315,7 @@ impl CharactersSettingsPresenter {
     }
 }
 
+#[derive(Clone)]
 pub struct OnboardingSettingsPresenter {
     pub guide_level: BoundProperty<GuideLevel>,
     pub guide_page: BoundProperty<u8>,
