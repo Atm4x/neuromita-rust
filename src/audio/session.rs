@@ -221,10 +221,22 @@ impl SpeechInputHandler {
 
     pub async fn run<G: VoiceGate + 'static>(
         self,
+        capture: impl AudioCapture,
+        segmenter: SpeechSegmenter<G>,
+        controls: mpsc::Receiver<SpeechControl>,
+        stop: CancellationToken,
+    ) -> Result<(), SpeechSessionError> {
+        self.run_with_drain_timeout(capture, segmenter, controls, stop, Duration::from_secs(30))
+            .await
+    }
+
+    async fn run_with_drain_timeout<G: VoiceGate + 'static>(
+        self,
         mut capture: impl AudioCapture,
         mut segmenter: SpeechSegmenter<G>,
         mut controls: mpsc::Receiver<SpeechControl>,
         stop: CancellationToken,
+        drain_timeout: Duration,
     ) -> Result<(), SpeechSessionError> {
         let stream = SpeechStream::new(stop.clone());
         let (send, mut receive) = mpsc::channel::<QueuedSegment>(2);
@@ -349,7 +361,7 @@ impl SpeechInputHandler {
         }
         let dispatch = match match worker_finished {
             Some(result) => result,
-            None => match timeout(Duration::from_secs(30), &mut worker).await {
+            None => match timeout(drain_timeout, &mut worker).await {
                 Ok(result) => result,
                 Err(_) => {
                     stop.cancel();
@@ -572,5 +584,68 @@ mod tests {
             SpeechControl::PushToTalk(true),
         )
         .await;
+    }
+
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    struct HangingAsr(Arc<AtomicBool>);
+
+    impl SpeechTranscriber for HangingAsr {
+        fn transcribe<'a>(&'a self, _: &'a [u8]) -> SpeechFuture<'a, Transcript> {
+            Box::pin(async move {
+                let _guard = DropFlag(Arc::clone(&self.0));
+                std::future::pending::<Result<Transcript, SpeechSessionError>>().await
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn stalled_asr_cannot_hold_session_shutdown_open() {
+        let released = Arc::new(AtomicBool::new(false));
+        let delivered = Arc::new(Mutex::new(Vec::new()));
+        let session = SpeechInputHandler::new(
+            Arc::new(HangingAsr(Arc::clone(&released))),
+            Arc::new(Chat(Arc::clone(&delivered))),
+            Arc::new(SilentPlayback),
+        );
+        let config = SegmentConfig {
+            mode: SpeechMode::Automatic,
+            pre_roll_frames: 0,
+            start_voice_frames: 2,
+            end_silence_frames: 3,
+            min_segment_frames: 2,
+            max_segment_frames: 25,
+        };
+        let frames = [vec![[100; FRAME_SAMPLES]; 5], vec![[0; FRAME_SAMPLES]; 4]].concat();
+        let (_controls_send, controls_receive) = mpsc::channel(2);
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            session.run_with_drain_timeout(
+                Capture(frames),
+                SpeechSegmenter::new(Gate, config).unwrap(),
+                controls_receive,
+                CancellationToken::new(),
+                Duration::from_millis(40),
+            ),
+        )
+        .await
+        .expect("dispatch deadline should terminate the session");
+        assert!(
+            matches!(result, Err(SpeechSessionError::Task(message)) if message.contains("drain exceeded"))
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !released.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("aborted ASR future should be dropped");
+        assert!(delivered.lock().unwrap().is_empty());
     }
 }
