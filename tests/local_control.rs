@@ -372,6 +372,7 @@ async fn discovery_matches_executable_commands_and_all_control_replies_are_corre
         "ping",
         "methods",
         "server_status",
+        "presenter_inspect",
         "debug_inspect",
         "publish_message",
         "reply",
@@ -434,6 +435,10 @@ async fn discovery_matches_executable_commands_and_all_control_replies_are_corre
                 cmd["character"] = json!("Crazy");
             }
             "debug_inspect" => cmd["scope"] = json!("capabilities"),
+            "presenter_inspect" => {
+                cmd["surface"] = json!("chat");
+                cmd["character"] = json!("Crazy");
+            }
             "set_volume" => cmd["value"] = json!(42),
             _ => {}
         }
