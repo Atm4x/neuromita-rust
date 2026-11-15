@@ -608,7 +608,11 @@ impl PresenterProbe {
                     SettingsArea::Asr => json!({"preferences":v.speech.asr,
                         "model":v.speech.model_for(crate::ai_runtime::AiService::Asr)}),
                     SettingsArea::Tools => {
-                        json!({"configured":true,"note":"tool credentials and arbitrary payloads withheld"})
+                        json!({"enabled":v.tools.enabled,"calculator":v.tools.calculator,
+                        "memory_search":v.tools.memory_search,"max_depth":v.tools.max_depth,
+                        "web_enabled":v.tools.web.enabled,"web_search_enabled":v.tools.web.search_enabled,
+                        "web_reader_enabled":v.tools.web.reader_enabled,
+                        "credentials_and_endpoints_withheld":true})
                     }
                     SettingsArea::Persistence => {
                         json!({"persisted_revision":snapshot.persisted_revision,

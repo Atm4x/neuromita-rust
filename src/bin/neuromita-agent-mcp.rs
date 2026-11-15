@@ -186,6 +186,19 @@ impl ServerHandler for NeuroMita {
                 "Rescan the application's authoritative AIData speech catalog and attached microphone devices. Same source as GUI RefreshSpeechInventory; read-only, no worker activation.",
                 &[],json!({}),
             ),
+            Tool::new("presenter_tool_settings",
+                "Change the application-owned ToolSettings through the GUI SettingsPresenter. Toggle enabled/calculator/memory_search/web_search/web_reader or set tool chain depth 1..5. Requires --allow-write. Inspect presenter_settings_read(area=tools) first; endpoints and credentials remain withheld.",
+                serde_json::Map::from_iter([
+                    ("type".into(),json!("object")),("additionalProperties".into(),json!(false)),
+                    ("required".into(),json!(["action"])),
+                    ("properties".into(),json!({
+                        "action":{"type":"string","enum":["set_option","set_depth"]},
+                        "option":{"type":"string","enum":["enabled","calculator","memory_search","web_search","web_reader"]},
+                        "enabled":{"type":"boolean"},
+                        "depth":{"type":"integer","minimum":1,"maximum":5}
+                    })),
+                ])
+            ).with_annotations(ToolAnnotations::new().read_only(false)),
             Tool::new("presenter_speech_session",
                 "Send push-to-talk press/release into the running SpeechSessionController. Requires an active speech capture started by the host; does NOT start a new ASR worker/session.",
                 serde_json::Map::from_iter([
@@ -354,6 +367,7 @@ impl ServerHandler for NeuroMita {
                 | "presenter_ai_hub_install"
                 | "presenter_speech_settings"
                 | "presenter_speech_session"
+                | "presenter_tool_settings"
         ) && !self.allow_write
         {
             return Err(ErrorData::invalid_params(
@@ -527,6 +541,7 @@ impl ServerHandler for NeuroMita {
                 | "presenter_presets"
                 | "presenter_speech_settings"
                 | "presenter_speech_session"
+                | "presenter_tool_settings"
         ) && !self.allow_write
         {
             return Err(ErrorData::invalid_params(
@@ -811,6 +826,48 @@ fn command_for_tool(name: &str, mut args: Map<String, Value>) -> Result<Value, E
                 .filter(|n| *n <= 100)
                 .ok_or_else(|| ErrorData::invalid_params("volume must be 0..100", None))?;
             json!({"command":"presenter_action","action":{"action":"voice_set_volume","volume":volume}})
+        }
+        "presenter_tool_settings" => {
+            let action = string(&mut args, "action")?;
+            let payload = match action.as_str() {
+                "set_option" => {
+                    let option = string(&mut args, "option")?;
+                    if !matches!(
+                        option.as_str(),
+                        "enabled" | "calculator" | "memory_search" | "web_search" | "web_reader"
+                    ) {
+                        return Err(ErrorData::invalid_params("unknown tool option", None));
+                    }
+                    let enabled = args
+                        .remove("enabled")
+                        .and_then(|v| v.as_bool())
+                        .ok_or_else(|| {
+                            ErrorData::invalid_params("enabled must be boolean", None)
+                        })?;
+                    json!({"action":"tool_set_option","option":option,"enabled":enabled})
+                }
+                "set_depth" => {
+                    let depth = args
+                        .remove("depth")
+                        .and_then(|v| v.as_u64())
+                        .filter(|v| (1..=5).contains(v))
+                        .ok_or_else(|| ErrorData::invalid_params("depth must be 1..5", None))?;
+                    json!({"action":"tool_set_depth","depth":depth})
+                }
+                _ => {
+                    return Err(ErrorData::invalid_params(
+                        "unknown tool settings action",
+                        None,
+                    ));
+                }
+            };
+            if !args.is_empty() {
+                return Err(ErrorData::invalid_params(
+                    "unexpected tool settings fields",
+                    None,
+                ));
+            }
+            json!({"command":"presenter_action","action":payload})
         }
         "presenter_speech_inventory" => {
             if !args.is_empty() {
@@ -1388,6 +1445,27 @@ mod speech_admin_tests {
         )
         .unwrap();
         assert_eq!(voice["action"]["action"], "speech_save_character_voice");
+        let tools = command_for_tool(
+            "presenter_tool_settings",
+            args(json!({"action":"set_option","option":"calculator","enabled":true})),
+        )
+        .unwrap();
+        assert_eq!(tools["action"]["action"], "tool_set_option");
+        assert_eq!(tools["action"]["option"], "calculator");
+        let depth = command_for_tool(
+            "presenter_tool_settings",
+            args(json!({"action":"set_depth","depth":4})),
+        )
+        .unwrap();
+        assert_eq!(depth["action"]["depth"], 4);
+        for invalid in [
+            json!({"action":"set_option","option":"unknown","enabled":true}),
+            json!({"action":"set_depth","depth":0}),
+            json!({"action":"set_depth","depth":6}),
+            json!({"action":"set_option","option":"calculator","enabled":true,"credential":"x"}),
+        ] {
+            assert!(command_for_tool("presenter_tool_settings", args(invalid)).is_err());
+        }
         let inventory = command_for_tool("presenter_speech_inventory", args(json!({}))).unwrap();
         assert_eq!(inventory["query"]["query"], "speech_inventory");
         let press =

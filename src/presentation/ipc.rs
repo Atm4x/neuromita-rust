@@ -17,6 +17,16 @@ use super::{
     RuntimeStatePresenter, VoiceSettingsPresenter,
 };
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PresenterToolOption {
+    Enabled,
+    Calculator,
+    MemorySearch,
+    WebSearch,
+    WebReader,
+}
+
 /// Application-level actions are dispatched to the exact presenters used by the GUI.
 /// Core-debug calls deliberately use a different command and permission boundary.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -70,6 +80,13 @@ pub(crate) enum PresenterAction {
     },
     PresetDelete {
         preset_id: u32,
+    },
+    ToolSetOption {
+        option: PresenterToolOption,
+        enabled: bool,
+    },
+    ToolSetDepth {
+        depth: u8,
     },
     SpeechPushToTalk {
         pressed: bool,
@@ -412,6 +429,39 @@ impl PresenterProbe {
                     .delete(crate::generation::PresetId(preset_id))
                     .map_err(|e| e.to_string())?;
                 json!({"action":"preset_delete","preset_id":preset_id})
+            }
+            ToolSetOption { option, enabled } => {
+                let mut state = self.settings.tools.state.get();
+                match option {
+                    PresenterToolOption::Enabled => state.enabled = enabled,
+                    PresenterToolOption::Calculator => state.calculator = enabled,
+                    PresenterToolOption::MemorySearch => state.memory_search = enabled,
+                    PresenterToolOption::WebSearch => state.web.search_enabled = enabled,
+                    PresenterToolOption::WebReader => state.web.reader_enabled = enabled,
+                }
+                state.web.enabled = state.web.search_enabled || state.web.reader_enabled;
+                state.validate().map_err(|e| e.to_string())?;
+                self.settings
+                    .tools
+                    .state
+                    .set(state)
+                    .map_err(|e| e.to_string())?;
+                json!({"action":"tool_set_option","option":option,"enabled":enabled,
+                    "settings_revision":self.settings.snapshot().map_err(|e|e.to_string())?.revision})
+            }
+            ToolSetDepth { depth } => {
+                if !(1..=5).contains(&depth) {
+                    return Err("Tool chain depth must be 1..5".into());
+                }
+                let mut state = self.settings.tools.state.get();
+                state.max_depth = depth;
+                self.settings
+                    .tools
+                    .state
+                    .set(state)
+                    .map_err(|e| e.to_string())?;
+                json!({"action":"tool_set_depth","depth":depth,
+                    "settings_revision":self.settings.snapshot().map_err(|e|e.to_string())?.revision})
             }
             SpeechPushToTalk { pressed } => {
                 self.speech_controller

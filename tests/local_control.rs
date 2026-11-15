@@ -2594,7 +2594,7 @@ async fn mcp_stdio_probes_the_same_running_core() {
             let result = &response["result"];
             match id {
                 1 => assert_eq!(result["serverInfo"]["name"], "neuromita"),
-                2 => assert_eq!(result["tools"].as_array().unwrap().len(), 36),
+                2 => assert_eq!(result["tools"].as_array().unwrap().len(), 37),
                 3 => {
                     let frame = &result["structuredContent"];
                     assert_eq!(frame["type"], "presenter_inspect");
@@ -3221,4 +3221,71 @@ async fn mcp_speech_inventory_reads_shared_ai_data_and_push_to_talk_uses_real_co
     assert_eq!(response["code"], "invalid_value");
     fixture.shutdown().await;
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn mcp_tool_options_and_depth_share_settings_presenter_without_exposing_credentials() {
+    let fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+    for action in [
+        json!({"action":"tool_set_option","option":"calculator","enabled":true}),
+        json!({"action":"tool_set_option","option":"enabled","enabled":true}),
+        json!({"action":"tool_set_depth","depth":4}),
+    ] {
+        let mut cmd = command("presenter_action");
+        cmd["action"] = action;
+        client.send(cmd.clone()).await;
+        let receipt = client.until(|r| r["command_id"] == cmd["command_id"]).await;
+        assert_eq!(receipt["type"], "presenter_action", "{receipt}");
+    }
+    let tools = fixture.app.presenter().settings.tools.state.get();
+    assert!(tools.calculator);
+    assert!(tools.enabled);
+    assert!(!tools.web.search_enabled);
+    assert!(!tools.web.enabled);
+    assert_eq!(tools.max_depth, 4);
+    let mut inspect = command("presenter_admin_read");
+    inspect["query"] = json!({"query":"settings","area":"tools"});
+    client.send(inspect.clone()).await;
+    let report = client
+        .until(|r| r["command_id"] == inspect["command_id"])
+        .await;
+    assert_eq!(report["snapshot"]["values"]["calculator"], true);
+    assert_eq!(report["snapshot"]["values"]["max_depth"], 4);
+    assert_eq!(
+        report["snapshot"]["values"]["credentials_and_endpoints_withheld"],
+        true
+    );
+    assert!(report["snapshot"]["values"].get("web").is_none());
+    let mut requires_config = command("presenter_action");
+    requires_config["action"] =
+        json!({"action":"tool_set_option","option":"web_search","enabled":true});
+    client.send(requires_config.clone()).await;
+    let rejected = client
+        .until(|r| r["command_id"] == requires_config["command_id"])
+        .await;
+    assert_eq!(rejected["code"], "invalid_value");
+    assert!(
+        !fixture
+            .app
+            .presenter()
+            .settings
+            .tools
+            .state
+            .get()
+            .web
+            .search_enabled
+    );
+    let mut invalid = command("presenter_action");
+    invalid["action"] = json!({"action":"tool_set_depth","depth":6});
+    client.send(invalid.clone()).await;
+    let rejected = client
+        .until(|r| r["command_id"] == invalid["command_id"])
+        .await;
+    assert_eq!(rejected["code"], "invalid_value");
+    assert_eq!(
+        fixture.app.presenter().settings.tools.state.get().max_depth,
+        4
+    );
+    fixture.shutdown().await;
 }
