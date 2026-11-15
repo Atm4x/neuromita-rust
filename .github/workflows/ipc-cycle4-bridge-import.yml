@@ -1,4 +1,4 @@
-name: Git Bridge MCP Cycle13B Speech Selection Import
+name: Git Bridge MCP Cycle14 Telegram Admin Import
 on:
   push:
     branches:
@@ -16,19 +16,19 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true
-      - name: Verify exact GUI selected route instrumentation
+      - name: Verify exact GUI and MCP shared Telegram session commit
         shell: bash
         run: |
           set -euo pipefail
-          BASE=da5eb860cfab238726c0b5268dd9c2d1d5ef0667
-          EXPECTED=4bf4716da15d471d6f527a42b5e34893529530ad
+          BASE=4bf4716da15d471d6f527a42b5e34893529530ad
+          EXPECTED=4c93688a3c3421e789a62cd183ebfe753ff3ded5
           git fetch origin refs/heads/bridge/ipc-cycle4-candidate-20261114:refs/remotes/origin/ipc-candidate
           test "$(git rev-parse refs/remotes/origin/ipc-candidate)" = "$BASE"
-          base64 -d .bridge/ipc-cycle4-outgoing.b64 > /tmp/cycle13b.bundle
-          echo "ded7c56a6b9b2acec8c1c0f891a0e3c2de7d2edcd49a61c7721e708ca68de65b  /tmp/cycle13b.bundle" | sha256sum -c -
-          git bundle verify /tmp/cycle13b.bundle
-          git fetch /tmp/cycle13b.bundle HEAD:refs/heads/ipc-cycle13b-imported
-          test "$(git rev-parse refs/heads/ipc-cycle13b-imported)" = "$EXPECTED"
+          base64 -d .bridge/ipc-cycle4-outgoing.b64 > /tmp/cycle14.bundle
+          echo "f3ad402f9c153cb86449f62cb52286b8b383578539ca4b78cf99ba25cd09d8de  /tmp/cycle14.bundle" | sha256sum -c -
+          git bundle verify /tmp/cycle14.bundle
+          git fetch /tmp/cycle14.bundle refs/heads/ipc-candidate:refs/heads/ipc-cycle14-imported
+          test "$(git rev-parse refs/heads/ipc-cycle14-imported)" = "$EXPECTED"
           git merge-base --is-ancestor "$BASE" "$EXPECTED"
           git diff "$BASE" "$EXPECTED" --check
-          git push origin refs/heads/ipc-cycle13b-imported:refs/heads/bridge/ipc-cycle13b-staged-20261115
+          git push origin refs/heads/ipc-cycle14-imported:refs/heads/bridge/ipc-cycle14-staged-20261115
