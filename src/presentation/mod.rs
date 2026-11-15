@@ -61,4 +61,5 @@ pub struct GuiPresenter {
     pub presets: PresetsPresenter,
     pub characters: CharactersPresenter,
     pub telegram_admin: Option<std::sync::Arc<crate::telegram_admin::TelegramAdmin>>,
+    pub remote_voice_admin: Option<std::sync::Arc<crate::remote_voice::RemoteVoiceAdmin>>,
 }

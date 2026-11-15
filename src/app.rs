@@ -1271,11 +1271,20 @@ impl ApplicationLifecycle {
             ai_hub_native.clone(),
             Arc::clone(&service_workers),
         ));
-        let voice: Arc<dyn VoiceProvider> = if let Some(path) = remote_voice_store {
+        let remote_voice_admin = remote_voice_store
+            .map(|path| {
+                crate::remote_voice::RemoteVoiceAdmin::new(crate::remote_voice::RemoteVoiceStore {
+                    path,
+                })
+                .map(Arc::new)
+                .map_err(|error| ApplicationError::Task(error.to_string()))
+            })
+            .transpose()?;
+        let voice: Arc<dyn VoiceProvider> = if let Some(admin) = &remote_voice_admin {
             Arc::new(crate::remote_voice::RemoteVoiceRouter {
                 local: voice,
                 settings: Arc::clone(&settings_owner),
-                store: crate::remote_voice::RemoteVoiceStore { path },
+                admin: Arc::clone(admin),
                 client: crate::remote_voice::FishAudioClient::new()
                     .map_err(|error| ApplicationError::Task(error.to_string()))?,
             })
@@ -1564,6 +1573,7 @@ impl ApplicationLifecycle {
                 Arc::clone(&speech_controller),
                 speech_capture.clone(),
                 telegram_admin.clone(),
+                remote_voice_admin.clone(),
             )),
         )));
         let stop = CancellationToken::new();
@@ -1590,6 +1600,7 @@ impl ApplicationLifecycle {
                 presets: presets_presenter,
                 characters: CharactersPresenter::new(bindings.characters.clone()),
                 telegram_admin,
+                remote_voice_admin,
             },
             bindings,
             timeline,
@@ -1982,6 +1993,9 @@ impl ApplicationLifecycle {
 
     fn request_stop(&self) {
         if !self.stop.is_cancelled() {
+            if let Some(remote) = self.presenter.remote_voice_admin.as_ref() {
+                remote.cancel();
+            }
             self.bindings.chat.close();
             self.bindings.settings.close();
             runtime::begin_stopping(self.id);
