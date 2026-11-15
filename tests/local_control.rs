@@ -2977,6 +2977,44 @@ async fn presenter_admin_reads_settings_memory_and_history_with_versioned_mutati
         55
     );
 
+    let mut visibility = command("presenter_admin_write");
+    visibility["change"] = json!({"change":"settings","field":"section_visibility",
+        "value":{"area":"api","visible":false}});
+    client.send(visibility.clone()).await;
+    let accepted = client
+        .until(|r| r["command_id"] == visibility["command_id"])
+        .await;
+    assert_eq!(accepted["type"], "presenter_admin_write", "{accepted}");
+    let mut interface = command("presenter_admin_read");
+    interface["query"] = json!({"query":"settings","area":"interface"});
+    client.send(interface.clone()).await;
+    let current = client
+        .until(|r| r["command_id"] == interface["command_id"])
+        .await;
+    assert_eq!(current["snapshot"]["values"]["visibility"]["api"], false);
+
+    let mut invalid_visibility = command("presenter_admin_write");
+    invalid_visibility["change"] = json!({"change":"settings","field":"section_visibility",
+        "value":{"area":"unknown","visible":true}});
+    client.send(invalid_visibility.clone()).await;
+    let rejected = client
+        .until(|r| r["command_id"] == invalid_visibility["command_id"])
+        .await;
+    assert_eq!(rejected["code"], "invalid_value", "{rejected}");
+    assert_eq!(
+        fixture
+            .app
+            .presenter()
+            .settings
+            .snapshot()
+            .unwrap()
+            .values
+            .interface
+            .visibility
+            .is_visible(neuromita::settings::SettingsArea::Api),
+        false
+    );
+
     let mut wait = command("presenter_admin_read");
     wait["query"] = json!({"query":"wait","target":"settings",
         "after_revision":read["snapshot"]["revision"],"timeout_ms":100});
@@ -3603,5 +3641,24 @@ async fn gui_equivalent_knowledge_and_admin_commands_reject_unapproved_actions()
         .await;
     assert_eq!(restricted["type"], "error");
     assert!(!restricted.to_string().contains("not/an/approved/file"));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn mcp_hardware_refresh_uses_real_hardware_presenter_without_raw_errors() {
+    let fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+    let mut refresh = command("presenter_action");
+    refresh["action"] = json!({"action":"hardware_refresh"});
+    client.send(refresh.clone()).await;
+    let outcome = client
+        .until(|r| r["command_id"] == refresh["command_id"])
+        .await;
+    assert_eq!(outcome["type"], "presenter_action", "{outcome}");
+    assert_eq!(outcome["result"]["result"]["action"], "hardware_refresh");
+    assert_eq!(outcome["result"]["result"]["source"], "hardware_presenter");
+    assert!(outcome["result"]["result"]["devices"].is_array());
+    assert!(outcome["result"]["result"]["error_count"].is_number());
+    assert!(outcome["result"]["result"].get("errors").is_none());
     fixture.shutdown().await;
 }

@@ -254,6 +254,7 @@ pub(crate) enum SettingsField {
     VoiceName,
     MemoryDedupEnabled,
     MemoryDedupThreshold,
+    SectionVisibility,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1104,6 +1105,17 @@ impl PresenterProbe {
                         s.threshold_per_mille =
                             serde_json::from_value(value).map_err(|e| e.to_string())?;
                         p.memory.state.set(s)
+                    }
+                    SettingsField::SectionVisibility => {
+                        #[derive(Deserialize)]
+                        #[serde(deny_unknown_fields)]
+                        struct VisibilityChange {
+                            area: crate::settings::SettingsArea,
+                            visible: bool,
+                        }
+                        let change: VisibilityChange =
+                            serde_json::from_value(value).map_err(|e| e.to_string())?;
+                        p.interface.set_visible(change.area, change.visible)
                     }
                 }
                 .map_err(|e| e.to_string())?;

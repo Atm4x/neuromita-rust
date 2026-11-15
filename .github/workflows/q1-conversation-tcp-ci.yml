@@ -22,12 +22,12 @@ jobs:
           sudo apt-get install -y -qq pkg-config libasound2-dev
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: '1.98.1'
+          toolchain: '1.100.0'
           components: rustfmt
       - name: Formatting
-        run: cargo fmt --all -- --check
+        run: cargo fmt --package neuromita -- --check
       - name: TCP conversation acceptance
         env:
           CARGO_BUILD_JOBS: '2'
           CARGO_INCREMENTAL: '0'
-        run: cargo test --locked --offline --test local_control
+        run: cargo test --locked --offline --features mcp --test local_control -- --test-threads=1

@@ -174,11 +174,11 @@ impl ServerHandler for NeuroMita {
                 ])
             ).with_annotations(ToolAnnotations::new().read_only(false)),
             Tool::new("presenter_refresh",
-                "Trigger refresh through ReleasesPresenter or RuntimeStatePresenter; read their snapshots separately.",
+                "Refresh releases, AI runtime or hardware using their actual application Presenter. Hardware returns current sanitized GPU inventory.",
                 serde_json::Map::from_iter([
                     ("type".into(),json!("object")),("additionalProperties".into(),json!(false)),
                     ("required".into(),json!(["surface"])),
-                    ("properties".into(),json!({"surface":{"type":"string","enum":["releases","ai_runtime"]}})),
+                    ("properties".into(),json!({"surface":{"type":"string","enum":["releases","ai_runtime","hardware"]}})),
                 ])
             ).with_annotations(ToolAnnotations::new().read_only(false)),
             inspection_tool(
@@ -324,7 +324,7 @@ impl ServerHandler for NeuroMita {
                 &["character","event_id","version"],json!({"character":{"type":"string"},"event_id":{"type":"string","format":"uuid"},"version":{"type":"object"}})),
             admin_write_tool("presenter_settings_write",
                 "Set a supported GUI settings property using its SettingsPresenter.",
-                &["field","value"],json!({"field":{"type":"string","enum":["language","font_size","hide_private","structured_display","voice_volume","voice_in_launcher","voice_in_game","voice_name","memory_dedup_enabled","memory_dedup_threshold"]},"value":{}})),
+                &["field","value"],json!({"field":{"type":"string","enum":["language","font_size","hide_private","structured_display","voice_volume","voice_in_launcher","voice_in_game","voice_name","memory_dedup_enabled","memory_dedup_threshold","section_visibility"]},"value":{}})),
             admin_write_tool("presenter_character_profile_save",
                 "Compare-and-set a complete CharacterSettings profile (prompt and operation preset assignments).",
                 &["character","expected_revision","profile"],json!({"character":{"type":"string"},"expected_revision":{"type":"integer","minimum":0},"profile":{"type":"object"}})),
@@ -1450,6 +1450,7 @@ fn command_for_tool(name: &str, mut args: Map<String, Value>) -> Result<Value, E
             let action = match surface.as_str() {
                 "releases" => "releases_refresh",
                 "ai_runtime" => "runtime_refresh",
+                "hardware" => "hardware_refresh",
                 _ => return Err(ErrorData::invalid_params("unknown refresh surface", None)),
             };
             json!({"command":"presenter_action","action":{"action":action}})
@@ -1666,6 +1667,19 @@ mod tests {
             )
             .is_err()
         );
+        let hardware =
+            command_for_tool("presenter_refresh", args(json!({"surface":"hardware"}))).unwrap();
+        assert_eq!(hardware["action"]["action"], "hardware_refresh");
+        assert!(
+            command_for_tool("presenter_refresh", args(json!({"surface":"unknown"})),).is_err()
+        );
+        let visibility = command_for_tool(
+            "presenter_settings_write",
+            args(json!({"field":"section_visibility", "value":{"area":"api","visible":false}})),
+        )
+        .unwrap();
+        assert_eq!(visibility["change"]["field"], "section_visibility");
+        assert_eq!(visibility["change"]["value"]["area"], "api");
         let guide = command_for_tool(
             "presenter_guide",
             args(json!({"field":"level","value":"advanced"})),

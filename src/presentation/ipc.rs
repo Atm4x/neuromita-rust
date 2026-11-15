@@ -58,6 +58,7 @@ pub(crate) enum PresenterAction {
     AudioStopTest {},
     ReleasesRefresh {},
     RuntimeRefresh {},
+    HardwareRefresh {},
     VoiceSetVolume {
         volume: Volume,
     },
@@ -448,6 +449,20 @@ impl PresenterProbe {
             RuntimeRefresh {} => {
                 self.runtime.refresh_status().await;
                 json!({"action":"runtime_refresh","refreshed":true})
+            }
+            HardwareRefresh {} => {
+                let inventory = tokio::task::spawn_blocking(
+                    crate::ai_runtime::system_hardware::SystemHardware::detect,
+                )
+                .await
+                .map_err(|_| "hardware detection task failed".to_string())?;
+                let view = super::hardware::HardwarePresenter::present(inventory);
+                json!({"action":"hardware_refresh","source":"hardware_presenter",
+                    "devices":view.devices.into_iter().map(|device|json!({
+                        "name":device.name,"vendor":device.vendor,"cuda":device.cuda,
+                        "capability":device.capability,"memory":device.memory
+                    })).collect::<Vec<_>>(),
+                    "error_count":view.errors.len(),"refreshed":true})
             }
             VoiceSetVolume { volume } => {
                 self.voice.volume.set(volume).map_err(|e| e.to_string())?;
