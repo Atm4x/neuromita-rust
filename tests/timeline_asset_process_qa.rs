@@ -166,7 +166,12 @@ fn q1_asset_exit_before_receipt_worker() {
     let reference = upload(&store);
     let marker = root.join("published.json");
     fs::write(&marker, serde_json::to_vec(&reference).unwrap()).unwrap();
-    fs::File::open(&marker).unwrap().sync_all().unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&marker)
+        .unwrap()
+        .sync_all()
+        .unwrap();
     std::process::exit(47);
 }
 
@@ -187,7 +192,12 @@ fn crash_after_asset_publish_before_sqlite_receipt_is_recoverable() {
         .env("NEUROMITA_Q1_ASSET_EXIT_ROOT", &temp.0)
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(47));
+    assert_eq!(
+        output.status.code(),
+        Some(47),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let reference: TimelineAssetRef =
         serde_json::from_slice(&fs::read(temp.0.join("published.json")).unwrap()).unwrap();
@@ -318,7 +328,14 @@ fn kill_during_upload_never_publishes_an_unverified_blob() {
         .map(Result::unwrap)
         .collect();
     assert_eq!(partial.len(), 1);
-    assert_eq!(partial[0].metadata().unwrap().len(), 1024);
+    assert_eq!(
+        fs::File::open(partial[0].path())
+            .unwrap()
+            .metadata()
+            .unwrap()
+            .len(),
+        1024
+    );
     worker.kill().unwrap();
     assert!(!worker.wait().unwrap().success());
 

@@ -184,6 +184,10 @@ async fn run(logging: &neuromita::diagnostics::DiagnosticBootstrap) -> Result<()
         return Ok(());
     }
     if command.as_deref() == Some(std::ffi::OsStr::new("settings")) {
+        if std::env::var_os("NEUROMITA_DATA_DIR").is_some() {
+            let root = neuromita::portable::PortableDataRoot::resolve(None)?;
+            logging.attach(&root)?;
+        }
         neuromita::diagnostics::boundary(
             neuromita::diagnostics::Boundary::CliStart,
             neuromita::diagnostics::Outcome::Started,
