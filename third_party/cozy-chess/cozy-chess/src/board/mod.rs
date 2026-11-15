@@ -501,6 +501,7 @@ impl Board {
     /// This differs from the [`Eq`] implementation in that:
     /// - It does not check the halfmove clock or fullmove number
     /// - It ignores the state of the en passant square if it does not apply (capture would not be legal)
+    ///
     /// This method can be used as a strict check for threefold repetition.
     /// # Examples
     /// ```
@@ -758,7 +759,7 @@ impl Board {
                     self.inner.set_castle_right(color, true, None);
                     self.inner.set_castle_right(color, false, None);
                 }
-                Piece::Rook => if mv.from.rank() == our_back_rank {
+                Piece::Rook if mv.from.rank() == our_back_rank => {
                     let rights = self.inner.castle_rights(color);
                     if Some(mv.from.file()) == rights.short {
                         self.inner.set_castle_right(color, true, None);

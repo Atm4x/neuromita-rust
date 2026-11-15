@@ -132,17 +132,25 @@ impl StagedArtifact {
 }
 
 #[derive(Debug, Deserialize)]
-struct GithubRelease {
-    tag_name: String,
+pub(crate) struct GithubRelease {
+    pub(crate) tag_name: String,
     #[serde(default)]
-    draft: bool,
+    pub(crate) name: Option<String>,
     #[serde(default)]
-    assets: Vec<GithubAsset>,
+    pub(crate) body: Option<String>,
+    #[serde(default)]
+    pub(crate) published_at: Option<String>,
+    #[serde(default)]
+    pub(crate) prerelease: bool,
+    #[serde(default)]
+    pub(crate) draft: bool,
+    #[serde(default)]
+    pub(crate) assets: Vec<GithubAsset>,
 }
 
 #[derive(Debug, Deserialize)]
-struct GithubAsset {
-    name: String,
+pub(crate) struct GithubAsset {
+    pub(crate) name: String,
     size: u64,
     browser_download_url: String,
     digest: Option<String>,
@@ -190,6 +198,16 @@ impl GithubUpdateCatalog {
         );
         let bytes = self.fetch_metadata(url).await?;
         self.parse_release(None, &bytes)
+    }
+
+    pub(crate) async fn releases(&self) -> Result<Vec<GithubRelease>, UpdateError> {
+        let url = format!(
+            "https://api.github.com/repos/{}/releases?per_page=100",
+            self.repository
+        );
+        let bytes = self.fetch_metadata(url).await?;
+        serde_json::from_slice(&bytes)
+            .map_err(|error| UpdateError::Metadata(format!("invalid GitHub release list: {error}")))
     }
 
     async fn fetch_metadata(&self, url: String) -> Result<Vec<u8>, UpdateError> {
@@ -414,7 +432,7 @@ impl Drop for TemporaryFile {
     }
 }
 
-fn valid_github_segment(segment: &str) -> bool {
+pub(crate) fn valid_github_segment(segment: &str) -> bool {
     !segment.is_empty()
         && segment.len() <= 120
         && segment

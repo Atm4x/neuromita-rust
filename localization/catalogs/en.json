@@ -1,4 +1,21 @@
 {
+  "chess.white": {"source":"Белые","translation":"White"},
+  "chess.black": {"source":"Чёрные","translation":"Black"},
+  "chess.new": {"source":"Новая партия","translation":"New game"},
+  "chess.close": {"source":"Завершить","translation":"End game"},
+  "chess.easy": {"source":"Легко","translation":"Easy"},
+  "chess.medium": {"source":"Средне","translation":"Medium"},
+  "chess.hard": {"source":"Сложно","translation":"Hard"},
+  "chess.player-turn": {"source":"Ваш ход","translation":"Your turn"},
+  "chess.engine-turn": {"source":"Ход Миты","translation":"Mita's turn"},
+  "chess.win": {"source":"Мат. Вы выиграли.","translation":"Checkmate. You win."},
+  "chess.loss": {"source":"Мат. Мита выиграла.","translation":"Checkmate. Mita wins."},
+  "chess.draw": {"source":"Ничья","translation":"Draw"},
+  "chess.promotion": {"source":"Превращение пешки","translation":"Pawn promotion"},
+  "launcher.actions.update-rust": {"source":"Обновить Rust","translation":"Update Rust"},
+  "launcher.install.running": {"source":"Запущена","translation":"Running"},
+  "launcher.install.installed": {"source":"Установлен","translation":"Installed"},
+  "launcher.component.installed": {"source":"Установлен v{ver}","translation":"Installed v{ver}"},
   "settings.characters.active-chat": {"source":"Активна в чате","translation":"Active in chat"},
   "settings.characters.chat-identity": {"source":"Активный собеседник","translation":"Active chat character"},
   "settings.characters.config-only": {"source":"Выбрана для настройки","translation":"Selected for configuration"},
@@ -1961,25 +1978,9 @@
     "source": "Ядро Rust",
     "translation": "Rust Core"
   },
-  "launcher.core.running": {
-    "source": "Работает",
-    "translation": "Running"
-  },
-  "launcher.core.starting": {
-    "source": "Запускается…",
-    "translation": "Starting…"
-  },
-  "launcher.core.stopped": {
-    "source": "Не запущен",
-    "translation": "Not running"
-  },
   "launcher.install.checking": {
     "source": "Проверяется…",
     "translation": "Checking…"
-  },
-  "launcher.install.detected": {
-    "source": "Установка обнаружена",
-    "translation": "Installation detected"
   },
   "launcher.install.missing": {
     "source": "Не установлен",

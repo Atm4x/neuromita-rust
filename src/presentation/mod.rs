@@ -12,6 +12,7 @@ pub use ai_install_operation::AiInstallOperationPresenter;
 mod audio_input;
 pub mod character_debug;
 mod characters;
+mod chess;
 pub use audio_input::AudioInputPresenter;
 pub use character_debug::project_character_debug;
 mod chat;
@@ -46,6 +47,7 @@ pub use characters::{
 };
 pub(crate) use chat::PresenterRunner;
 pub use chat::{ChatModel, ChatPresenter, PresenterError, RequestView};
+pub use chess::ChessAction;
 pub use connections::ConnectionsPresenter;
 pub use conversation::{
     ConversationChange, ConversationChangePreview, ConversationError, ConversationHistoryPage,

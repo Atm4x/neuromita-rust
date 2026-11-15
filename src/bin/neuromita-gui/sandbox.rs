@@ -223,6 +223,10 @@ pub fn attach(
                     pager.fail(origin, ticket);
                     pager_status(&window, &pager);
                 }
+                Command::Chess(_) => super::chess::render(
+                    &window,
+                    Err("Desktop command queue is full or closed".into()),
+                ),
                 Command::SaveCharacterProfile(character, ..)
                 | Command::RetryCharacterProfileSave(character) => {
                     let ui = window.global::<SettingsUi>();
@@ -244,6 +248,7 @@ pub fn attach(
         }
     });
     super::settings::bind(window, dispatch.clone());
+    super::chess::bind(window, dispatch.clone());
     super::ai_engine::bind(window, dispatch.clone());
     super::voice::bind(window, dispatch.clone());
     super::asr::bind(window, dispatch.clone());
@@ -782,6 +787,10 @@ fn apply_with_catalog(
             }
         }
         Update::AdminSaved => super::settings::saved(window, None),
+        Update::InterfaceLanguage(language) => {
+            window.invoke_apply_language(language.locale().as_str().into())
+        }
+        Update::Chess(result) => super::chess::render(window, result),
         Update::GuidePersisted { request_id, change } => {
             if window.get_onboarding_guide_saving()
                 && window.get_onboarding_guide_request_id() as u64 == request_id
@@ -799,10 +808,8 @@ fn apply_with_catalog(
                         super::binding::sync_guide_position(window, level, 0);
                     }
                     neuromita::onboarding::GuideChange::Language(language) => {
-                        let code = match language {
-                            neuromita::settings::Language::Russian => "ru",
-                            neuromita::settings::Language::English => "en",
-                        };
+                        let locale = language.locale();
+                        let code = locale.as_str();
                         if window.get_onboarding_language().as_str() != code {
                             super::binding::reset_guide_image_view(window);
                         }
@@ -811,7 +818,7 @@ fn apply_with_catalog(
                             neuromita::onboarding::eula_text(code).into(),
                         );
                         super::binding::update_guide(window, window.get_onboarding_guide_page());
-                        window.invoke_language_selected(code.into());
+                        window.invoke_apply_language(code.into());
                     }
                     neuromita::onboarding::GuideChange::Complete => {
                         window.set_onboarding_guide_visible(false);

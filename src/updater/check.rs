@@ -8,7 +8,7 @@ use crate::portable::PortableDataRoot;
 
 use super::{CheckedRelease, GithubUpdateCatalog, UpdateError, UpdateStager};
 
-pub const NATIVE_REPOSITORY: &str = "Atm4x/neuromita-rust";
+pub use crate::version::RELEASE_REPOSITORY as NATIVE_REPOSITORY;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NativeUpdateResult {
@@ -65,7 +65,7 @@ pub async fn download_native_update(
     stage_assessed_release(
         data_root,
         cancel,
-        env!("CARGO_PKG_VERSION"),
+        crate::version::VERSION,
         expected_asset,
         release,
     )
@@ -104,18 +104,25 @@ pub async fn check_native_update() -> Result<NativeUpdateResult, UpdateError> {
         return Ok(NativeUpdateResult::UnsupportedPlatform);
     };
     Ok(match latest_native_release().await? {
-        Some(release) => assess_native_release(env!("CARGO_PKG_VERSION"), expected_asset, &release),
+        Some(release) => assess_native_release(crate::version::VERSION, expected_asset, &release),
         None => NativeUpdateResult::NotPublished,
     })
 }
 
+const NATIVE_ASSETS: &[(&str, &str, &str)] = &[
+    ("windows", "x86_64", "neuromita-gui-windows-x86_64.exe"),
+    ("linux", "x86_64", "neuromita-gui-linux-x86_64"),
+    ("linux", "aarch64", "neuromita-gui-linux-aarch64"),
+];
+
 pub fn native_asset_name(os: &str, arch: &str) -> Option<&'static str> {
-    match (os, arch) {
-        ("windows", "x86_64") => Some("neuromita-gui-windows-x86_64.exe"),
-        ("linux", "x86_64") => Some("neuromita-gui-linux-x86_64"),
-        ("linux", "aarch64") => Some("neuromita-gui-linux-aarch64"),
-        _ => None,
-    }
+    NATIVE_ASSETS
+        .iter()
+        .find_map(|(system, cpu, asset)| (*system == os && *cpu == arch).then_some(*asset))
+}
+
+pub(crate) fn is_native_asset(name: &str) -> bool {
+    NATIVE_ASSETS.iter().any(|(_, _, asset)| *asset == name)
 }
 
 pub fn assess_native_release(

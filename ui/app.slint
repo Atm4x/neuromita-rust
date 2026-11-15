@@ -21,11 +21,13 @@ import { I18n, LocaleOption } from "i18n.slint";
 import { SandboxPage, ChatRow, ChatStatus } from "pages/sandbox.slint";
 import { ReleasesPage, ReleaseEntry } from "pages/releases.slint";
 import { AboutPage } from "pages/about.slint";
+import { ChessUi, ChessCell } from "settings/chess.slint";
 
 export { NativeRevisionRow, NativeReleaseRow, HubModel, AiEngineUi, AiHardwareDevice, VoiceUi, AsrUi, CharacterCatalog, MemoryUi, MemoryItem, ConversationUi, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, PageId, ComponentCard, ReleaseItem, ReleaseEntry, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus, GuideFocusTarget, GuideContentsEntry, WikiArticleEntry, WikiSection, WikiHomeCardEntry }
 
 export struct GuideSectionEntry { first: int, last: int, title: string }
 export { HubImplementation }
+export { ChessUi, ChessCell }
 
 export component AppWindow inherits Window {
     title: I18n.i18n("app.window.title", "Чат с NeuroMita");
@@ -111,6 +113,8 @@ export component AppWindow inherits Window {
     in property <bool> launcher-busy;
     in property <bool> launcher-inspected;
     in property <bool> unity-installed;
+    in property <string> unity-version;
+    in property <string> native-update-version;
     in property <string> notice;
     in property <string> launcher-error;
     in property <[ChatRow]> chat-messages;
@@ -190,6 +194,7 @@ export component AppWindow inherits Window {
     callback chat-dismiss-error();
     callback navigate(PageId);
     callback language-selected(string);
+    callback apply-language(string);
     callback reload-translations();
     callback social-selected(string);
     callback toggle-backend();
@@ -248,8 +253,15 @@ export component AppWindow inherits Window {
             }
             if !root.ai-hub-open && root.page == PageId.home: HomePage {
                 width: parent.width; height: parent.height;
-                backend: { title: I18n.i18n("launcher.core.title", "Ядро Rust"), value: root.core-connected ? I18n.i18n("launcher.core.running", "Работает") : root.core-connecting ? I18n.i18n("launcher.core.starting", "Запускается…") : I18n.i18n("launcher.core.stopped", "Не запущен"), update: "" };
-                client: { title: root.client.title, value: !root.launcher-inspected ? I18n.i18n("launcher.install.checking", "Проверяется…") : root.unity-installed ? I18n.i18n("launcher.install.detected", "Установка обнаружена") : I18n.i18n("launcher.install.missing", "Не установлен"), update: "" };
+                backend: { title: root.backend.title, value: root.backend.value, update: root.native-update-version };
+                client: {
+                    title: root.client.title,
+                    value: !root.launcher-inspected ? I18n.i18n("launcher.install.checking", "Проверяется…")
+                        : !root.unity-installed ? I18n.i18n("launcher.install.missing", "Не установлен")
+                        : (root.game-running || root.game-running-external ? I18n.i18n("launcher.install.running", "Запущена") : I18n.i18n("launcher.install.installed", "Установлен"))
+                         + (root.unity-version != "" ? (root.game-running || root.game-running-external ? " • v" : " v") + root.unity-version : ""),
+                    update: ""
+                };
                 releases: root.releases;
                 backend-selected: root.backend-selected; client-selected: root.client-selected; game-running: root.game-running; game-running-external: root.game-running-external; launcher-busy: root.launcher-busy;
                 toggle-backend => { root.toggle-backend(); }

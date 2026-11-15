@@ -55,9 +55,10 @@ component PlayButton inherits Rectangle {
     in property <bool> game-running;
     in property <bool> game-running-external;
     in property <bool> launcher-busy;
+    in property <bool> update-selected;
     in property <string> action-text: root.launcher-busy
         ? (root.game-running ? I18n.i18n("launcher.actions.stopping", "Останавливается…") : I18n.i18n("launcher.actions.starting", "Запускается…"))
-        : (root.game-running-external ? I18n.i18n("launcher.game.external-running", "Игра запущена отдельно") : root.game-running ? I18n.i18n("launcher.actions.stop", "Остановить") : I18n.i18n("launcher.actions.play", "Играть"));
+        : (root.game-running-external ? I18n.i18n("launcher.game.external-running", "Игра запущена отдельно") : root.game-running ? I18n.i18n("launcher.actions.stop", "Остановить") : root.update-selected ? I18n.i18n("launcher.actions.update-rust", "Обновить Rust") : I18n.i18n("launcher.actions.play", "Играть"));
     callback play();
     callback menu-action(LauncherMenuAction);
     height: 62px;
@@ -172,7 +173,7 @@ export component HomePage inherits Rectangle {
                 StatusCard { model: root.backend; icon: Icons.rust; icon-color: Theme.rust; icon-size: 34px; checked: root.backend-selected; toggled => { root.toggle-backend(); } }
                 StatusCard { model: root.client; icon: Icons.unity; icon-color: #f0f0f0; icon-size: 34px; checked: root.client-selected; toggled => { root.toggle-client(); } }
             }
-            PlayButton { game-running: root.game-running; game-running-external: root.game-running-external; launcher-busy: root.launcher-busy; play => { root.play(); } menu-action(action) => { root.menu-action(action); } }
+            PlayButton { game-running: root.game-running; game-running-external: root.game-running-external; launcher-busy: root.launcher-busy; update-selected: root.backend-selected && root.backend.update != ""; play => { root.play(); } menu-action(action) => { root.menu-action(action); } }
         }
         VerticalLayout {
             min-width: 0px; preferred-width: 0px; horizontal-stretch: 2;

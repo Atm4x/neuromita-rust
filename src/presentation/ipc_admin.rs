@@ -1398,10 +1398,14 @@ impl PresenterProbe {
             PresenterWrite::Settings { field, value } => {
                 let p = &self.settings;
                 match field {
-                    SettingsField::Language => p
-                        .interface
-                        .language
-                        .set(serde_json::from_value::<Language>(value).map_err(|e| e.to_string())?),
+                    SettingsField::Language => {
+                        p.interface
+                            .save_language(
+                                serde_json::from_value::<Language>(value)
+                                    .map_err(|e| e.to_string())?,
+                            )
+                            .await
+                    }
                     SettingsField::FontSize => p.interface.set_font_size(
                         serde_json::from_value::<u16>(value).map_err(|e| e.to_string())?,
                     ),

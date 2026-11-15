@@ -49,3 +49,4 @@ pub mod updater;
 
 pub mod releases;
 pub mod remote_voice;
+pub mod version;

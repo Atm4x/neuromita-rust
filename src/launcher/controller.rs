@@ -20,6 +20,7 @@ pub enum LauncherCommand {
 pub struct LauncherUpdate {
     pub state: OwnedProcessState,
     pub installed: bool,
+    pub installed_version: Option<String>,
     pub external_running: bool,
     pub error: Option<String>,
     pub busy: bool,
@@ -60,6 +61,7 @@ impl LauncherController {
                 let mut session = LauncherApi::session(config);
                 let mut previous = None;
                 let mut previous_installation = None;
+                let mut previous_version = None;
                 let mut previous_external = None;
                 let mut external_running = false;
                 let mut last_scan = Instant::now() - Duration::from_secs(2);
@@ -70,6 +72,7 @@ impl LauncherController {
                         publish(LauncherUpdate {
                             state: session.owned_state().unwrap_or(OwnedProcessState::Idle),
                             installed: session.service().install().is_ok(),
+                            installed_version: previous_version.clone(),
                             external_running,
                             error: None,
                             busy: true,
@@ -86,7 +89,10 @@ impl LauncherController {
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     };
                     let mut error = result.err().map(|error| error.to_string());
-                    let installed = session.service().install().is_ok();
+                    let installation = session.service().install().ok();
+                    let installed = installation.is_some();
+                    let installed_version =
+                        installation.and_then(|install| install.reported_version());
                     if !installed {
                         external_running = false;
                     } else if force_scan || last_scan.elapsed() >= Duration::from_secs(1) {
@@ -106,15 +112,18 @@ impl LauncherController {
                             if previous.as_ref() != Some(&state)
                                 || error.is_some()
                                 || previous_installation != Some(installed)
+                                || previous_version != installed_version
                                 || previous_external != Some(external_running)
                                 || force_scan
                             {
                                 previous = Some(state.clone());
                                 previous_installation = Some(installed);
+                                previous_version = installed_version.clone();
                                 previous_external = Some(external_running);
                                 publish(LauncherUpdate {
                                     state,
                                     installed,
+                                    installed_version,
                                     external_running,
                                     error,
                                     busy: false,
@@ -124,6 +133,7 @@ impl LauncherController {
                         Err(error) => publish(LauncherUpdate {
                             state: previous.clone().unwrap_or(OwnedProcessState::Idle),
                             installed,
+                            installed_version,
                             external_running,
                             error: Some(error.to_string()),
                             busy: false,
@@ -137,6 +147,7 @@ impl LauncherController {
                     publish(LauncherUpdate {
                         state: OwnedProcessState::Idle,
                         installed: session.service().install().is_ok(),
+                        installed_version: previous_version,
                         external_running: false,
                         error: Some(error.to_string()),
                         busy: false,

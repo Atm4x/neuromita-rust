@@ -83,7 +83,7 @@ pub async fn prepare_latest_native_update(
             NativeUpdateResult::NotPublished,
         ));
     };
-    let assessment = assess_native_release(env!("CARGO_PKG_VERSION"), expected_asset, &release);
+    let assessment = assess_native_release(crate::version::VERSION, expected_asset, &release);
     let NativeUpdateResult::Available { tag, asset_name } = assessment else {
         return Ok(NativeInstallOutcome::NotEligible(assessment));
     };
