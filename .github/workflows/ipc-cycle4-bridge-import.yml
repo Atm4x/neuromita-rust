@@ -1,4 +1,4 @@
-name: Git Bridge MCP Cycle14 Telegram Admin Import
+name: Git Bridge MCP Cycle14B GUI Telegram State Watch
 on:
   push:
     branches:
@@ -16,19 +16,19 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true
-      - name: Verify exact locally checked GUI and MCP Telegram commit
+      - name: Import exact locally checked GUI subscription fix
         shell: bash
         run: |
           set -euo pipefail
-          BASE=4bf4716da15d471d6f527a42b5e34893529530ad
-          EXPECTED=81d8ecbec13772a04c00ea7d74502e799cd2688c
+          BASE=81d8ecbec13772a04c00ea7d74502e799cd2688c
+          EXPECTED=fcff568e698753f3784f2516513b77c0b18ea52f
           git fetch origin refs/heads/bridge/ipc-cycle4-candidate-20261114:refs/remotes/origin/ipc-candidate
           test "$(git rev-parse refs/remotes/origin/ipc-candidate)" = "$BASE"
-          base64 -d .bridge/ipc-cycle4-outgoing.b64 > /tmp/cycle14.bundle
-          echo "9799bbcc92b4a4edf668dfce231cf178fb3006001cbf208821285c6a916e5911  /tmp/cycle14.bundle" | sha256sum -c -
-          git bundle verify /tmp/cycle14.bundle
-          git fetch /tmp/cycle14.bundle refs/heads/ipc-candidate:refs/heads/ipc-cycle14-imported
-          test "$(git rev-parse refs/heads/ipc-cycle14-imported)" = "$EXPECTED"
+          base64 -d .bridge/ipc-cycle4-outgoing.b64 > /tmp/cycle14b.bundle
+          echo "9a703e53f3403ac15bccd317272b0978456acc340ee240b83f156db573a682f2  /tmp/cycle14b.bundle" | sha256sum -c -
+          git bundle verify /tmp/cycle14b.bundle
+          git fetch /tmp/cycle14b.bundle refs/heads/ipc-candidate:refs/heads/ipc-cycle14b-imported
+          test "$(git rev-parse refs/heads/ipc-cycle14b-imported)" = "$EXPECTED"
           git merge-base --is-ancestor "$BASE" "$EXPECTED"
           git diff "$BASE" "$EXPECTED" --check
-          git push origin refs/heads/ipc-cycle14-imported:refs/heads/bridge/ipc-cycle14-staged-20261115
+          git push origin refs/heads/ipc-cycle14b-imported:refs/heads/bridge/ipc-cycle14b-staged-20261115
