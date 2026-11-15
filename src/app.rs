@@ -873,6 +873,9 @@ impl ApplicationLifecycle {
                         Arc::clone(owner),
                     )
                 });
+        let speech_model_catalog = ai_hub_install_root.as_ref().map(|root| {
+            crate::ai_runtime::speech_catalog::SpeechModelCatalog::for_desktop(root.clone())
+        });
         let ai_hub_native = ai_hub_install_root
             .zip(installation.as_ref())
             .map(|(root, owner)| {
@@ -1472,6 +1475,8 @@ impl ApplicationLifecycle {
                 CharactersPresenter::new(bindings.characters.clone()),
                 ai_hub_native.clone(),
                 ai_hub_install.clone(),
+                speech_model_catalog,
+                Arc::clone(&speech_controller),
             )),
         )));
         let stop = CancellationToken::new();

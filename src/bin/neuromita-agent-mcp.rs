@@ -181,6 +181,36 @@ impl ServerHandler for NeuroMita {
                     ("properties".into(),json!({"surface":{"type":"string","enum":["releases","ai_runtime"]}})),
                 ])
             ).with_annotations(ToolAnnotations::new().read_only(false)),
+            inspection_tool(
+                "presenter_speech_inventory",
+                "Rescan the application's authoritative AIData speech catalog and attached microphone devices. Same source as GUI RefreshSpeechInventory; read-only, no worker activation.",
+                &[],json!({}),
+            ),
+            Tool::new("presenter_speech_session",
+                "Send push-to-talk press/release into the running SpeechSessionController. Requires an active speech capture started by the host; does NOT start a new ASR worker/session.",
+                serde_json::Map::from_iter([
+                    ("type".into(),json!("object")),("additionalProperties".into(),json!(false)),
+                    ("required".into(),json!(["pressed"])),
+                    ("properties".into(),json!({"pressed":{"type":"boolean"}})),
+                ])
+            ).with_annotations(ToolAnnotations::new().read_only(false)),
+            Tool::new("presenter_speech_settings",
+                "Select TTS/ASR model, save typed TTS/ASR preferences, assign per-character voice, or select ASR recognizer through the same SettingsPresenter as GUI. Changes require --allow-write. Read current values with presenter_settings_read first; saving TTS/ASR preserves GUI-owned selection and voice fields.",
+                serde_json::Map::from_iter([
+                    ("type".into(),json!("object")),("additionalProperties".into(),json!(false)),
+                    ("required".into(),json!(["action"])),
+                    ("properties".into(),json!({
+                        "action":{"type":"string","enum":["select_model","save_tts","save_asr","select_asr_recognizer","save_character_voice"]},
+                        "service":{"type":"string","enum":["tts","asr"]},
+                        "model":{"type":["object","null"],"description":"SpeechModelReference {model_id,implementation,revision?}; null clears selection"},
+                        "preferences":{"type":"object","description":"Complete TtsPreferences or AsrPreferences from presenter_settings_read; all fields required"},
+                        "language":{"type":"string","maxLength":32},
+                        "model_id":{"type":"string","maxLength":128},
+                        "character":{"type":"string","description":"Canonical character ID; omitted for default voice"},
+                        "voice_id":{"type":"string","maxLength":512}
+                    })),
+                ])
+            ).with_annotations(ToolAnnotations::new().read_only(false)),
             Tool::new("presenter_ai_hub_install",
                 "Preview a verified Python AI Hub installation, then confirm the EXACT admitted token after the owner reports can_install=true. Uses GUI's installation coordinator; requires --allow-write.",
                 serde_json::Map::from_iter([
@@ -322,6 +352,8 @@ impl ServerHandler for NeuroMita {
                 | "presenter_retry_failed"
                 | "presenter_native"
                 | "presenter_ai_hub_install"
+                | "presenter_speech_settings"
+                | "presenter_speech_session"
         ) && !self.allow_write
         {
             return Err(ErrorData::invalid_params(
@@ -493,6 +525,8 @@ impl ServerHandler for NeuroMita {
                 | "presenter_voice"
                 | "presenter_refresh"
                 | "presenter_presets"
+                | "presenter_speech_settings"
+                | "presenter_speech_session"
         ) && !self.allow_write
         {
             return Err(ErrorData::invalid_params(
@@ -777,6 +811,97 @@ fn command_for_tool(name: &str, mut args: Map<String, Value>) -> Result<Value, E
                 .filter(|n| *n <= 100)
                 .ok_or_else(|| ErrorData::invalid_params("volume must be 0..100", None))?;
             json!({"command":"presenter_action","action":{"action":"voice_set_volume","volume":volume}})
+        }
+        "presenter_speech_inventory" => {
+            if !args.is_empty() {
+                return Err(ErrorData::invalid_params(
+                    "speech inventory takes no arguments",
+                    None,
+                ));
+            }
+            json!({"command":"presenter_admin_read","query":{"query":"speech_inventory"}})
+        }
+        "presenter_speech_session" => {
+            let pressed = args
+                .remove("pressed")
+                .and_then(|v| v.as_bool())
+                .ok_or_else(|| ErrorData::invalid_params("pressed must be boolean", None))?;
+            if !args.is_empty() {
+                return Err(ErrorData::invalid_params(
+                    "unexpected speech session fields",
+                    None,
+                ));
+            }
+            json!({"command":"presenter_action","action":{"action":"speech_push_to_talk","pressed":pressed}})
+        }
+        "presenter_speech_settings" => {
+            let action = string(&mut args, "action")?;
+            let mut payload = json!({"action":format!("speech_{action}")});
+            match action.as_str() {
+                "select_model" => {
+                    let service = string(&mut args, "service")?;
+                    if !matches!(service.as_str(), "tts" | "asr") {
+                        return Err(ErrorData::invalid_params(
+                            "service must be tts or asr",
+                            None,
+                        ));
+                    }
+                    payload["service"] = json!(service);
+                    payload["model"] = args.remove("model").ok_or_else(|| {
+                        ErrorData::invalid_params(
+                            "missing model (use null to clear selection)",
+                            None,
+                        )
+                    })?;
+                }
+                "save_tts" | "save_asr" => {
+                    let preferences = args
+                        .remove("preferences")
+                        .filter(Value::is_object)
+                        .ok_or_else(|| {
+                            ErrorData::invalid_params("preferences must be object", None)
+                        })?;
+                    payload["preferences"] = preferences;
+                    if action == "save_asr" {
+                        if let Some(language) = args.remove("language") {
+                            if !language.as_str().is_some_and(|s| s.len() <= 32) {
+                                return Err(ErrorData::invalid_params("invalid language", None));
+                            }
+                            payload["language"] = language;
+                        }
+                    }
+                }
+                "select_asr_recognizer" => {
+                    let model_id = string(&mut args, "model_id")?;
+                    if model_id.len() > 128 {
+                        return Err(ErrorData::invalid_params("model_id too long", None));
+                    }
+                    payload["model_id"] = json!(model_id);
+                }
+                "save_character_voice" => {
+                    let voice_id = string(&mut args, "voice_id")?;
+                    if voice_id.len() > 512 {
+                        return Err(ErrorData::invalid_params("voice_id too long", None));
+                    }
+                    payload["voice_id"] = json!(voice_id);
+                    if let Some(character) = args.remove("character") {
+                        payload["character"] = character;
+                    }
+                }
+                _ => {
+                    return Err(ErrorData::invalid_params(
+                        "unknown speech settings action",
+                        None,
+                    ));
+                }
+            }
+            if !args.is_empty() {
+                return Err(ErrorData::invalid_params(
+                    "unexpected speech settings fields",
+                    None,
+                ));
+            }
+            json!({"command":"presenter_action","action":payload})
         }
         "presenter_ai_hub_install" => {
             let action = string(&mut args, "action")?;
@@ -1229,5 +1354,65 @@ mod tests {
         assert!(
             command_for_tool("inspect_core", args(json!({"scope":"unsafe_history_dump"}))).is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod speech_admin_tests {
+    use super::*;
+
+    fn args(value: Value) -> Map<String, Value> {
+        value.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn speech_settings_tool_maps_typed_actions_and_rejects_unknown_fields() {
+        let asr=command_for_tool("presenter_speech_settings",args(json!({
+            "action":"select_model","service":"asr","model":{"model_id":"demo_asr","implementation":"python"}
+        }))).unwrap();
+        assert_eq!(asr["action"]["action"], "speech_select_model");
+        assert_eq!(asr["action"]["model"]["model_id"], "demo_asr");
+        let clear = command_for_tool(
+            "presenter_speech_settings",
+            args(json!({
+                "action":"select_model","service":"tts","model":null
+            })),
+        )
+        .unwrap();
+        assert!(clear["action"]["model"].is_null());
+        let voice = command_for_tool(
+            "presenter_speech_settings",
+            args(json!({
+                "action":"save_character_voice","character":"Crazy","voice_id":"kind-01"
+            })),
+        )
+        .unwrap();
+        assert_eq!(voice["action"]["action"], "speech_save_character_voice");
+        let inventory = command_for_tool("presenter_speech_inventory", args(json!({}))).unwrap();
+        assert_eq!(inventory["query"]["query"], "speech_inventory");
+        let press =
+            command_for_tool("presenter_speech_session", args(json!({"pressed":true}))).unwrap();
+        assert_eq!(press["action"]["action"], "speech_push_to_talk");
+        assert_eq!(press["action"]["pressed"], true);
+        assert!(
+            command_for_tool("presenter_speech_session", args(json!({"pressed":"yes"}))).is_err()
+        );
+        assert!(
+            command_for_tool(
+                "presenter_speech_inventory",
+                args(json!({"dump_paths":true}))
+            )
+            .is_err()
+        );
+        for invalid in [
+            json!({"action":"select_model","service":"embedding","model":null}),
+            json!({"action":"select_model","service":"tts"}),
+            json!({"action":"save_tts","preferences":"not an object"}),
+            json!({"action":"save_asr","preferences":{},"language":true}),
+            json!({"action":"select_asr_recognizer","model_id":"x","shell":"rm -rf /"}),
+            json!({"action":"unknown"}),
+        ] {
+            assert!(command_for_tool("presenter_speech_settings", args(invalid)).is_err());
+        }
     }
 }

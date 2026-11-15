@@ -2594,7 +2594,7 @@ async fn mcp_stdio_probes_the_same_running_core() {
             let result = &response["result"];
             match id {
                 1 => assert_eq!(result["serverInfo"]["name"], "neuromita"),
-                2 => assert_eq!(result["tools"].as_array().unwrap().len(), 33),
+                2 => assert_eq!(result["tools"].as_array().unwrap().len(), 36),
                 3 => {
                     let frame = &result["structuredContent"];
                     assert_eq!(frame["type"], "presenter_inspect");
@@ -3056,4 +3056,169 @@ async fn presenter_admin_reads_settings_memory_and_history_with_versioned_mutati
             .contains("stale conversation")
     );
     fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn presenter_speech_settings_share_gui_owner_and_preserve_selection_fields() {
+    let fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+    let command_action = |action: Value| {
+        let mut operation = command("presenter_action");
+        operation["action"] = action;
+        operation
+    };
+
+    let voice =
+        command_action(json!({"action":"speech_save_character_voice", "voice_id":"voice-default"}));
+    client.send(voice.clone()).await;
+    let receipt = client
+        .until(|r| r["command_id"] == voice["command_id"])
+        .await;
+    assert_eq!(receipt["type"], "presenter_action", "{receipt}");
+    assert_eq!(
+        fixture
+            .app
+            .presenter()
+            .settings
+            .tts
+            .preferences
+            .get()
+            .default_voice_id,
+        "voice-default"
+    );
+
+    let tts = fixture.app.presenter().settings.tts.preferences.get();
+    let mut values = serde_json::to_value(tts).unwrap();
+    values["enabled"] = json!(true);
+    values["local_lazy_init"] = json!(false);
+    values["default_voice_id"] = json!("try-to-overwrite");
+    let save = command_action(json!({"action":"speech_save_tts","preferences":values}));
+    client.send(save.clone()).await;
+    let receipt = client
+        .until(|r| r["command_id"] == save["command_id"])
+        .await;
+    assert_eq!(receipt["type"], "presenter_action", "{receipt}");
+    assert_eq!(
+        fixture
+            .app
+            .presenter()
+            .settings
+            .tts
+            .preferences
+            .get()
+            .default_voice_id,
+        "voice-default"
+    );
+    assert!(
+        fixture
+            .app
+            .presenter()
+            .settings
+            .tts
+            .preferences
+            .get()
+            .enabled
+    );
+
+    let choose = command_action(json!({"action":"speech_select_model","service":"asr",
+        "model":{"model_id":"demo_asr","implementation":"python"}}));
+    client.send(choose.clone()).await;
+    let receipt = client
+        .until(|r| r["command_id"] == choose["command_id"])
+        .await;
+    assert_eq!(receipt["type"], "presenter_action", "{receipt}");
+    assert_eq!(
+        fixture
+            .app
+            .presenter()
+            .settings
+            .asr
+            .preferences
+            .get()
+            .recognizer_id,
+        "demo_asr"
+    );
+
+    let mut asr =
+        serde_json::to_value(fixture.app.presenter().settings.asr.preferences.get()).unwrap();
+    asr["input_mode"] = json!("push_to_talk");
+    asr["recognizer_id"] = json!("try-to-overwrite");
+    let save =
+        command_action(json!({"action":"speech_save_asr","preferences":asr,"language":"ru"}));
+    client.send(save.clone()).await;
+    let receipt = client
+        .until(|r| r["command_id"] == save["command_id"])
+        .await;
+    assert_eq!(receipt["type"], "presenter_action", "{receipt}");
+    let asr = fixture.app.presenter().settings.asr.preferences.get();
+    assert_eq!(asr.recognizer_id, "demo_asr");
+    assert_eq!(asr.input_mode, "push_to_talk");
+    assert_eq!(
+        asr.model_languages.get("demo_asr").map(String::as_str),
+        Some("ru")
+    );
+
+    let choose = command_action(
+        json!({"action":"speech_select_asr_recognizer","model_id":"new_recognizer"}),
+    );
+    client.send(choose.clone()).await;
+    let receipt = client
+        .until(|r| r["command_id"] == choose["command_id"])
+        .await;
+    assert_eq!(receipt["type"], "presenter_action", "{receipt}");
+    assert_eq!(
+        fixture
+            .app
+            .presenter()
+            .settings
+            .asr
+            .preferences
+            .get()
+            .recognizer_id,
+        "new_recognizer"
+    );
+
+    let invalid =
+        command_action(json!({"action":"speech_select_model","service":"embedding","model":null}));
+    client.send(invalid.clone()).await;
+    let receipt = client
+        .until(|r| r["command_id"] == invalid["command_id"])
+        .await;
+    assert_eq!(receipt["type"], "error", "{receipt}");
+    assert_eq!(receipt["code"], "invalid_value");
+    assert!(!receipt.to_string().contains("voice-default"));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn mcp_speech_inventory_reads_shared_ai_data_and_push_to_talk_uses_real_controller() {
+    let root = std::env::temp_dir().join(format!("nm-ipc-speech-{}", Uuid::new_v4()));
+    let fixture = Fixture::with_ai_hub(root.clone()).await;
+    let mut client = fixture.connect().await;
+    let mut inventory = command("presenter_admin_read");
+    inventory["query"] = json!({"query":"speech_inventory"});
+    client.send(inventory.clone()).await;
+    let response = client
+        .until(|r| r["command_id"] == inventory["command_id"])
+        .await;
+    assert_eq!(response["type"], "presenter_admin_read", "{response}");
+    assert_eq!(response["snapshot"]["source"], "speech_model_catalog");
+    assert!(response["snapshot"]["tts"].is_array());
+    assert!(response["snapshot"]["asr"].is_array());
+    assert_eq!(response["snapshot"]["model_activation_attempted"], false);
+    assert!(
+        !response
+            .to_string()
+            .contains(root.to_string_lossy().as_ref())
+    );
+    let mut press = command("presenter_action");
+    press["action"] = json!({"action":"speech_push_to_talk","pressed":true});
+    client.send(press.clone()).await;
+    let response = client
+        .until(|r| r["command_id"] == press["command_id"])
+        .await;
+    assert_eq!(response["type"], "error", "{response}");
+    assert_eq!(response["code"], "invalid_value");
+    fixture.shutdown().await;
+    let _ = std::fs::remove_dir_all(root);
 }

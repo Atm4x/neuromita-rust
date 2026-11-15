@@ -20,6 +20,7 @@ use crate::{
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "query", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum PresenterRead {
+    SpeechInventory {},
     NativeModels {
         #[serde(default)]
         refresh: bool,
@@ -304,6 +305,43 @@ fn messages_json(
 impl PresenterProbe {
     pub(crate) async fn admin_read(&self, query: PresenterRead) -> Result<Value, String> {
         match query {
+            PresenterRead::SpeechInventory {} => {
+                let catalog = self
+                    .speech_catalog
+                    .as_ref()
+                    .ok_or("speech inventory is unavailable without an owned data root")?;
+                let inventory = catalog.snapshot().await;
+                let options = |records: Vec<
+                    crate::ai_runtime::speech_catalog::SpeechModelOption,
+                >| {
+                    records.into_iter().take(128).map(|m|json!({
+                        "model_id":m.id,"name":m.name,"package_detected":m.package_detected,
+                        "verified_assets":m.verified_assets,
+                        "installed_revisions":m.installed_revisions.into_iter().take(64).collect::<Vec<_>>()
+                    })).collect::<Vec<_>>()
+                };
+                let (devices, device_error) = match self.audio_input.devices().await {
+                    Ok(devices) => (
+                        devices
+                            .into_iter()
+                            .take(64)
+                            .map(|d| {
+                                json!({
+                                    "id":d.id,"name":d.name,"backend":d.backend
+                                })
+                            })
+                            .collect::<Vec<_>>(),
+                        false,
+                    ),
+                    Err(_) => (Vec::new(), true),
+                };
+                Ok(
+                    json!({"source":"speech_model_catalog","tts":options(inventory.tts),
+                    "asr":options(inventory.asr),"discovery_error_count":inventory.errors.len(),
+                    "devices":devices,"device_discovery_failed":device_error,
+                    "model_activation_attempted":false,"evidence_level":"presenter_catalog_snapshot"}),
+                )
+            }
             PresenterRead::NativeModels { refresh } => {
                 let native = self
                     .native

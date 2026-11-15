@@ -9,7 +9,7 @@ use crate::{
     character::CharacterId,
     request::{RequestHandle, RequestId, RequestState},
     server::ServerHandle,
-    settings::{GuideLevel, Volume},
+    settings::{AsrPreferences, GuideLevel, SpeechModelReference, TtsPreferences, Volume},
 };
 
 use super::{
@@ -70,6 +70,28 @@ pub(crate) enum PresenterAction {
     },
     PresetDelete {
         preset_id: u32,
+    },
+    SpeechPushToTalk {
+        pressed: bool,
+    },
+    SpeechSelectModel {
+        service: AiService,
+        model: Option<SpeechModelReference>,
+    },
+    SpeechSaveTts {
+        preferences: TtsPreferences,
+    },
+    SpeechSaveAsr {
+        preferences: AsrPreferences,
+        #[serde(default)]
+        language: Option<String>,
+    },
+    SpeechSelectAsrRecognizer {
+        model_id: String,
+    },
+    SpeechSaveCharacterVoice {
+        character: Option<CharacterId>,
+        voice_id: String,
     },
     NativeRefresh {},
     NativeSelect {
@@ -157,7 +179,7 @@ pub(crate) struct PresenterProbe {
     runtime: RuntimeStatePresenter,
     speech: super::SpeechSessionPresenter,
     releases: ReleasesPresenter,
-    audio_input: AudioInputPresenter,
+    pub(super) audio_input: AudioInputPresenter,
     voice: VoiceSettingsPresenter,
     guide: OnboardingSettingsPresenter,
     pub(super) conversation: super::ConversationPresenter,
@@ -167,6 +189,9 @@ pub(crate) struct PresenterProbe {
     pub(super) characters: super::CharactersPresenter,
     pub(super) native:
         Option<std::sync::Arc<crate::ai_runtime::native_service::AiHubNativeService>>,
+    pub(super) speech_catalog: Option<crate::ai_runtime::speech_catalog::SpeechModelCatalog>,
+    speech_controller:
+        std::sync::Arc<tokio::sync::Mutex<crate::audio::controller::SpeechSessionController>>,
     pub(super) ai_hub_install:
         Option<std::sync::Arc<crate::ai_runtime::install_coordinator::AiHubInstallCoordinator>>,
 }
@@ -189,6 +214,10 @@ impl PresenterProbe {
         ai_hub_install: Option<
             std::sync::Arc<crate::ai_runtime::install_coordinator::AiHubInstallCoordinator>,
         >,
+        speech_catalog: Option<crate::ai_runtime::speech_catalog::SpeechModelCatalog>,
+        speech_controller: std::sync::Arc<
+            tokio::sync::Mutex<crate::audio::controller::SpeechSessionController>,
+        >,
     ) -> Self {
         Self {
             chat,
@@ -204,6 +233,8 @@ impl PresenterProbe {
             settings,
             characters,
             native,
+            speech_catalog,
+            speech_controller,
             ai_hub_install,
         }
     }
@@ -381,6 +412,94 @@ impl PresenterProbe {
                     .delete(crate::generation::PresetId(preset_id))
                     .map_err(|e| e.to_string())?;
                 json!({"action":"preset_delete","preset_id":preset_id})
+            }
+            SpeechPushToTalk { pressed } => {
+                self.speech_controller
+                    .lock()
+                    .await
+                    .press(pressed)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                json!({"action":"speech_push_to_talk","pressed":pressed,
+                    "phase":format!("{:?}",self.speech.snapshot().phase)})
+            }
+            SpeechSelectModel { service, model } => {
+                match service {
+                    AiService::Tts => self.settings.tts.model.set(model.clone()),
+                    AiService::Asr => self.settings.asr.model.set(model.clone()),
+                    _ => return Err("speech model service must be tts or asr".into()),
+                }
+                .map_err(|e| e.to_string())?;
+                json!({"action":"speech_select_model","service":service,
+                    "model":model,"settings_revision":self.settings.snapshot().map_err(|e|e.to_string())?.revision})
+            }
+            SpeechSaveTts { mut preferences } => {
+                let current = self.settings.tts.preferences.get();
+                preferences.character_voice_ids = current.character_voice_ids;
+                preferences.default_voice_id = current.default_voice_id;
+                self.settings
+                    .tts
+                    .save_python_preferences(preferences)
+                    .map_err(|e| e.to_string())?;
+                json!({"action":"speech_save_tts","settings_revision":self.settings.snapshot().map_err(|e|e.to_string())?.revision})
+            }
+            SpeechSaveAsr {
+                mut preferences,
+                language,
+            } => {
+                if language.as_ref().is_some_and(|value| value.len() > 32) {
+                    return Err("invalid ASR model language".into());
+                }
+                let current = self.settings.asr.preferences.get();
+                preferences.recognizer_id = current.recognizer_id;
+                preferences.model_languages = current.model_languages;
+                if let Some(language) = language
+                    && !preferences.recognizer_id.is_empty()
+                {
+                    preferences
+                        .model_languages
+                        .insert(preferences.recognizer_id.clone(), language);
+                }
+                self.settings
+                    .asr
+                    .preferences
+                    .set(preferences)
+                    .map_err(|e| e.to_string())?;
+                json!({"action":"speech_save_asr","settings_revision":self.settings.snapshot().map_err(|e|e.to_string())?.revision})
+            }
+            SpeechSelectAsrRecognizer { model_id } => {
+                if model_id.len() > 128 {
+                    return Err("invalid ASR recognizer ID".into());
+                }
+                let model = (!model_id.is_empty()).then(|| SpeechModelReference::python(model_id));
+                self.settings
+                    .asr
+                    .model
+                    .set(model.clone())
+                    .map_err(|e| e.to_string())?;
+                json!({"action":"speech_select_asr_recognizer","model":model,
+                    "settings_revision":self.settings.snapshot().map_err(|e|e.to_string())?.revision})
+            }
+            SpeechSaveCharacterVoice {
+                character,
+                voice_id,
+            } => {
+                if voice_id.len() > 512 {
+                    return Err("invalid voice ID".into());
+                }
+                let mut preferences = self.settings.tts.preferences.get();
+                if let Some(character) = character {
+                    preferences.character_voice_ids.insert(character, voice_id);
+                } else {
+                    preferences.default_voice_id = voice_id;
+                }
+                self.settings
+                    .tts
+                    .preferences
+                    .set(preferences)
+                    .map_err(|e| e.to_string())?;
+                json!({"action":"speech_save_character_voice", "character":character,
+                    "settings_revision":self.settings.snapshot().map_err(|e|e.to_string())?.revision})
             }
             NativeRefresh {} => {
                 let native = self
