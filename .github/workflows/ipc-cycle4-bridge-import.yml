@@ -1,4 +1,4 @@
-name: Git Bridge MCP Cycle12B Tool Settings Import
+name: Git Bridge MCP Cycle13 Speech Capture Import
 on:
   push:
     branches:
@@ -16,19 +16,19 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true
-      - name: Verify local source bundle and stage incremental commit
+      - name: Verify exact locally tested speech GUI/MCP delta
         shell: bash
         run: |
           set -euo pipefail
-          BASE=a15d41620dfb5dad2895cfb3fcf6ee8e1fb90dd0
-          EXPECTED=d6040a65992bdad17daa7f460addedc148707364
+          BASE=d6040a65992bdad17daa7f460addedc148707364
+          EXPECTED=da5eb860cfab238726c0b5268dd9c2d1d5ef0667
           git fetch origin refs/heads/bridge/ipc-cycle4-candidate-20261114:refs/remotes/origin/ipc-candidate
           test "$(git rev-parse refs/remotes/origin/ipc-candidate)" = "$BASE"
-          base64 -d .bridge/ipc-cycle4-outgoing.b64 > /tmp/cycle12b.bundle
-          echo "4f63b2eee4be08012d0ff632529aaef3be452ee6f8ae09f716f2f8411636bb7b  /tmp/cycle12b.bundle" | sha256sum -c -
-          git bundle verify /tmp/cycle12b.bundle
-          git fetch /tmp/cycle12b.bundle refs/heads/ipc-candidate:refs/heads/ipc-cycle12b-imported
-          test "$(git rev-parse refs/heads/ipc-cycle12b-imported)" = "$EXPECTED"
+          base64 -d .bridge/ipc-cycle4-outgoing.b64 > /tmp/cycle13.bundle
+          echo "28113c827dc98cab408d810a0be444909fd9a8a73482e8a8a9ce025b17545826  /tmp/cycle13.bundle" | sha256sum -c -
+          git bundle verify /tmp/cycle13.bundle
+          git fetch /tmp/cycle13.bundle HEAD:refs/heads/ipc-cycle13-imported
+          test "$(git rev-parse refs/heads/ipc-cycle13-imported)" = "$EXPECTED"
           git merge-base --is-ancestor "$BASE" "$EXPECTED"
           git diff "$BASE" "$EXPECTED" --check
-          git push origin refs/heads/ipc-cycle12b-imported:refs/heads/bridge/ipc-cycle12b-staged-20261115
+          git push origin refs/heads/ipc-cycle13-imported:refs/heads/bridge/ipc-cycle13-staged-20261115
