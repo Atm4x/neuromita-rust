@@ -707,6 +707,8 @@ async fn observe(
         mpsc::unbounded_channel::<(u64, Result<(), String>)>();
     let mut preview_cancel: Option<CancellationToken> = None;
     let mut preview_generation = 0_u64;
+    let mut telegram_updates = telegram_admin.observe();
+    let mut telegram_watch_closed = false;
     let mut releases = administration.releases.observe();
     let presenter = &administration.conversation;
     let mut connections = administration.connections.observe();
@@ -819,6 +821,17 @@ async fn observe(
             _ = stop.cancelled() => {
                 telegram_admin.disconnect().await;
                 return Ok(());
+            },
+            changed = telegram_updates.changed(), if !telegram_watch_closed => {
+                if changed.is_ok() {
+                    let status = telegram_updates.borrow_and_update().clone();
+                    publish(Update::TelegramAuth {
+                        phase: i32::from(status.phase),
+                        status: format!("Telegram: {}", status.status),
+                    });
+                } else {
+                    telegram_watch_closed = true;
+                }
             },
             command = receive.recv() => match command {
                 Some(command @ Command::SaveCharacterProfile(character, ..)) |
