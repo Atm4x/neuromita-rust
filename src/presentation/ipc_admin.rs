@@ -21,6 +21,11 @@ use crate::{
 #[serde(tag = "query", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum PresenterRead {
     SpeechInventory {},
+    ChatDiagnostics {
+        character: CharacterId,
+        #[serde(default = "default_limit")]
+        limit: usize,
+    },
     MemoryRecall {
         character: CharacterId,
         memory_id: MemoryId,
@@ -400,6 +405,32 @@ impl PresenterProbe {
 
     pub(crate) async fn admin_read(&self, query: PresenterRead) -> Result<Value, String> {
         match query {
+            PresenterRead::ChatDiagnostics { character, limit } => {
+                if !(1..=100).contains(&limit) {
+                    return Err("diagnostics limit must be 1..100".into());
+                }
+                let snapshot = self.chat.snapshot();
+                let observed = snapshot
+                    .requests
+                    .iter()
+                    .filter(|request| request.metadata.character_id == character)
+                    .collect::<Vec<_>>();
+                let requests = observed
+                    .iter()
+                    .rev()
+                    .take(limit)
+                    .map(|request| super::ipc::request_status_json(request))
+                    .collect::<Vec<_>>();
+                Ok(
+                    json!({"source":"chat_presenter_snapshot","character":character,
+                    "revision":snapshot.revision,"closed":snapshot.closed,
+                    "discovery_error_present":snapshot.discovery_error.is_some(),
+                    "total_observed":observed.len(),"returned":requests.len(),
+                    "requests":requests,"content_included":false,
+                    "note":"bounded Presenter retention only; request errors and content are withheld",
+                    "evidence_level":"presenter_snapshot"}),
+                )
+            }
             PresenterRead::PromptFolder { character } => {
                 let path = self.prompt_folder.locate(character)?;
                 Ok(

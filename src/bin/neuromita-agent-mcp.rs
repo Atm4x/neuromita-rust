@@ -88,6 +88,15 @@ impl ServerHandler for NeuroMita {
                 json!({"request_id": {"type":"string", "format":"uuid"}}),
             ),
             inspection_tool(
+                "presenter_chat_diagnostics",
+                "Read bounded per-character ChatPresenter request statuses, stages and outcome codes. No messages, prompts, provider errors or raw trace. This is not a full diagnostic export.",
+                &["character"],
+                json!({
+                    "character":{"type":"string"},
+                    "limit":{"type":"integer","minimum":1,"maximum":100}
+                }),
+            ),
+            inspection_tool(
                 "presenter_conversation",
                 "Read a bounded selection-consistent ConversationPresenter snapshot by character. Message IDs, roles, sequence, active preset; --allow-content additionally enables actual text.",
                 &["character"], json!({
@@ -855,6 +864,15 @@ fn command_for_tool(name: &str, mut args: Map<String, Value>) -> Result<Value, E
                 }
             }
             json!({"command":"presenter_admin_read","query":query})
+        }
+        "presenter_chat_diagnostics" => {
+            let character = string(&mut args, "character")?;
+            let limit = args.remove("limit").unwrap_or(json!(40));
+            if !limit.as_u64().is_some_and(|n| (1..=100).contains(&n)) {
+                return Err(ErrorData::invalid_params("limit must be 1..100", None));
+            }
+            json!({"command":"presenter_admin_read","query":{
+                "query":"chat_diagnostics","character":character,"limit":limit}})
         }
         "presenter_conversation_preview" => {
             let character = string(&mut args, "character")?;
@@ -1776,6 +1794,22 @@ mod tests {
             )
             .is_err()
         );
+        let diagnostics = command_for_tool(
+            "presenter_chat_diagnostics",
+            args(json!({"character":"Crazy","limit":3})),
+        )
+        .unwrap();
+        assert_eq!(diagnostics["command"], "presenter_admin_read");
+        assert_eq!(diagnostics["query"]["query"], "chat_diagnostics");
+        assert_eq!(diagnostics["query"]["limit"], 3);
+        for invalid in [
+            json!({"character":"Crazy","limit":0}),
+            json!({"character":"Crazy","limit":101}),
+            json!({"character":"Crazy","limit":"3"}),
+            json!({"character":"Crazy","include_content":true}),
+        ] {
+            assert!(command_for_tool("presenter_chat_diagnostics", args(invalid)).is_err());
+        }
         let chat = command_for_tool(
             "presenter_chat",
             args(json!({"action":"reply","character":"Crazy","text":"test"})),

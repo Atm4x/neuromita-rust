@@ -3953,3 +3953,66 @@ async fn presenter_settings_retry_recovers_real_failed_persistence_via_shared_ow
     assert_eq!(repository.failures.load(Ordering::SeqCst), 1);
     fixture.shutdown().await;
 }
+
+#[tokio::test]
+async fn presenter_chat_diagnostics_are_character_scoped_bounded_and_content_free() {
+    let mut fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+    let mut empty = command("presenter_admin_read");
+    empty["query"] = json!({"query":"chat_diagnostics","character":"Crazy","limit":1});
+    client.send(empty.clone()).await;
+    let no_requests = client
+        .until(|r| r["command_id"] == empty["command_id"])
+        .await;
+    assert_eq!(no_requests["type"], "presenter_admin_read", "{no_requests}");
+    assert_eq!(no_requests["snapshot"]["total_observed"], 0);
+    assert_eq!(no_requests["snapshot"]["returned"], 0);
+    let mut send = command("presenter_action");
+    send["action"] = json!({"action":"chat_reply","character":"Crazy",
+        "text":"PRIVATE_DIAGNOSTICS_INPUT_NEVER_LEAK"});
+    client.send(send.clone()).await;
+    let accepted = client.accepted(uuid(&send["command_id"])).await;
+    let request_id = uuid(&accepted["request_id"]);
+    fixture
+        .call()
+        .await
+        .finish("PRIVATE_DIAGNOSTICS_ANSWER_NEVER_LEAK");
+    assert_eq!(client.terminal(request_id).await["outcome"], "success");
+    let mut inspect = command("presenter_admin_read");
+    inspect["query"] = json!({"query":"chat_diagnostics","character":"Crazy","limit":1});
+    client.send(inspect.clone()).await;
+    let reply = client
+        .until(|r| r["command_id"] == inspect["command_id"])
+        .await;
+    assert_eq!(reply["type"], "presenter_admin_read", "{reply}");
+    assert_eq!(reply["snapshot"]["source"], "chat_presenter_snapshot");
+    assert_eq!(reply["snapshot"]["returned"], 1);
+    assert_eq!(
+        reply["snapshot"]["requests"][0]["request_id"],
+        json!(request_id)
+    );
+    assert_eq!(reply["snapshot"]["requests"][0]["outcome"], "success");
+    assert_eq!(reply["snapshot"]["content_included"], false);
+    let serial = reply.to_string();
+    assert!(!serial.contains("PRIVATE_DIAGNOSTICS_INPUT_NEVER_LEAK"));
+    assert!(!serial.contains("PRIVATE_DIAGNOSTICS_ANSWER_NEVER_LEAK"));
+    assert!(!serial.contains("unused-fixture-key"));
+    inspect["command_id"] = json!(Uuid::new_v4());
+    inspect["query"]["character"] = json!("Kind");
+    client.send(inspect.clone()).await;
+    let isolated = client
+        .until(|r| r["command_id"] == inspect["command_id"])
+        .await;
+    assert_eq!(isolated["type"], "presenter_admin_read", "{isolated}");
+    assert_eq!(isolated["snapshot"]["returned"], 0);
+    assert!(!isolated.to_string().contains(&request_id.to_string()));
+    inspect["command_id"] = json!(Uuid::new_v4());
+    inspect["query"]["character"] = json!("Crazy");
+    inspect["query"]["limit"] = json!(101);
+    client.send(inspect.clone()).await;
+    let invalid = client
+        .until(|r| r["command_id"] == inspect["command_id"])
+        .await;
+    assert_eq!(invalid["type"], "error", "{invalid}");
+    fixture.shutdown().await;
+}

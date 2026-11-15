@@ -274,6 +274,45 @@ pub(crate) struct PresenterProbe {
     pub(super) remote_voice_admin: Option<std::sync::Arc<crate::remote_voice::RemoteVoiceAdmin>>,
 }
 
+pub(super) fn request_status_json(row: &super::RequestView) -> Value {
+    use crate::request::{ProcessingStage, RequestOutcome};
+    let (state, stage, outcome, event_id) = match &row.snapshot.state {
+        RequestState::Pending => ("pending", None, None, None),
+        RequestState::Processing(stage) => {
+            let stage = match stage {
+                ProcessingStage::GeneratingText => "generating_text",
+                ProcessingStage::TextReady { .. } => "text_ready",
+                ProcessingStage::GeneratingVoice { .. } => "generating_voice",
+                ProcessingStage::Accepting { .. } => "accepting",
+            };
+            ("processing", Some(stage), None, None)
+        }
+        RequestState::Cancelled => ("cancelled", None, None, None),
+        RequestState::Finished(result) => {
+            let (outcome, event_id) = match result {
+                RequestOutcome::Success(response) => ("success", Some(response.event_id)),
+                RequestOutcome::VoiceGenerationFailed { response, .. } => {
+                    ("voice_error", Some(response.event_id))
+                }
+                RequestOutcome::TextGenerationFailed(_) => ("text_error", None),
+                RequestOutcome::InternalError(_) => ("internal_error", None),
+            };
+            ("finished", None, Some(outcome), event_id)
+        }
+    };
+    json!({
+        "request_id": row.metadata.id.0,
+        "character": row.metadata.character_id,
+        "revision": row.snapshot.revision,
+        "state": state,
+        "stage": stage,
+        "outcome": outcome,
+        "event_id": event_id,
+        "terminal": row.snapshot.state.is_terminal(),
+        "observation_error_present": row.observation_error.is_some(),
+    })
+}
+
 impl PresenterProbe {
     pub(crate) fn new(
         chat: ChatPresenter,
@@ -1120,49 +1159,12 @@ impl PresenterProbe {
     }
 
     pub(crate) fn request_inspect(&self, request_id: uuid::Uuid) -> Value {
-        use crate::request::{ProcessingStage, RequestOutcome};
         let model = self.chat.snapshot();
         let row = model
             .requests
             .iter()
             .find(|row| row.metadata.id.0 == request_id);
-        let request = row.map(|row| {
-            let (state, stage, outcome, event_id) = match &row.snapshot.state {
-                RequestState::Pending => ("pending", None, None, None),
-                RequestState::Processing(stage) => {
-                    let stage = match stage {
-                        ProcessingStage::GeneratingText => "generating_text",
-                        ProcessingStage::TextReady { .. } => "text_ready",
-                        ProcessingStage::GeneratingVoice { .. } => "generating_voice",
-                        ProcessingStage::Accepting { .. } => "accepting",
-                    };
-                    ("processing", Some(stage), None, None)
-                }
-                RequestState::Cancelled => ("cancelled", None, None, None),
-                RequestState::Finished(result) => {
-                    let (outcome, event_id) = match result {
-                        RequestOutcome::Success(response) => ("success", Some(response.event_id)),
-                        RequestOutcome::VoiceGenerationFailed { response, .. } => {
-                            ("voice_error", Some(response.event_id))
-                        }
-                        RequestOutcome::TextGenerationFailed(_) => ("text_error", None),
-                        RequestOutcome::InternalError(_) => ("internal_error", None),
-                    };
-                    ("finished", None, Some(outcome), event_id)
-                }
-            };
-            json!({
-                "request_id": row.metadata.id.0,
-                "character": row.metadata.character_id,
-                "revision": row.snapshot.revision,
-                "state": state,
-                "stage": stage,
-                "outcome": outcome,
-                "event_id": event_id,
-                "terminal": row.snapshot.state.is_terminal(),
-                "observation_error_present": row.observation_error.is_some(),
-            })
-        });
+        let request = row.map(request_status_json);
         json!({
             "schema_version": 1,
             "source": "chat_presenter_snapshot",
