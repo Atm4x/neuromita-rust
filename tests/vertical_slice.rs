@@ -558,13 +558,28 @@ fn user_texts(body: &Value) -> Vec<&str> {
 async fn conversation_retry_reuses_input_event_and_rejects_duplicate_or_stale_attempts() {
     use neuromita::{
         presentation::{ConversationError, PresenterError},
+        prompts::PromptCatalog,
         request::TurnIntent,
         timeline::domain::EventKind,
     };
 
     let _serial = CORE_TEST_MUTEX.lock().await;
     let mut server = GeminiServer::start().await;
-    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+    let root = std::env::temp_dir().join(format!("neuromita-retry-prompt-{}", Uuid::new_v4()));
+    let set = root.join("Crazy/Default");
+    std::fs::create_dir_all(&set).unwrap();
+    std::fs::write(set.join("config.json"), "{}").unwrap();
+    std::fs::write(
+        set.join("main_template.txt"),
+        "[<init.script>]\nTest prompt",
+    )
+    .unwrap();
+    std::fs::write(
+        set.join("init.script"),
+        "SEED_MEMORY High | The player likes tea\n",
+    )
+    .unwrap();
+    let config = ApplicationConfig::minimal(
         preset(&server.endpoint),
         ResponseGenerator::new([
             Arc::new(GeminiProvider::new().unwrap()) as Arc<dyn GenerationProvider>
@@ -572,9 +587,9 @@ async fn conversation_retry_reuses_input_event_and_rejects_duplicate_or_stale_at
         .unwrap(),
         limits(),
         "127.0.0.1:0".parse().unwrap(),
-    ))
-    .await
-    .unwrap();
+    )
+    .with_prompt_catalog(PromptCatalog::new(&root));
+    let app = ApplicationLifecycle::start(config).await.unwrap();
     let conversation = &app.presenter().conversation;
     let source = conversation
         .reply(CharacterId::Crazy, "Retry me".into())
@@ -673,6 +688,119 @@ async fn conversation_retry_reuses_input_event_and_rejects_duplicate_or_stale_at
     ));
     app.shutdown().await.unwrap();
     server.shutdown().await;
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(feature = "sqlite-system")]
+#[tokio::test]
+async fn external_timeline_changes_cancel_running_and_queued_requests() {
+    use neuromita::{
+        request::CancelReason,
+        timeline::{
+            TimelineConfig,
+            domain::{BranchId, EventDraft, EventKind, SessionId, TimelineRepository},
+            selection::TimelineSelectionRepository,
+            storage::SqliteTimelineRepository,
+        },
+    };
+
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let database = std::env::temp_dir().join(format!("neuromita-external-{}.db", Uuid::new_v4()));
+    let branch = BranchId::new();
+    let mut config = ApplicationConfig::minimal(
+        preset(&server.endpoint),
+        ResponseGenerator::new([
+            Arc::new(GeminiProvider::new().unwrap()) as Arc<dyn GenerationProvider>
+        ])
+        .unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    );
+    config.timeline = TimelineConfig::Sqlite {
+        database: database.clone(),
+        session: SessionId::new(),
+        root: branch,
+    };
+    let app = ApplicationLifecycle::start(config).await.unwrap();
+    let conversation = &app.presenter().conversation;
+    let mut external = SqliteTimelineRepository::open(&database).unwrap();
+    let selection = external.selection().unwrap().unwrap();
+
+    let running = conversation
+        .reply(CharacterId::Crazy, "before reset".into())
+        .unwrap();
+    let blocked = server.next().await;
+    let queued = conversation
+        .reply(CharacterId::Crazy, "in queue".into())
+        .unwrap();
+    let unaffected = conversation
+        .reply(CharacterId::Kind, "other character".into())
+        .unwrap();
+    let other = server.next().await;
+    let before_reset = external.branch(branch).unwrap().head_sequence;
+    let mut reset = EventDraft::new(EventKind::CharacterContextReset);
+    reset.observers.insert(CharacterId::Crazy);
+    external
+        .append(
+            branch,
+            before_reset,
+            "external-reset",
+            json!({}),
+            vec![reset],
+        )
+        .unwrap();
+    for handle in [&running, &queued] {
+        let snapshot = finished(handle).await;
+        assert!(matches!(snapshot.state, RequestState::Cancelled));
+        assert_eq!(snapshot.cancel_reason, Some(CancelReason::ContextChanged));
+    }
+    assert!(!unaffected.snapshot().is_resolved());
+    other.respond.send(Reply::Text("still running")).unwrap();
+    assert!(matches!(
+        finished(&unaffected).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    drop(blocked);
+
+    let stale = conversation
+        .reply(CharacterId::Crazy, "before selection".into())
+        .unwrap();
+    let blocked = server.next().await;
+    let updated = external.select_branch(branch, Some(selection)).unwrap();
+    let snapshot = finished(&stale).await;
+    assert!(matches!(snapshot.state, RequestState::Cancelled));
+    assert_eq!(snapshot.cancel_reason, Some(CancelReason::SelectionChanged));
+    assert_eq!(*conversation.observe_selection().unwrap().borrow(), updated);
+    drop(blocked);
+
+    let fresh = conversation
+        .reply(CharacterId::Crazy, "after selection".into())
+        .unwrap();
+    server
+        .next()
+        .await
+        .respond
+        .send(Reply::Text("new generation"))
+        .unwrap();
+    assert!(matches!(
+        finished(&fresh).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    assert_eq!(
+        external
+            .world(branch)
+            .unwrap()
+            .iter()
+            .filter(|fact| fact.draft.kind == EventKind::PlayerMessage)
+            .count(),
+        5
+    );
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
+    for suffix in ["", "-shm", "-wal"] {
+        let _ = std::fs::remove_file(format!("{}{}", database.display(), suffix));
+    }
 }
 
 #[tokio::test]

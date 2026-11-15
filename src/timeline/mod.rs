@@ -261,6 +261,13 @@ pub(crate) struct SessionTimeline {
     selection_repository: Option<storage::SqliteTimelineRepository>,
 }
 
+#[cfg(feature = "sqlite-system")]
+pub(crate) struct PersistentTimelineObservation {
+    pub(crate) selection: TimelineSelection,
+    pub(crate) revision: u64,
+    pub(crate) epochs: HashMap<CharacterId, u64>,
+}
+
 impl SessionTimeline {
     #[cfg(feature = "sqlite-system")]
     pub(crate) fn dispatch_repository(&self) -> Option<storage::SqliteTimelineRepository> {
@@ -559,6 +566,39 @@ impl SessionTimeline {
 
     pub(crate) fn observe_selection(&self) -> watch::Receiver<TimelineSelection> {
         self.selection_updates.subscribe()
+    }
+
+    #[cfg(feature = "sqlite-system")]
+    pub(crate) fn refresh_persistent_timeline(
+        &mut self,
+        previous: Option<(TimelineSelection, u64)>,
+    ) -> Result<Option<PersistentTimelineObservation>, domain::TimelineError> {
+        let Some(repository) = &self.selection_repository else {
+            return Ok(None);
+        };
+        let Some(observed) = repository.observe_changes(previous)? else {
+            return Ok(None);
+        };
+        if observed.selection != self.selection() {
+            if self.store.branch(observed.selection.branch_id)?.session_id
+                != self.store.branch(self.branch)?.session_id
+            {
+                return Err(domain::TimelineError::Conflict);
+            }
+            self.branch = observed.selection.branch_id;
+            self.workspace.install_selection(observed.selection);
+            self.selection_updates.send_replace(observed.selection);
+            for character in CharacterId::ALL {
+                self.notify_memory_changed(character);
+            }
+        }
+        for (&character, &epoch) in &observed.epochs {
+            let sender = &self.context_updates[&character];
+            if *sender.borrow() != epoch {
+                sender.send_replace(epoch);
+            }
+        }
+        Ok(Some(observed))
     }
 
     pub(crate) fn selection(&self) -> TimelineSelection {

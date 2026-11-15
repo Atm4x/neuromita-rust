@@ -535,6 +535,50 @@ async fn run_semantic_knowledge_reconciler(
     }
 }
 
+#[cfg(feature = "sqlite-system")]
+async fn observe_persistent_timeline(
+    timeline: Arc<Mutex<SessionTimeline>>,
+    registry: Arc<RequestRegistry>,
+    stop: CancellationToken,
+) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(150));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut observed: Option<crate::timeline::PersistentTimelineObservation> = None;
+    loop {
+        tokio::select! {
+            biased;
+            _ = stop.cancelled() => break,
+            _ = interval.tick() => {},
+        }
+        let previous = observed
+            .as_ref()
+            .map(|state| (state.selection, state.revision));
+        let timeline = Arc::clone(&timeline);
+        match tokio::task::spawn_blocking(move || {
+            timeline
+                .lock()
+                .expect("timeline lock poisoned")
+                .refresh_persistent_timeline(previous)
+        })
+        .await
+        {
+            Ok(Ok(Some(state))) => observed = Some(state),
+            Ok(Ok(None)) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "persistent Timeline observation failed");
+                continue;
+            }
+            Err(error) => {
+                tracing::error!(%error, "persistent Timeline observation stopped");
+                break;
+            }
+        }
+        if let Some(state) = &observed {
+            registry.cancel_outdated_timeline_requests(state);
+        }
+    }
+}
+
 struct TimelineRequestIngress {
     timeline: Arc<Mutex<SessionTimeline>>,
 }
@@ -1327,6 +1371,19 @@ impl ApplicationLifecycle {
                 clock: Arc::clone(&reminders_config.clock),
             },
         );
+        #[cfg(feature = "sqlite-system")]
+        if timeline
+            .lock()
+            .expect("timeline lock poisoned")
+            .dispatch_repository()
+            .is_some()
+        {
+            owners.push(tokio::spawn(observe_persistent_timeline(
+                Arc::clone(&timeline),
+                Arc::clone(&registry),
+                owners_stop.clone(),
+            )));
+        }
         let generator = Arc::new(generator);
         let knowledge = Arc::new(knowledge);
         let presets = Arc::new(presets);

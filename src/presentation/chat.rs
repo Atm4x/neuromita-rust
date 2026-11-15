@@ -173,7 +173,8 @@ impl ChatPresenter {
         }
         let event = self.retry_target(character, source)?;
         let handle = self.api.send(
-            ReplyRequest::new(character, event, RequestSource::Presenter).expect_timeline(fence),
+            ReplyRequest::new(character, event, RequestSource::Presenter)
+                .with_admission_fence(fence),
         )?;
         claimed.insert(source);
         Ok(handle)
