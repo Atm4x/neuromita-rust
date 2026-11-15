@@ -35,7 +35,7 @@ use neuromita::{
         ConversationChange, ConversationChangePreview, ConversationSnapshot, GuiPresenter,
         PresetSlot, native_download::NativeDownloadPresenter,
     },
-    remote_voice::{FishAudioClient, RemoteVoiceConfig, RemoteVoicePreset, RemoteVoiceStore},
+    remote_voice::{RemoteVoiceCatalogAction, RemoteVoiceConfig, RemoteVoicePreset},
     request::{CancelResult, RequestId},
     settings::{
         AsrPreferences, PresetId, PresetSelection, SettingsApi, TtsBackend, TtsPreferences, Volume,
@@ -688,6 +688,17 @@ fn native_backend(value: &str) -> Option<NativeBackend> {
     }
 }
 
+fn remote_message(phase: &str) -> &'static str {
+    match phase {
+        "previewing" => "Синтез и воспроизведение…",
+        "completed" => "Голос воспроизведён",
+        "cancelled" => "Проверка отменена",
+        "saved" => "Облачный профиль сохранён",
+        "failed" => "Проверка не удалась",
+        _ => "",
+    }
+}
+
 async fn observe(
     app: &ApplicationLifecycle,
     directory: &std::path::Path,
@@ -698,15 +709,13 @@ async fn observe(
     telegram_admin: &Arc<TelegramAdmin>,
 ) -> Result<(), String> {
     let administration = app.presenter();
-    let remote_store = RemoteVoiceStore {
-        path: directory.join("remote_voice.rust.json"),
-    };
-    let mut remote_config = remote_store.load().map_err(|error| error.to_string())?;
-    publish(Update::RemoteVoices(remote_config.clone()));
-    let (preview_send, mut preview_results) =
-        mpsc::unbounded_channel::<(u64, Result<(), String>)>();
-    let mut preview_cancel: Option<CancellationToken> = None;
-    let mut preview_generation = 0_u64;
+    let remote_admin = administration
+        .remote_voice_admin
+        .as_ref()
+        .ok_or("Remote Voice administration was not initialized")?;
+    let mut remote_updates = remote_admin.observe();
+    let mut remote_revision = remote_admin.snapshot().revision;
+    publish(Update::RemoteVoices(remote_admin.config()));
     let mut telegram_updates = telegram_admin.observe();
     let mut telegram_watch_closed = false;
     let mut releases = administration.releases.observe();
@@ -971,82 +980,37 @@ async fn observe(
                     publish(Update::TelegramAuth { phase: i32::from(status.phase), status: format!("Telegram: {}", status.status) });
                 },
                 Some(Command::RemoteVoice(action)) => {
-                    match action {
-                        RemoteVoiceAction::Preview(text, character, draft_preset) => {
-                            if preview_cancel.is_some() {
-                                publish(Update::RemoteVoiceState("Проверка уже выполняется".into(), true));
-                            } else {
-                                let prepare = (|| -> Result<_, String> {
-                                    let next = remote_config
-                                        .prepared_preview(draft_preset, character)
-                                        .map_err(|e| e.to_string())?;
-                                    let preset = next.active().map_err(|e| e.to_string())?.clone();
-                                    let player = find_binary(directory, "NEUROMITA_FFPLAY",
-                                        if cfg!(windows) { "ffplay.exe" } else { "ffplay" })
-                                        .ok_or_else(|| "FFplay не найден: укажите NEUROMITA_FFPLAY или установите AIData/bin/ffplay".to_owned())?;
-                                    let client = FishAudioClient::new().map_err(|e| e.to_string())?;
-                                    // Save before preview: failure must NOT replay the older
-                                    // stored voice and report it as the just-edited one.
-                                    remote_store.save(&next).map_err(|e| e.to_string())?;
-                                    remote_config = next;
-                                    publish(Update::RemoteVoices(remote_config.clone()));
-                                    Ok((preset, player, client))
-                                })();
-                                match prepare {
-                                    Err(error) => publish(Update::RemoteVoiceState(error, false)),
-                                    Ok((preset, player, client)) => {
-                                        preview_generation += 1;
-                                        let generation = preview_generation;
-                                        let cancel = stop.child_token();
-                                        preview_cancel = Some(cancel.clone());
-                                        let finish = preview_send.clone();
-                                        tokio::spawn(async move {
-                                            let result = async {
-                                                let audio = client.synthesize(&preset, &text, character, &cancel)
-                                                    .await.map_err(|e| e.to_string())?;
-                                                FfplayOutput { binary: player }.play(audio, cancel.clone())
-                                                    .await.map_err(|e| e.to_string())?;
-                                                if cancel.is_cancelled() { return Err("Проверка отменена".into()); }
-                                                Ok(())
-                                            }.await;
-                                            let _ = finish.send((generation, result));
-                                        });
-                                        publish(Update::RemoteVoiceState("Синтез и воспроизведение…".into(), true));
-                                    }
-                                }
+                    let result = match action {
+                        RemoteVoiceAction::Preview(text, character, preset) => {
+                            let player = find_binary(directory, "NEUROMITA_FFPLAY",
+                                if cfg!(windows) { "ffplay.exe" } else { "ffplay" });
+                            match player {
+                                Some(player) => remote_admin.preview(text, character, preset, player, Some(remote_revision))
+                                    .map_err(|e| e.to_string()),
+                                None => Err("FFplay не найден: укажите NEUROMITA_FFPLAY или установите AIData/bin/ffplay".into()),
                             }
-                        },
-                        RemoteVoiceAction::Cancel => {
-                            if let Some(token) = preview_cancel.take() {
-                                token.cancel();
-                                preview_generation += 1;
-                                publish(Update::RemoteVoiceState("Проверка отменена".into(), false));
-                            }
-                        },
+                        }
+                        RemoteVoiceAction::Cancel => Ok(remote_admin.cancel()),
                         action => {
-                            let mut next = remote_config.clone();
-                            let result = match action {
-                                RemoteVoiceAction::Add => next.add(),
-                                RemoteVoiceAction::Delete => next.delete_active(),
-                                RemoteVoiceAction::SelectWithSave(id, preset) => {
-                                    next.update(preset).and_then(|_| next.select(&id))
-                                },
-                                RemoteVoiceAction::Save(preset) => next.update(preset),
+                            let change = match action {
+                                RemoteVoiceAction::Add => RemoteVoiceCatalogAction::Add,
+                                RemoteVoiceAction::Delete => RemoteVoiceCatalogAction::Delete,
+                                RemoteVoiceAction::SelectWithSave(id, preset) =>
+                                    RemoteVoiceCatalogAction::SelectWithSave(id, preset),
+                                RemoteVoiceAction::Save(preset) => RemoteVoiceCatalogAction::Save(preset),
                                 RemoteVoiceAction::Preview(..) | RemoteVoiceAction::Cancel => unreachable!(),
-                            }.and_then(|_| remote_store.save(&next));
-                            match result {
-                                Ok(()) => {
-                                    if let Some(token) = preview_cancel.take() {
-                                        token.cancel();
-                                        preview_generation += 1;
-                                        publish(Update::RemoteVoiceState("Проверка прервана изменением профиля".into(), false));
-                                    }
-                                    remote_config = next;
-                                    publish(Update::RemoteVoices(remote_config.clone()));
-                                    publish(Update::RemoteVoiceState("Облачный профиль сохранён".into(), false));
-                                },
-                                Err(error) => publish(Update::RemoteVoiceState(error.to_string(), false)),
-                            }
+                            };
+                            remote_admin.change(change, Some(remote_revision)).map_err(|e| e.to_string())
+                        }
+                    };
+                    match result {
+                        Ok(state) => {
+                            remote_revision = state.revision;
+                            publish(Update::RemoteVoices(remote_admin.config()));
+                            publish(Update::RemoteVoiceState(remote_message(&state.phase).into(), state.busy));
+                        }
+                        Err(error) => {
+                            publish(Update::RemoteVoiceState(error, remote_admin.snapshot().busy));
                         }
                     }
                 },
@@ -1597,15 +1561,12 @@ async fn observe(
                     None => {},
                 }
             },
-            preview = preview_results.recv() => {
-                if let Some((generation, result)) = preview
-                    && generation == preview_generation
-                {
-                    preview_cancel = None;
-                    publish(Update::RemoteVoiceState(
-                        result.map(|_| "Голос воспроизведён".to_owned()).unwrap_or_else(|e| e), false
-                    ));
-                }
+            changed = remote_updates.changed() => {
+                changed.map_err(|_| "Remote Voice observer closed")?;
+                let state = remote_updates.borrow_and_update().clone();
+                remote_revision = state.revision;
+                publish(Update::RemoteVoices(remote_admin.config()));
+                publish(Update::RemoteVoiceState(remote_message(&state.phase).into(), state.busy));
                 refresh_views = false;
             },
             transcript = transcript_updates.recv() => {

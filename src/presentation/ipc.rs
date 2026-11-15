@@ -136,6 +136,32 @@ pub(crate) enum PresenterAction {
     },
     TelegramDisconnect {},
     TelegramRefreshVoice {},
+    RemoteVoiceAdd {
+        expected_revision: u64,
+    },
+    RemoteVoiceDelete {
+        expected_revision: u64,
+    },
+    RemoteVoiceSelect {
+        id: String,
+        expected_revision: u64,
+    },
+    RemoteVoiceSave {
+        preset: crate::remote_voice::RemoteVoicePresetPatch,
+        expected_revision: u64,
+    },
+    RemoteVoiceSelectWithSave {
+        id: String,
+        preset: crate::remote_voice::RemoteVoicePresetPatch,
+        expected_revision: u64,
+    },
+    RemoteVoicePreview {
+        preset: crate::remote_voice::RemoteVoicePresetPatch,
+        text: String,
+        character: Option<CharacterId>,
+        expected_revision: u64,
+    },
+    RemoteVoiceCancel {},
     NativeRefresh {},
     NativeSelect {
         model_id: String,
@@ -215,6 +241,7 @@ pub(crate) enum PresenterSurface {
     Presets,
     AiHubInstall,
     TelegramAuth,
+    RemoteVoice,
 }
 
 #[derive(Clone)]
@@ -240,6 +267,7 @@ pub(crate) struct PresenterProbe {
     pub(super) ai_hub_install:
         Option<std::sync::Arc<crate::ai_runtime::install_coordinator::AiHubInstallCoordinator>>,
     pub(super) telegram_admin: Option<std::sync::Arc<crate::telegram_admin::TelegramAdmin>>,
+    pub(super) remote_voice_admin: Option<std::sync::Arc<crate::remote_voice::RemoteVoiceAdmin>>,
 }
 
 impl PresenterProbe {
@@ -266,6 +294,7 @@ impl PresenterProbe {
         >,
         speech_capture: crate::app::SharedSpeechCapture,
         telegram_admin: Option<std::sync::Arc<crate::telegram_admin::TelegramAdmin>>,
+        remote_voice_admin: Option<std::sync::Arc<crate::remote_voice::RemoteVoiceAdmin>>,
     ) -> Self {
         Self {
             chat,
@@ -286,6 +315,7 @@ impl PresenterProbe {
             speech_capture,
             ai_hub_install,
             telegram_admin,
+            remote_voice_admin,
         }
     }
 
@@ -714,6 +744,124 @@ impl PresenterProbe {
                     .as_ref()
                     .ok_or("Telegram administration is not configured")?;
                 json!({"action":"telegram_refresh_voice","status":owner.refresh_voice(&self.settings.tts.preferences.get()).await?})
+            }
+            RemoteVoiceAdd { expected_revision } => {
+                let owner = self
+                    .remote_voice_admin
+                    .as_ref()
+                    .ok_or("Remote Voice is not configured")?;
+                let result = owner
+                    .change(
+                        crate::remote_voice::RemoteVoiceCatalogAction::Add,
+                        Some(expected_revision),
+                    )
+                    .map_err(|_| "remote voice catalog edit rejected")?;
+                json!({"action":"remote_voice_add","status":result})
+            }
+            RemoteVoiceDelete { expected_revision } => {
+                let owner = self
+                    .remote_voice_admin
+                    .as_ref()
+                    .ok_or("Remote Voice is not configured")?;
+                let result = owner
+                    .change(
+                        crate::remote_voice::RemoteVoiceCatalogAction::Delete,
+                        Some(expected_revision),
+                    )
+                    .map_err(|_| "remote voice catalog edit rejected")?;
+                json!({"action":"remote_voice_delete","status":result})
+            }
+            RemoteVoiceSelect {
+                id,
+                expected_revision,
+            } => {
+                let owner = self
+                    .remote_voice_admin
+                    .as_ref()
+                    .ok_or("Remote Voice is not configured")?;
+                let result = owner
+                    .change(
+                        crate::remote_voice::RemoteVoiceCatalogAction::Select(id),
+                        Some(expected_revision),
+                    )
+                    .map_err(|_| "remote voice catalog edit rejected")?;
+                json!({"action":"remote_voice_select","status":result})
+            }
+            RemoteVoiceSave {
+                preset,
+                expected_revision,
+            } => {
+                if preset.has_secret()
+                    && std::env::var("NEUROMITA_ENABLE_LOCAL_REMOTE_VOICE_SECRETS").as_deref()
+                        != Ok("1")
+                {
+                    return Err("remote voice credentials over loopback require explicit trusted-machine opt-in".into());
+                }
+                let owner = self
+                    .remote_voice_admin
+                    .as_ref()
+                    .ok_or("Remote Voice is not configured")?;
+                let result = owner
+                    .change(
+                        crate::remote_voice::RemoteVoiceCatalogAction::Patch(preset),
+                        Some(expected_revision),
+                    )
+                    .map_err(|_| "remote voice catalog edit rejected")?;
+                json!({"action":"remote_voice_save","status":result})
+            }
+            RemoteVoiceSelectWithSave {
+                id,
+                preset,
+                expected_revision,
+            } => {
+                if preset.has_secret()
+                    && std::env::var("NEUROMITA_ENABLE_LOCAL_REMOTE_VOICE_SECRETS").as_deref()
+                        != Ok("1")
+                {
+                    return Err("remote voice credentials over loopback require explicit trusted-machine opt-in".into());
+                }
+                let owner = self
+                    .remote_voice_admin
+                    .as_ref()
+                    .ok_or("Remote Voice is not configured")?;
+                let status = owner
+                    .change(
+                        crate::remote_voice::RemoteVoiceCatalogAction::SelectWithPatch(id, preset),
+                        Some(expected_revision),
+                    )
+                    .map_err(|_| "remote voice catalog edit rejected")?;
+                json!({"action":"remote_voice_select_with_save","status":status})
+            }
+            RemoteVoicePreview {
+                preset,
+                text,
+                character,
+                expected_revision,
+            } => {
+                if preset.has_secret()
+                    && std::env::var("NEUROMITA_ENABLE_LOCAL_REMOTE_VOICE_SECRETS").as_deref()
+                        != Ok("1")
+                {
+                    return Err("remote voice credentials over loopback require explicit trusted-machine opt-in".into());
+                }
+                let owner = self
+                    .remote_voice_admin
+                    .as_ref()
+                    .ok_or("Remote Voice is not configured")?;
+                let player = owner
+                    .ffplay_binary()
+                    .ok_or("FFplay executable unavailable")?;
+                let result = owner
+                    .preview_patch(text, character, preset, player, expected_revision)
+                    .map_err(|_| "remote voice preview rejected")?;
+                json!({"action":"remote_voice_preview","status":result})
+            }
+            RemoteVoiceCancel {} => {
+                let owner = self
+                    .remote_voice_admin
+                    .as_ref()
+                    .ok_or("Remote Voice is not configured")?;
+                json!({"action":"remote_voice_cancel","status":owner.cancel()})
             }
             NativeRefresh {} => {
                 let native = self
@@ -1175,6 +1323,19 @@ impl PresenterProbe {
                     json!({"schema_version":1,"surface":"guide","source":"onboarding_settings_presenter",
                     "level":self.guide.guide_level.get(),"page":self.guide.guide_page.get(),
                     "completed":self.guide.guide_completed.get()}),
+                )
+            }
+            PresenterSurface::RemoteVoice => {
+                if character.is_some() {
+                    return Err("remote_voice does not accept character");
+                }
+                let owner = self
+                    .remote_voice_admin
+                    .as_ref()
+                    .ok_or("Remote Voice is not configured")?;
+                Ok(
+                    json!({"schema_version":1,"surface":"remote_voice", "source":"remote_voice_admin",
+                    "state":owner.snapshot(), "privacy":"no API credentials, preview text or audio"}),
                 )
             }
             PresenterSurface::TelegramAuth => {

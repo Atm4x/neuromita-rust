@@ -5,15 +5,17 @@ use std::{
     fs,
     io::{self, Write},
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio::{sync::watch, task};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    audio::device::{AudioPlayback, FfplayOutput},
     character::CharacterId,
     voice::{AudioArtifact, AudioFormat},
 };
@@ -319,6 +321,347 @@ impl RemoteVoiceStore {
     }
 }
 
+/// Shared catalog and preview owner for GUI, MCP and production API voice routing.
+/// Observer state never contains credentials, source text or audio.
+#[derive(Debug, Clone, Serialize)]
+pub struct RemoteVoiceAdminSnapshot {
+    pub revision: u64,
+    pub active_id: String,
+    pub presets: Vec<RemoteVoicePresetSummary>,
+    pub phase: String,
+    pub busy: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RemoteVoicePresetSummary {
+    pub id: String,
+    pub name: String,
+    pub template_id: String,
+    pub model: String,
+    pub speed_percent: u16,
+    pub default_voice_id: String,
+    pub character_voice_ids: BTreeMap<CharacterId, String>,
+    pub credential_present: bool,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteVoicePresetPatch {
+    pub id: String,
+    pub name: Option<String>,
+    pub model: Option<String>,
+    pub speed_percent: Option<u16>,
+    pub default_voice_id: Option<String>,
+    pub character_voice_ids: Option<BTreeMap<CharacterId, String>>,
+    pub api_key: Option<String>,
+}
+
+impl std::fmt::Debug for RemoteVoicePresetPatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteVoicePresetPatch")
+            .field("id", &self.id)
+            .field("has_credential_update", &self.api_key.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl RemoteVoicePresetPatch {
+    pub fn has_secret(&self) -> bool {
+        self.api_key.is_some()
+    }
+
+    fn apply_to(self, preset: &mut RemoteVoicePreset) -> Result<(), RemoteVoiceError> {
+        if preset.id != self.id {
+            return Err(RemoteVoiceError::InvalidPreset("preset changed".into()));
+        }
+        if let Some(value) = self.name {
+            preset.name = value;
+        }
+        if let Some(value) = self.model {
+            preset.model = value;
+        }
+        if let Some(value) = self.speed_percent {
+            preset.speed_percent = value;
+        }
+        if let Some(value) = self.default_voice_id {
+            preset.default_voice_id = value;
+        }
+        if let Some(value) = self.character_voice_ids {
+            preset.character_voice_ids = value;
+        }
+        if let Some(value) = self.api_key {
+            preset.api_key = value;
+        }
+        preset.validate()
+    }
+}
+
+#[derive(Clone)]
+pub enum RemoteVoiceCatalogAction {
+    Add,
+    Delete,
+    Select(String),
+    SelectWithSave(String, RemoteVoicePreset),
+    SelectWithPatch(String, RemoteVoicePresetPatch),
+    Save(RemoteVoicePreset),
+    Patch(RemoteVoicePresetPatch),
+}
+
+struct RemoteVoiceAdminState {
+    config: RemoteVoiceConfig,
+    revision: u64,
+    generation: u64,
+    preview: Option<CancellationToken>,
+    phase: &'static str,
+}
+
+pub struct RemoteVoiceAdmin {
+    store: RemoteVoiceStore,
+    state: Mutex<RemoteVoiceAdminState>,
+    changes: watch::Sender<RemoteVoiceAdminSnapshot>,
+}
+
+impl RemoteVoiceAdmin {
+    pub fn new(store: RemoteVoiceStore) -> Result<Self, RemoteVoiceError> {
+        let config = store.load()?;
+        let state = RemoteVoiceAdminState {
+            config,
+            revision: 0,
+            generation: 0,
+            preview: None,
+            phase: "idle",
+        };
+        let (changes, _) = watch::channel(Self::view(&state));
+        Ok(Self {
+            store,
+            state: Mutex::new(state),
+            changes,
+        })
+    }
+
+    fn view(state: &RemoteVoiceAdminState) -> RemoteVoiceAdminSnapshot {
+        RemoteVoiceAdminSnapshot {
+            revision: state.revision,
+            active_id: state.config.active_id.clone(),
+            presets: state
+                .config
+                .presets
+                .iter()
+                .map(|p| RemoteVoicePresetSummary {
+                    id: p.id.clone(),
+                    name: p.name.clone(),
+                    template_id: p.template_id.clone(),
+                    model: p.model.clone(),
+                    speed_percent: p.speed_percent,
+                    default_voice_id: p.default_voice_id.clone(),
+                    character_voice_ids: p.character_voice_ids.clone(),
+                    credential_present: !p.api_key.is_empty(),
+                })
+                .collect(),
+            phase: state.phase.to_string(),
+            busy: state.preview.is_some(),
+        }
+    }
+
+    pub fn snapshot(&self) -> RemoteVoiceAdminSnapshot {
+        Self::view(&self.state.lock().expect("remote voice admin poisoned"))
+    }
+
+    pub fn config(&self) -> RemoteVoiceConfig {
+        self.state
+            .lock()
+            .expect("remote voice admin poisoned")
+            .config
+            .clone()
+    }
+
+    pub fn observe(&self) -> watch::Receiver<RemoteVoiceAdminSnapshot> {
+        self.changes.subscribe()
+    }
+
+    fn publish(&self, state: &mut RemoteVoiceAdminState) -> RemoteVoiceAdminSnapshot {
+        state.revision += 1;
+        let snapshot = Self::view(state);
+        self.changes.send_replace(snapshot.clone());
+        snapshot
+    }
+
+    pub fn change(
+        &self,
+        action: RemoteVoiceCatalogAction,
+        expected_revision: Option<u64>,
+    ) -> Result<RemoteVoiceAdminSnapshot, RemoteVoiceError> {
+        let mut state = self.state.lock().expect("remote voice admin poisoned");
+        if expected_revision.is_some_and(|revision| revision != state.revision) {
+            return Err(RemoteVoiceError::InvalidPreset(
+                "catalog revision changed".into(),
+            ));
+        }
+        let mut next = state.config.clone();
+        match action {
+            RemoteVoiceCatalogAction::Add => next.add()?,
+            RemoteVoiceCatalogAction::Delete => next.delete_active()?,
+            RemoteVoiceCatalogAction::Select(id) => next.select(&id)?,
+            RemoteVoiceCatalogAction::SelectWithSave(id, preset) => {
+                next.update(preset)?;
+                next.select(&id)?;
+            }
+            RemoteVoiceCatalogAction::SelectWithPatch(id, patch) => {
+                let p = next
+                    .presets
+                    .iter_mut()
+                    .find(|p| p.id == patch.id)
+                    .ok_or_else(|| {
+                        RemoteVoiceError::InvalidPreset("preset does not exist".into())
+                    })?;
+                patch.apply_to(p)?;
+                next.select(&id)?;
+            }
+            RemoteVoiceCatalogAction::Save(preset) => next.update(preset)?,
+            RemoteVoiceCatalogAction::Patch(patch) => {
+                let p = next
+                    .presets
+                    .iter_mut()
+                    .find(|p| p.id == patch.id)
+                    .ok_or_else(|| {
+                        RemoteVoiceError::InvalidPreset("preset does not exist".into())
+                    })?;
+                patch.apply_to(p)?;
+            }
+        }
+        self.store.save(&next)?;
+        if let Some(cancel) = state.preview.take() {
+            cancel.cancel();
+        }
+        state.generation += 1;
+        state.config = next;
+        state.phase = "saved";
+        Ok(self.publish(&mut state))
+    }
+
+    pub fn ffplay_binary(&self) -> Option<PathBuf> {
+        let name = if cfg!(windows) {
+            "ffplay.exe"
+        } else {
+            "ffplay"
+        };
+        [
+            std::env::var_os("NEUROMITA_FFPLAY").map(PathBuf::from),
+            self.store
+                .path
+                .parent()
+                .map(|dir| dir.join("AIData/bin").join(name)),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|p| p.is_absolute() && p.is_file())
+    }
+
+    pub fn preview_patch(
+        self: &Arc<Self>,
+        text: String,
+        character: Option<CharacterId>,
+        patch: RemoteVoicePresetPatch,
+        ffplay: PathBuf,
+        expected_revision: u64,
+    ) -> Result<RemoteVoiceAdminSnapshot, RemoteVoiceError> {
+        let config = self.config();
+        let preset = config
+            .presets
+            .iter()
+            .find(|p| p.id == patch.id)
+            .ok_or_else(|| RemoteVoiceError::InvalidPreset("preset does not exist".into()))?;
+        let mut draft = preset.clone();
+        patch.apply_to(&mut draft)?;
+        self.preview(text, character, draft, ffplay, Some(expected_revision))
+    }
+
+    pub fn cancel(&self) -> RemoteVoiceAdminSnapshot {
+        let mut state = self.state.lock().expect("remote voice admin poisoned");
+        if let Some(cancel) = state.preview.take() {
+            cancel.cancel();
+            state.generation += 1;
+            state.phase = "cancelled";
+            self.publish(&mut state)
+        } else {
+            Self::view(&state)
+        }
+    }
+
+    /// Start a single preview. A completed older task must never clear or overwrite newer state.
+    pub fn preview(
+        self: &Arc<Self>,
+        text: String,
+        character: Option<CharacterId>,
+        draft: RemoteVoicePreset,
+        ffplay: PathBuf,
+        expected_revision: Option<u64>,
+    ) -> Result<RemoteVoiceAdminSnapshot, RemoteVoiceError> {
+        if text.trim().is_empty() || text.len() > 4096 {
+            return Err(RemoteVoiceError::InvalidPreset(
+                "invalid preview text length".into(),
+            ));
+        }
+        if !ffplay.is_absolute() || !ffplay.is_file() {
+            return Err(RemoteVoiceError::InvalidPreset(
+                "preview playback executable unavailable".into(),
+            ));
+        }
+        let (preset, generation, stop, snapshot) = {
+            let mut state = self.state.lock().expect("remote voice admin poisoned");
+            if expected_revision.is_some_and(|revision| revision != state.revision) {
+                return Err(RemoteVoiceError::InvalidPreset(
+                    "catalog revision changed".into(),
+                ));
+            }
+            if state.preview.is_some() {
+                return Err(RemoteVoiceError::InvalidPreset(
+                    "preview already running".into(),
+                ));
+            }
+            let next = state.config.prepared_preview(draft, character)?;
+            let preset = next.active()?.clone();
+            self.store.save(&next)?;
+            state.config = next;
+            state.generation += 1;
+            let generation = state.generation;
+            let stop = CancellationToken::new();
+            state.preview = Some(stop.clone());
+            state.phase = "previewing";
+            let snapshot = self.publish(&mut state);
+            (preset, generation, stop, snapshot)
+        };
+        let admin = Arc::clone(self);
+        task::spawn(async move {
+            let result = async {
+                let client = FishAudioClient::new()?;
+                let audio = client.synthesize(&preset, &text, character, &stop).await?;
+                FfplayOutput { binary: ffplay }
+                    .play(audio, stop.clone())
+                    .await
+                    .map_err(|_| RemoteVoiceError::InvalidAudio)?;
+                if stop.is_cancelled() {
+                    Err(RemoteVoiceError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            }
+            .await;
+            let mut state = admin.state.lock().expect("remote voice admin poisoned");
+            if state.generation == generation {
+                state.preview = None;
+                state.phase = match result {
+                    Ok(()) => "completed",
+                    Err(RemoteVoiceError::Cancelled) => "cancelled",
+                    Err(_) => "failed",
+                };
+                admin.publish(&mut state);
+            }
+        });
+        Ok(snapshot)
+    }
+}
+
 fn classify_http(status: reqwest::StatusCode) -> RemoteVoiceError {
     match status.as_u16() {
         401 | 403 => RemoteVoiceError::Authentication,
@@ -457,7 +800,7 @@ impl FishAudioClient {
 pub(crate) struct RemoteVoiceRouter {
     pub local: Arc<dyn crate::voice::VoiceProvider>,
     pub settings: Arc<crate::settings::SettingsOwner>,
-    pub store: RemoteVoiceStore,
+    pub admin: Arc<RemoteVoiceAdmin>,
     pub client: FishAudioClient,
 }
 
@@ -481,11 +824,7 @@ impl crate::voice::VoiceProvider for RemoteVoiceRouter {
             }
             // Do not cache the credential or voice: every generation observes a
             // complete atomic catalog revision, including after a character switch.
-            let store = self.store.clone();
-            let config = tokio::task::spawn_blocking(move || store.load())
-                .await
-                .map_err(|_| VoiceError::Generation("voice catalog task stopped".into()))?
-                .map_err(|error| VoiceError::Generation(error.to_string()))?;
+            let config = self.admin.config();
             let preset = config
                 .active()
                 .map_err(|error| VoiceError::Generation(error.to_string()))?;
@@ -518,6 +857,99 @@ mod tests {
         ));
         assert!(cfg.delete_active().is_ok());
         assert!(cfg.delete_active().is_err());
+    }
+    #[test]
+    fn administration_catalog_is_cas_guarded_and_never_exports_credentials() {
+        let root =
+            std::env::temp_dir().join(format!("remote-voice-admin-test-{}", uuid::Uuid::new_v4()));
+        let admin = RemoteVoiceAdmin::new(RemoteVoiceStore {
+            path: root.join("remote_voice.json"),
+        })
+        .unwrap();
+        let initial = admin.snapshot();
+        assert_eq!(initial.revision, 0);
+        assert_eq!(initial.presets.len(), 1);
+        let id = initial.active_id.clone();
+        let patch = RemoteVoicePresetPatch {
+            id,
+            name: Some("Voice A".into()),
+            model: None,
+            speed_percent: Some(135),
+            default_voice_id: None,
+            character_voice_ids: None,
+            api_key: Some("secret-Fish-API-key-XYZ".into()),
+        };
+        let next = admin
+            .change(RemoteVoiceCatalogAction::Patch(patch.clone()), Some(0))
+            .unwrap();
+        assert_eq!(next.revision, 1);
+        assert!(next.presets[0].credential_present);
+        assert_eq!(next.presets[0].name, "Voice A");
+        assert!(
+            !serde_json::to_string(&next)
+                .unwrap()
+                .contains("secret-Fish-API-key-XYZ")
+        );
+        assert!(!format!("{patch:?}").contains("secret-Fish-API-key-XYZ"));
+        assert!(
+            admin
+                .change(RemoteVoiceCatalogAction::Add, Some(0))
+                .is_err()
+        );
+        assert_eq!(admin.snapshot().revision, 1);
+        let cloned = admin.config();
+        assert_eq!(cloned.active().unwrap().api_key, "secret-Fish-API-key-XYZ");
+        let second = RemoteVoiceAdmin::new(RemoteVoiceStore {
+            path: root.join("remote_voice.json"),
+        })
+        .unwrap();
+        assert_eq!(second.config().active().unwrap().name, "Voice A");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn failed_preview_keeps_catalog_and_cancel_has_observable_revision() {
+        let root = std::env::temp_dir().join(format!(
+            "remote-voice-preview-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let admin = Arc::new(
+            RemoteVoiceAdmin::new(RemoteVoiceStore {
+                path: root.join("remote_voice.json"),
+            })
+            .unwrap(),
+        );
+        let patch = RemoteVoicePresetPatch {
+            id: admin.snapshot().active_id,
+            name: None,
+            model: None,
+            speed_percent: None,
+            default_voice_id: None,
+            character_voice_ids: None,
+            api_key: None,
+        };
+        let player = std::env::current_exe().unwrap();
+        assert!(
+            admin
+                .preview_patch("hello".into(), None, patch, player, 0)
+                .is_err()
+        );
+        assert_eq!(admin.snapshot().revision, 0);
+        let unchanged = admin.cancel();
+        assert_eq!(unchanged.revision, 0);
+        let token = CancellationToken::new();
+        {
+            let mut state = admin.state.lock().unwrap();
+            state.preview = Some(token.clone());
+            state.phase = "previewing";
+            admin.publish(&mut state);
+        }
+        let after = admin.cancel();
+        assert_eq!(after.revision, 2);
+        assert_eq!(after.phase, "cancelled");
+        assert!(!after.busy);
+        assert!(token.is_cancelled());
+        let _ = std::fs::remove_dir_all(root);
     }
     #[test]
     fn preview_rejects_stale_or_invalid_character_voice_without_fallback() {

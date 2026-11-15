@@ -97,6 +97,7 @@ pub(crate) enum WaitTarget {
     AiHubInstall,
     SpeechTranscript,
     TelegramAuth,
+    RemoteVoice,
 }
 
 fn default_limit() -> usize {
@@ -440,6 +441,40 @@ impl PresenterProbe {
                 }
                 let deadline = std::time::Duration::from_millis(timeout_ms);
                 match target {
+                    WaitTarget::RemoteVoice => {
+                        if character.is_some()
+                            || after_version.is_some()
+                            || after_revision.is_none()
+                        {
+                            return Err("remote_voice wait requires after_revision without character or version".into());
+                        }
+                        let owner = self
+                            .remote_voice_admin
+                            .as_ref()
+                            .ok_or("Remote Voice is not configured")?;
+                        let threshold = after_revision.expect("validated");
+                        let mut updates = owner.observe();
+                        let wait = async {
+                            loop {
+                                let status = updates.borrow_and_update().clone();
+                                if status.revision != threshold {
+                                    return Ok::<_, String>(
+                                        json!({"target":"remote_voice","changed":true,"status":status}),
+                                    );
+                                }
+                                updates
+                                    .changed()
+                                    .await
+                                    .map_err(|_| "Remote Voice observer closed".to_string())?;
+                            }
+                        };
+                        match tokio::time::timeout(deadline, wait).await {
+                            Ok(result) => result,
+                            Err(_) => Ok(
+                                json!({"target":"remote_voice","changed":false,"timed_out":true}),
+                            ),
+                        }
+                    }
                     WaitTarget::TelegramAuth => {
                         if character.is_some()
                             || after_version.is_some()

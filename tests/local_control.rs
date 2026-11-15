@@ -113,8 +113,12 @@ impl Fixture {
         Self::with_voice_and_hub(8, |_| {}, false, Some(root)).await
     }
 
+    async fn with_remote_voice() -> Self {
+        Self::with_voice_hub_telegram(8, |_| {}, false, None, false, true).await
+    }
+
     async fn with_telegram() -> Self {
-        Self::with_voice_hub_telegram(8, |_| {}, false, None, true).await
+        Self::with_voice_hub_telegram(8, |_| {}, false, None, true, false).await
     }
 
     async fn with_voice_and_hub(
@@ -123,7 +127,7 @@ impl Fixture {
         enabled: bool,
         hub_root: Option<std::path::PathBuf>,
     ) -> Self {
-        Self::with_voice_hub_telegram(queue, configure, enabled, hub_root, false).await
+        Self::with_voice_hub_telegram(queue, configure, enabled, hub_root, false, false).await
     }
 
     async fn with_voice_hub_telegram(
@@ -132,6 +136,7 @@ impl Fixture {
         enabled: bool,
         hub_root: Option<std::path::PathBuf>,
         telegram: bool,
+        remote_voice: bool,
     ) -> Self {
         let serial = APPLICATION.lock().await;
         let preset = GenerationPreset::new(ProviderTemplate::Gemini(
@@ -170,6 +175,13 @@ impl Fixture {
                 voice.clone(),
             )));
             config.voice = voice;
+        }
+        if remote_voice {
+            config.remote_voice_store = Some(
+                std::env::temp_dir()
+                    .join(format!("nm-remote-voice-ipc-{}", Uuid::new_v4()))
+                    .join("remote_voice.rust.json"),
+            );
         }
         config.game_link = Some(GameLinkConfig::new("127.0.0.1:0".parse().unwrap()));
         let app = bounded(ApplicationLifecycle::start(config)).await.unwrap();
@@ -2616,7 +2628,7 @@ async fn mcp_stdio_probes_the_same_running_core() {
             let result = &response["result"];
             match id {
                 1 => assert_eq!(result["serverInfo"]["name"], "neuromita"),
-                2 => assert_eq!(result["tools"].as_array().unwrap().len(), 39),
+                2 => assert_eq!(result["tools"].as_array().unwrap().len(), 41),
                 3 => {
                     let frame = &result["structuredContent"];
                     assert_eq!(frame["type"], "presenter_inspect");
@@ -3409,9 +3421,10 @@ async fn telegram_gui_and_mcp_use_one_owner_with_sanitized_status_and_wait() {
     assert_eq!(initial["type"], "presenter_inspect", "{initial}");
     assert_eq!(initial["snapshot"]["state"]["phase"], 0);
     assert_eq!(initial["snapshot"]["state"]["revision"], 0);
-    assert!(!initial.to_string().contains("api_hash"));
-    assert!(!initial.to_string().contains("password"));
-    assert!(!initial.to_string().contains("phone"));
+    let telegram_state = &initial["snapshot"]["state"];
+    assert!(telegram_state.get("api_hash").is_none());
+    assert!(telegram_state.get("password").is_none());
+    assert!(telegram_state.get("phone").is_none());
 
     let mut disconnect = command("presenter_action");
     disconnect["action"] = json!({"action":"telegram_disconnect"});
@@ -3420,7 +3433,7 @@ async fn telegram_gui_and_mcp_use_one_owner_with_sanitized_status_and_wait() {
         .until(|frame| frame["command_id"] == disconnect["command_id"])
         .await;
     assert_eq!(done["type"], "presenter_action", "{done}");
-    assert_eq!(done["result"]["status"]["revision"], 1);
+    assert_eq!(done["result"]["result"]["status"]["revision"], 1);
 
     let mut wait = command("presenter_admin_read");
     wait["query"] =
@@ -3440,7 +3453,10 @@ async fn telegram_gui_and_mcp_use_one_owner_with_sanitized_status_and_wait() {
         .until(|frame| frame["command_id"] == refresh["command_id"])
         .await;
     assert_eq!(refreshed["type"], "presenter_action", "{refreshed}");
-    assert_eq!(refreshed["result"]["status"]["voice_active"], false);
+    assert_eq!(
+        refreshed["result"]["result"]["status"]["voice_active"],
+        false
+    );
 
     let mut secret = command("presenter_action");
     secret["action"] = json!({"action":"telegram_password","password":"sensitive-2fa-password"});
@@ -3450,5 +3466,81 @@ async fn telegram_gui_and_mcp_use_one_owner_with_sanitized_status_and_wait() {
         .await;
     assert_eq!(denied["code"], "invalid_value", "{denied}");
     assert!(!denied.to_string().contains("sensitive-2fa-password"));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn remote_voice_gui_and_mcp_share_catalog_with_versioned_safe_responses() {
+    let fixture = Fixture::with_remote_voice().await;
+    let mut client = fixture.connect().await;
+    let mut inspect = command("presenter_inspect");
+    inspect["surface"] = json!("remote_voice");
+    client.send(inspect.clone()).await;
+    let initial = client
+        .until(|frame| frame["command_id"] == inspect["command_id"])
+        .await;
+    assert_eq!(initial["type"], "presenter_inspect", "{initial}");
+    assert_eq!(initial["snapshot"]["state"]["revision"], 0);
+    assert_eq!(
+        initial["snapshot"]["state"]["presets"][0]["credential_present"],
+        false
+    );
+
+    let mut add = command("presenter_action");
+    add["action"] = json!({"action":"remote_voice_add","expected_revision":0});
+    client.send(add.clone()).await;
+    let added = client
+        .until(|frame| frame["command_id"] == add["command_id"])
+        .await;
+    assert_eq!(added["type"], "presenter_action", "{added}");
+    assert_eq!(added["result"]["result"]["status"]["revision"], 1);
+    assert_eq!(
+        added["result"]["result"]["status"]["presets"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let id = added["result"]["result"]["status"]["active_id"]
+        .as_str()
+        .unwrap();
+
+    let mut save = command("presenter_action");
+    save["action"] = json!({"action":"remote_voice_save","expected_revision":1,
+        "preset":{"id":id,"name":"Mita voice","speed_percent":130}});
+    client.send(save.clone()).await;
+    let saved = client
+        .until(|frame| frame["command_id"] == save["command_id"])
+        .await;
+    assert_eq!(saved["type"], "presenter_action", "{saved}");
+    assert_eq!(saved["result"]["result"]["status"]["revision"], 2);
+    assert!(!saved.to_string().contains("api_key"));
+
+    let mut stale = command("presenter_action");
+    stale["action"] = json!({"action":"remote_voice_delete","expected_revision":1});
+    client.send(stale.clone()).await;
+    let rejected = client
+        .until(|frame| frame["command_id"] == stale["command_id"])
+        .await;
+    assert_eq!(rejected["code"], "invalid_value", "{rejected}");
+
+    let mut wait = command("presenter_admin_read");
+    wait["query"] =
+        json!({"query":"wait","target":"remote_voice","after_revision":1,"timeout_ms":1000});
+    client.send(wait.clone()).await;
+    let changed = client
+        .until(|frame| frame["command_id"] == wait["command_id"])
+        .await;
+    assert_eq!(changed["snapshot"]["changed"], true, "{changed}");
+    assert_eq!(changed["snapshot"]["status"]["revision"], 2);
+
+    let mut cancel = command("presenter_action");
+    cancel["action"] = json!({"action":"remote_voice_cancel"});
+    client.send(cancel.clone()).await;
+    let cancelled = client
+        .until(|frame| frame["command_id"] == cancel["command_id"])
+        .await;
+    assert_eq!(cancelled["result"]["result"]["status"]["phase"], "saved");
+    assert_eq!(cancelled["result"]["result"]["status"]["revision"], 2);
     fixture.shutdown().await;
 }

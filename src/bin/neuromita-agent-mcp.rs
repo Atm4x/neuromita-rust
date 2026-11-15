@@ -47,7 +47,7 @@ impl ServerHandler for NeuroMita {
                 "Read a live sanitized Presenter snapshot. Chat requires character.",
                 &["surface"],
                 json!({
-                    "surface": {"type":"string", "enum":["chat","ai_runtime","connections","speech","releases","audio_input","voice","guide","presets","ai_hub_install","telegram_auth"]},
+                    "surface": {"type":"string", "enum":["chat","ai_runtime","connections","speech","releases","audio_input","voice","guide","presets","ai_hub_install","telegram_auth","remote_voice"]},
                     "character": {"type":"string", "description":"Canonical character ID for surface=chat"}
                 }),
             ),
@@ -201,6 +201,21 @@ impl ServerHandler for NeuroMita {
                     }))
                 ])
             ).with_annotations(ToolAnnotations::new().read_only(false)),
+            Tool::new("presenter_remote_voice",
+                "Manage the SAME GUI Fish Audio catalog and preview: add, delete, select, save, preview, cancel. Inspect via inspect_presenter(surface=remote_voice) and wait(target=remote_voice). Saves require expected_revision. No API keys returned; secret updates require --allow-content and Core NEUROMITA_ENABLE_LOCAL_REMOTE_VOICE_SECRETS=1. Requires --allow-write; preview also requires --allow-content.",
+                serde_json::Map::from_iter([
+                    ("type".into(),json!("object")),("additionalProperties".into(),json!(false)),
+                    ("required".into(),json!(["action"])),
+                    ("properties".into(),json!({
+                        "action":{"type":"string","enum":["add","delete","select","select_with_save","save","preview","cancel"]},
+                        "expected_revision":{"type":"integer","minimum":0},
+                        "id":{"type":"string","minLength":1,"maxLength":64},
+                        "preset":{"type":"object"},
+                        "text":{"type":"string","minLength":1,"maxLength":4096},
+                        "character":{"type":"string"}
+                    }))
+                ])
+            ).with_annotations(ToolAnnotations::new().read_only(false)),
             Tool::new("presenter_tool_settings",
                 "Change the application-owned ToolSettings through the GUI SettingsPresenter. Toggle enabled/calculator/memory_search/web_search/web_reader or set tool chain depth 1..5. Requires --allow-write. Inspect presenter_settings_read(area=tools) first; endpoints and credentials remain withheld.",
                 serde_json::Map::from_iter([
@@ -285,7 +300,7 @@ impl ServerHandler for NeuroMita {
                 })),
             inspection_tool("presenter_wait",
                 "Wait for an actual Settings/Chat/CharacterMemory observer change (no polling). Timeout max 30s.",
-                &["target"],json!({"target":{"type":"string","enum":["settings","chat","memory","native_download","ai_hub_install","speech_transcript"]},
+                &["target"],json!({"target":{"type":"string","enum":["settings","chat","memory","native_download","ai_hub_install","speech_transcript","telegram_auth","remote_voice"]},
                     "character":{"type":"string"},"after_revision":{"type":"integer","minimum":0},
                     "after_version":{"type":"string","minLength":64,"maxLength":64},
                     "timeout_ms":{"type":"integer","minimum":1,"maximum":30000}})),
@@ -412,6 +427,7 @@ impl ServerHandler for NeuroMita {
                 | "presenter_speech_capture"
                 | "presenter_tool_settings"
                 | "presenter_telegram"
+                | "presenter_remote_voice"
         ) && !self.allow_write
         {
             return Err(ErrorData::invalid_params(
@@ -588,6 +604,7 @@ impl ServerHandler for NeuroMita {
                 | "presenter_speech_capture"
                 | "presenter_tool_settings"
                 | "presenter_telegram"
+                | "presenter_remote_voice"
         ) && !self.allow_write
         {
             return Err(ErrorData::invalid_params(
@@ -610,6 +627,16 @@ impl ServerHandler for NeuroMita {
         {
             return Err(ErrorData::invalid_params(
                 "Telegram auth requires --allow-content",
+                None,
+            ));
+        }
+        if request.name == "presenter_remote_voice"
+            && (args.get("action").and_then(Value::as_str) == Some("preview")
+                || args.get("preset").and_then(|p| p.get("api_key")).is_some())
+            && !self.allow_content
+        {
+            return Err(ErrorData::invalid_params(
+                "Remote Voice preview/credentials require --allow-content",
                 None,
             ));
         }
@@ -665,6 +692,7 @@ fn command_for_tool(name: &str, mut args: Map<String, Value>) -> Result<Value, E
                     | "presets"
                     | "ai_hub_install"
                     | "telegram_auth"
+                    | "remote_voice"
             ) {
                 return Err(ErrorData::invalid_params("unknown presenter surface", None));
             }
@@ -927,6 +955,66 @@ fn command_for_tool(name: &str, mut args: Map<String, Value>) -> Result<Value, E
             if !args.is_empty() {
                 return Err(ErrorData::invalid_params(
                     "unexpected Telegram fields",
+                    None,
+                ));
+            }
+            json!({"command":"presenter_action","action":command})
+        }
+        "presenter_remote_voice" => {
+            let action = string(&mut args, "action")?;
+            let command = match action.as_str() {
+                "cancel" => json!({"action":"remote_voice_cancel"}),
+                "add" | "delete" | "select" | "select_with_save" | "save" | "preview" => {
+                    let revision = args
+                        .remove("expected_revision")
+                        .and_then(|v| v.as_u64())
+                        .ok_or_else(|| {
+                            ErrorData::invalid_params("expected_revision is required", None)
+                        })?;
+                    let mut obj = json!({"action":format!("remote_voice_{action}"),"expected_revision":revision});
+                    if action == "select" || action == "select_with_save" {
+                        obj["id"] = json!(string(&mut args, "id")?);
+                    }
+                    if action == "save" || action == "preview" || action == "select_with_save" {
+                        let preset = args.remove("preset").ok_or_else(|| {
+                            ErrorData::invalid_params("preset patch required", None)
+                        })?;
+                        if !preset.is_object() || !preset.get("id").is_some_and(Value::is_string) {
+                            return Err(ErrorData::invalid_params(
+                                "preset patch must have ID",
+                                None,
+                            ));
+                        }
+                        obj["preset"] = preset;
+                    }
+                    if action == "preview" {
+                        let text = string(&mut args, "text")?;
+                        if text.is_empty() || text.len() > 4096 {
+                            return Err(ErrorData::invalid_params(
+                                "preview text length must be 1..4096",
+                                None,
+                            ));
+                        }
+                        obj["text"] = json!(text);
+                        if let Some(character) = args.remove("character") {
+                            if !character.is_string() {
+                                return Err(ErrorData::invalid_params("invalid character", None));
+                            }
+                            obj["character"] = character;
+                        }
+                    }
+                    obj
+                }
+                _ => {
+                    return Err(ErrorData::invalid_params(
+                        "unknown Remote Voice action",
+                        None,
+                    ));
+                }
+            };
+            if !args.is_empty() {
+                return Err(ErrorData::invalid_params(
+                    "unexpected Remote Voice fields",
                     None,
                 ));
             }
@@ -1729,5 +1817,58 @@ mod telegram_admin_tests {
             )
             .is_ok()
         );
+    }
+}
+
+#[cfg(test)]
+mod remote_voice_tool_tests {
+    use super::*;
+    fn args(value: Value) -> Map<String, Value> {
+        value.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn remote_voice_tools_expose_safe_revision_fenced_actions() {
+        let cmd = command_for_tool(
+            "presenter_remote_voice",
+            args(json!({"action":"save", "expected_revision":7,
+            "preset":{"id":"fish_audio_default","name":"Custom","speed_percent":120}})),
+        )
+        .unwrap();
+        assert_eq!(cmd["command"], "presenter_action");
+        assert_eq!(cmd["action"]["action"], "remote_voice_save");
+        assert_eq!(cmd["action"]["expected_revision"], 7);
+        assert!(
+            command_for_tool(
+                "presenter_remote_voice",
+                args(json!({"action":"save",
+            "preset":{"id":"fish_audio_default"}}))
+            )
+            .is_err()
+        );
+        assert!(
+            command_for_tool(
+                "presenter_remote_voice",
+                args(json!({"action":"preview", "expected_revision":1,
+            "preset":{"id":"fish_audio_default"}, "text":""}))
+            )
+            .is_err()
+        );
+        assert!(
+            command_for_tool(
+                "presenter_remote_voice",
+                args(json!({"action":"cancel", "api_key":"leak"}))
+            )
+            .is_err()
+        );
+        let inspect =
+            command_for_tool("inspect_presenter", args(json!({"surface":"remote_voice"}))).unwrap();
+        assert_eq!(inspect["surface"], "remote_voice");
+        let wait = command_for_tool(
+            "presenter_wait",
+            args(json!({"target":"remote_voice","after_revision":4})),
+        )
+        .unwrap();
+        assert_eq!(wait["query"]["target"], "remote_voice");
     }
 }
