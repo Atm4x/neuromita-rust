@@ -47,7 +47,7 @@ impl ServerHandler for NeuroMita {
                 "Read a live sanitized Presenter snapshot. Chat requires character.",
                 &["surface"],
                 json!({
-                    "surface": {"type":"string", "enum":["chat","ai_runtime","connections","speech","releases","audio_input","voice","guide","presets","ai_hub_install"]},
+                    "surface": {"type":"string", "enum":["chat","ai_runtime","connections","speech","releases","audio_input","voice","guide","presets","ai_hub_install","telegram_auth"]},
                     "character": {"type":"string", "description":"Canonical character ID for surface=chat"}
                 }),
             ),
@@ -186,6 +186,21 @@ impl ServerHandler for NeuroMita {
                 "Rescan the application's authoritative AIData speech catalog and attached microphone devices. Same source as GUI RefreshSpeechInventory; read-only, no worker activation.",
                 &[],json!({}),
             ),
+            Tool::new("presenter_telegram",
+                "Manage the SAME GUI Telegram MTProto session: connect, code, password, disconnect or refresh voice. Requires --allow-write. Secret-bearing actions also require --allow-content and NEUROMITA_ENABLE_LOCAL_TELEGRAM_AUTH=1 in the Core host (trusted local machine only; loopback TCP is unauthenticated). No credentials returned. Inspect via inspect_presenter(surface=telegram_auth).",
+                serde_json::Map::from_iter([
+                    ("type".into(),json!("object")),("additionalProperties".into(),json!(false)),
+                    ("required".into(),json!(["action"])),
+                    ("properties".into(),json!({
+                        "action":{"type":"string","enum":["connect","code","password","disconnect","refresh_voice"]},
+                        "api_id":{"type":"string","maxLength":32},
+                        "api_hash":{"type":"string","maxLength":128},
+                        "phone":{"type":"string","maxLength":64},
+                        "code":{"type":"string","maxLength":32},
+                        "password":{"type":"string","maxLength":1024}
+                    }))
+                ])
+            ).with_annotations(ToolAnnotations::new().read_only(false)),
             Tool::new("presenter_tool_settings",
                 "Change the application-owned ToolSettings through the GUI SettingsPresenter. Toggle enabled/calculator/memory_search/web_search/web_reader or set tool chain depth 1..5. Requires --allow-write. Inspect presenter_settings_read(area=tools) first; endpoints and credentials remain withheld.",
                 serde_json::Map::from_iter([
@@ -396,6 +411,7 @@ impl ServerHandler for NeuroMita {
                 | "presenter_speech_session"
                 | "presenter_speech_capture"
                 | "presenter_tool_settings"
+                | "presenter_telegram"
         ) && !self.allow_write
         {
             return Err(ErrorData::invalid_params(
@@ -571,6 +587,7 @@ impl ServerHandler for NeuroMita {
                 | "presenter_speech_session"
                 | "presenter_speech_capture"
                 | "presenter_tool_settings"
+                | "presenter_telegram"
         ) && !self.allow_write
         {
             return Err(ErrorData::invalid_params(
@@ -581,6 +598,18 @@ impl ServerHandler for NeuroMita {
         if request.name == "select_active_preset" && !self.allow_write {
             return Err(ErrorData::invalid_params(
                 "MCP was started without --allow-write",
+                None,
+            ));
+        }
+        if request.name == "presenter_telegram"
+            && matches!(
+                args.get("action").and_then(Value::as_str),
+                Some("connect" | "code" | "password")
+            )
+            && !self.allow_content
+        {
+            return Err(ErrorData::invalid_params(
+                "Telegram auth requires --allow-content",
                 None,
             ));
         }
@@ -635,6 +664,7 @@ fn command_for_tool(name: &str, mut args: Map<String, Value>) -> Result<Value, E
                     | "guide"
                     | "presets"
                     | "ai_hub_install"
+                    | "telegram_auth"
             ) {
                 return Err(ErrorData::invalid_params("unknown presenter surface", None));
             }
@@ -855,6 +885,52 @@ fn command_for_tool(name: &str, mut args: Map<String, Value>) -> Result<Value, E
                 .filter(|n| *n <= 100)
                 .ok_or_else(|| ErrorData::invalid_params("volume must be 0..100", None))?;
             json!({"command":"presenter_action","action":{"action":"voice_set_volume","volume":volume}})
+        }
+        "presenter_telegram" => {
+            let action = string(&mut args, "action")?;
+            let command = match action.as_str() {
+                "connect" => {
+                    let api_id = string(&mut args, "api_id")?;
+                    let api_hash = string(&mut args, "api_hash")?;
+                    let phone = string(&mut args, "phone")?;
+                    if api_id.len() > 32
+                        || api_hash.is_empty()
+                        || api_hash.len() > 128
+                        || phone.is_empty()
+                        || phone.len() > 64
+                    {
+                        return Err(ErrorData::invalid_params(
+                            "invalid Telegram auth input",
+                            None,
+                        ));
+                    }
+                    json!({"action":"telegram_connect","api_id":api_id,"api_hash":api_hash,"phone":phone})
+                }
+                "code" => {
+                    let code = string(&mut args, "code")?;
+                    if code.is_empty() || code.len() > 32 {
+                        return Err(ErrorData::invalid_params("invalid code", None));
+                    }
+                    json!({"action":"telegram_code","code":code})
+                }
+                "password" => {
+                    let password = string(&mut args, "password")?;
+                    if password.is_empty() || password.len() > 1024 {
+                        return Err(ErrorData::invalid_params("invalid password", None));
+                    }
+                    json!({"action":"telegram_password","password":password})
+                }
+                "disconnect" => json!({"action":"telegram_disconnect"}),
+                "refresh_voice" => json!({"action":"telegram_refresh_voice"}),
+                _ => return Err(ErrorData::invalid_params("unknown Telegram action", None)),
+            };
+            if !args.is_empty() {
+                return Err(ErrorData::invalid_params(
+                    "unexpected Telegram fields",
+                    None,
+                ));
+            }
+            json!({"command":"presenter_action","action":command})
         }
         "presenter_tool_settings" => {
             let action = string(&mut args, "action")?;
@@ -1610,6 +1686,48 @@ mod speech_capture_admin_tests {
                 args(json!({"include_content":"yes"}))
             )
             .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod telegram_admin_tests {
+    use super::*;
+    fn args(value: Value) -> Map<String, Value> {
+        value.as_object().unwrap().clone()
+    }
+    #[test]
+    fn auth_payloads_are_typed_bounded_and_never_echoed_in_mcp_metadata() {
+        for (action, extra) in [
+            (
+                "connect",
+                json!({"api_id":"1234","api_hash":"secret","phone":"+123456789"}),
+            ),
+            ("code", json!({"code":"456789"})),
+            ("password", json!({"password":"private password"})),
+            ("disconnect", json!({})),
+            ("refresh_voice", json!({})),
+        ] {
+            let mut object = extra.as_object().unwrap().clone();
+            object.insert("action".into(), json!(action));
+            let cmd = command_for_tool("presenter_telegram", object).unwrap();
+            assert_eq!(cmd["action"]["action"], format!("telegram_{action}"));
+            assert_eq!(cmd["command"], "presenter_action");
+        }
+        for bad in [
+            json!({"action":"code","code":""}),
+            json!({"action":"connect","api_id":"1"}),
+            json!({"action":"password","password":"x","debug":true}),
+            json!({"action":"unknown"}),
+        ] {
+            assert!(command_for_tool("presenter_telegram", args(bad)).is_err());
+        }
+        assert!(
+            command_for_tool(
+                "inspect_presenter",
+                args(json!({"surface":"telegram_auth"}))
+            )
+            .is_ok()
         );
     }
 }

@@ -113,11 +113,25 @@ impl Fixture {
         Self::with_voice_and_hub(8, |_| {}, false, Some(root)).await
     }
 
+    async fn with_telegram() -> Self {
+        Self::with_voice_hub_telegram(8, |_| {}, false, None, true).await
+    }
+
     async fn with_voice_and_hub(
         queue: usize,
         configure: impl FnOnce(&mut ServerConfig),
         enabled: bool,
         hub_root: Option<std::path::PathBuf>,
+    ) -> Self {
+        Self::with_voice_hub_telegram(queue, configure, enabled, hub_root, false).await
+    }
+
+    async fn with_voice_hub_telegram(
+        queue: usize,
+        configure: impl FnOnce(&mut ServerConfig),
+        enabled: bool,
+        hub_root: Option<std::path::PathBuf>,
+        telegram: bool,
     ) -> Self {
         let serial = APPLICATION.lock().await;
         let preset = GenerationPreset::new(ProviderTemplate::Gemini(
@@ -148,6 +162,14 @@ impl Fixture {
         }
         if enabled {
             config.voice = Arc::new(FixtureVoice);
+        }
+        if telegram {
+            let voice = Arc::new(neuromita::telegram_voice::DynamicTelegramVoice::default());
+            config.telegram_admin = Some(Arc::new(neuromita::telegram_admin::TelegramAdmin::new(
+                std::env::temp_dir().join(format!("nm-telegram-ipc-{}", Uuid::new_v4())),
+                voice.clone(),
+            )));
+            config.voice = voice;
         }
         config.game_link = Some(GameLinkConfig::new("127.0.0.1:0".parse().unwrap()));
         let app = bounded(ApplicationLifecycle::start(config)).await.unwrap();
@@ -3371,4 +3393,62 @@ async fn speech_transcript_observation_uses_the_same_ticket_fenced_hub_as_gui() 
         .unwrap();
     assert_eq!(gui.try_recv().unwrap().revision, 2);
     assert_eq!(bus.latest().unwrap().revision, 2);
+}
+
+#[tokio::test]
+async fn telegram_gui_and_mcp_use_one_owner_with_sanitized_status_and_wait() {
+    let fixture = Fixture::with_telegram().await;
+    let mut client = fixture.connect().await;
+
+    let mut inspect = command("presenter_inspect");
+    inspect["surface"] = json!("telegram_auth");
+    client.send(inspect.clone()).await;
+    let initial = client
+        .until(|frame| frame["command_id"] == inspect["command_id"])
+        .await;
+    assert_eq!(initial["type"], "presenter_inspect", "{initial}");
+    assert_eq!(initial["snapshot"]["state"]["phase"], 0);
+    assert_eq!(initial["snapshot"]["state"]["revision"], 0);
+    assert!(!initial.to_string().contains("api_hash"));
+    assert!(!initial.to_string().contains("password"));
+    assert!(!initial.to_string().contains("phone"));
+
+    let mut disconnect = command("presenter_action");
+    disconnect["action"] = json!({"action":"telegram_disconnect"});
+    client.send(disconnect.clone()).await;
+    let done = client
+        .until(|frame| frame["command_id"] == disconnect["command_id"])
+        .await;
+    assert_eq!(done["type"], "presenter_action", "{done}");
+    assert_eq!(done["result"]["status"]["revision"], 1);
+
+    let mut wait = command("presenter_admin_read");
+    wait["query"] =
+        json!({"query":"wait","target":"telegram_auth","after_revision":0,"timeout_ms":1000});
+    client.send(wait.clone()).await;
+    let observed = client
+        .until(|frame| frame["command_id"] == wait["command_id"])
+        .await;
+    assert_eq!(observed["type"], "presenter_admin_read", "{observed}");
+    assert_eq!(observed["snapshot"]["changed"], true);
+    assert_eq!(observed["snapshot"]["status"]["revision"], 1);
+
+    let mut refresh = command("presenter_action");
+    refresh["action"] = json!({"action":"telegram_refresh_voice"});
+    client.send(refresh.clone()).await;
+    let refreshed = client
+        .until(|frame| frame["command_id"] == refresh["command_id"])
+        .await;
+    assert_eq!(refreshed["type"], "presenter_action", "{refreshed}");
+    assert_eq!(refreshed["result"]["status"]["voice_active"], false);
+
+    let mut secret = command("presenter_action");
+    secret["action"] = json!({"action":"telegram_password","password":"sensitive-2fa-password"});
+    client.send(secret.clone()).await;
+    let denied = client
+        .until(|frame| frame["command_id"] == secret["command_id"])
+        .await;
+    assert_eq!(denied["code"], "invalid_value", "{denied}");
+    assert!(!denied.to_string().contains("sensitive-2fa-password"));
+    fixture.shutdown().await;
 }

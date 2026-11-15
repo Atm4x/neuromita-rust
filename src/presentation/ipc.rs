@@ -123,6 +123,19 @@ pub(crate) enum PresenterAction {
         character: Option<CharacterId>,
         voice_id: String,
     },
+    TelegramConnect {
+        api_id: String,
+        api_hash: String,
+        phone: String,
+    },
+    TelegramCode {
+        code: String,
+    },
+    TelegramPassword {
+        password: String,
+    },
+    TelegramDisconnect {},
+    TelegramRefreshVoice {},
     NativeRefresh {},
     NativeSelect {
         model_id: String,
@@ -201,6 +214,7 @@ pub(crate) enum PresenterSurface {
     Guide,
     Presets,
     AiHubInstall,
+    TelegramAuth,
 }
 
 #[derive(Clone)]
@@ -225,6 +239,7 @@ pub(crate) struct PresenterProbe {
     pub(super) speech_capture: crate::app::SharedSpeechCapture,
     pub(super) ai_hub_install:
         Option<std::sync::Arc<crate::ai_runtime::install_coordinator::AiHubInstallCoordinator>>,
+    pub(super) telegram_admin: Option<std::sync::Arc<crate::telegram_admin::TelegramAdmin>>,
 }
 
 impl PresenterProbe {
@@ -250,6 +265,7 @@ impl PresenterProbe {
             tokio::sync::Mutex<crate::audio::controller::SpeechSessionController>,
         >,
         speech_capture: crate::app::SharedSpeechCapture,
+        telegram_admin: Option<std::sync::Arc<crate::telegram_admin::TelegramAdmin>>,
     ) -> Self {
         Self {
             chat,
@@ -269,6 +285,7 @@ impl PresenterProbe {
             speech_controller,
             speech_capture,
             ai_hub_install,
+            telegram_admin,
         }
     }
 
@@ -561,7 +578,16 @@ impl PresenterProbe {
                     .tts
                     .save_python_preferences(preferences)
                     .map_err(|e| e.to_string())?;
-                json!({"action":"speech_save_tts","settings_revision":self.settings.snapshot().map_err(|e|e.to_string())?.revision})
+                let telegram = if let Some(owner) = &self.telegram_admin {
+                    json!(
+                        owner
+                            .refresh_voice(&self.settings.tts.preferences.get())
+                            .await?
+                    )
+                } else {
+                    Value::Null
+                };
+                json!({"action":"speech_save_tts","settings_revision":self.settings.snapshot().map_err(|e|e.to_string())?.revision,"telegram_auth":telegram})
             }
             SpeechSaveAsr {
                 mut preferences,
@@ -620,6 +646,74 @@ impl PresenterProbe {
                     .map_err(|e| e.to_string())?;
                 json!({"action":"speech_save_character_voice", "character":character,
                     "settings_revision":self.settings.snapshot().map_err(|e|e.to_string())?.revision})
+            }
+            TelegramConnect {
+                api_id,
+                api_hash,
+                phone,
+            } => {
+                if std::env::var("NEUROMITA_ENABLE_LOCAL_TELEGRAM_AUTH").as_deref() != Ok("1") {
+                    return Err("Telegram authentication over the loopback control channel is disabled; enable explicitly only on a trusted machine".into());
+                }
+                let owner = self
+                    .telegram_admin
+                    .as_ref()
+                    .ok_or("Telegram administration is not configured")?;
+                let status = owner
+                    .connect(
+                        &api_id,
+                        &api_hash,
+                        &phone,
+                        &self.settings.tts.preferences.get(),
+                    )
+                    .await?;
+                json!({"action":"telegram_connect","status":status})
+            }
+            TelegramCode { code } => {
+                if std::env::var("NEUROMITA_ENABLE_LOCAL_TELEGRAM_AUTH").as_deref() != Ok("1") {
+                    return Err(
+                        "Telegram authentication over the loopback control channel is disabled"
+                            .into(),
+                    );
+                }
+                let owner = self
+                    .telegram_admin
+                    .as_ref()
+                    .ok_or("Telegram administration is not configured")?;
+                let status = owner
+                    .submit_code(&code, &self.settings.tts.preferences.get())
+                    .await?;
+                json!({"action":"telegram_code","status":status})
+            }
+            TelegramPassword { password } => {
+                if std::env::var("NEUROMITA_ENABLE_LOCAL_TELEGRAM_AUTH").as_deref() != Ok("1") {
+                    return Err(
+                        "Telegram authentication over the loopback control channel is disabled"
+                            .into(),
+                    );
+                }
+                let owner = self
+                    .telegram_admin
+                    .as_ref()
+                    .ok_or("Telegram administration is not configured")?;
+                let status = owner
+                    .submit_password(&password, &self.settings.tts.preferences.get())
+                    .await?;
+                json!({"action":"telegram_password","status":status})
+            }
+            TelegramDisconnect {} => {
+                let owner = self
+                    .telegram_admin
+                    .as_ref()
+                    .ok_or("Telegram administration is not configured")?;
+                json!({"action":"telegram_disconnect","status":owner.disconnect().await})
+            }
+            TelegramRefreshVoice {} => {
+                let owner = self
+                    .telegram_admin
+                    .as_ref()
+                    .ok_or("Telegram administration is not configured")?;
+                json!({"action":"telegram_refresh_voice","status":owner.refresh_voice(&self.settings.tts.preferences.get()).await?})
             }
             NativeRefresh {} => {
                 let native = self
@@ -1081,6 +1175,19 @@ impl PresenterProbe {
                     json!({"schema_version":1,"surface":"guide","source":"onboarding_settings_presenter",
                     "level":self.guide.guide_level.get(),"page":self.guide.guide_page.get(),
                     "completed":self.guide.guide_completed.get()}),
+                )
+            }
+            PresenterSurface::TelegramAuth => {
+                if character.is_some() {
+                    return Err("telegram_auth does not accept character");
+                }
+                let owner = self
+                    .telegram_admin
+                    .as_ref()
+                    .ok_or("Telegram administration is not configured")?;
+                Ok(
+                    json!({"schema_version":1,"surface":"telegram_auth","source":"telegram_admin", "state":owner.snapshot(),
+                    "privacy":"no account identifier, API ID/hash, phone, login code, password or session token"}),
                 )
             }
             PresenterSurface::Connections => {

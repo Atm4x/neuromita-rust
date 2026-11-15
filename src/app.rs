@@ -130,6 +130,7 @@ pub struct ApplicationConfig {
     pub voice: Arc<dyn VoiceProvider>,
     /// Optional dedicated remote voice catalog; enabled only by the desktop host.
     pub remote_voice_store: Option<std::path::PathBuf>,
+    pub telegram_admin: Option<Arc<crate::telegram_admin::TelegramAdmin>>,
     pub ai_runtime: Option<AiApplicationConfig>,
     pub ai_hub_install_root: Option<std::path::PathBuf>,
     pub ai_speech_inventory: Option<crate::ai_runtime::speech_catalog::SpeechInventory>,
@@ -183,6 +184,7 @@ impl ApplicationConfig {
             limits,
             voice: Arc::new(UnavailableVoiceProvider),
             remote_voice_store: None,
+            telegram_admin: None,
             ai_runtime: None,
             ai_hub_install_root: None,
             ai_speech_inventory: None,
@@ -859,6 +861,7 @@ impl ApplicationLifecycle {
             limits,
             voice,
             remote_voice_store,
+            telegram_admin,
             ai_runtime,
             ai_hub_install_root,
             ai_speech_inventory,
@@ -1560,6 +1563,7 @@ impl ApplicationLifecycle {
                 speech_model_catalog,
                 Arc::clone(&speech_controller),
                 speech_capture.clone(),
+                telegram_admin.clone(),
             )),
         )));
         let stop = CancellationToken::new();
@@ -1585,6 +1589,7 @@ impl ApplicationLifecycle {
                 settings: settings_presenter,
                 presets: presets_presenter,
                 characters: CharactersPresenter::new(bindings.characters.clone()),
+                telegram_admin,
             },
             bindings,
             timeline,
