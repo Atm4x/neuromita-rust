@@ -16,8 +16,9 @@ fn fingerprint(value: &str) -> String {
 
 #[test]
 fn supplied_prompt_corpus_renders_and_matches_python_reference() {
-    let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/prompt-corpus");
-    let root = directory.join("Prompts");
+    let project = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let directory = project.join("tests/fixtures/prompt-corpus");
+    let root = project.join("Prompts");
     let reference: Value = serde_json::from_slice(
         &std::fs::read(directory.join("python_reference_sha256.json")).unwrap(),
     )
@@ -83,8 +84,7 @@ fn supplied_prompt_corpus_renders_and_matches_python_reference() {
 
 #[test]
 fn supplied_prompt_corpus_preserves_embedded_json_and_local_scope() {
-    let root =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/prompt-corpus/Prompts");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Prompts");
     let catalog = PromptCatalog::new(root);
     let crazy = catalog
         .capture(CharacterId::Crazy, Some("Default"))
@@ -116,8 +116,7 @@ fn supplied_prompt_corpus_preserves_embedded_json_and_local_scope() {
 
 #[test]
 fn supplied_prompt_corpus_all_seed_paths_are_interpretable() {
-    let root =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/prompt-corpus/Prompts");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Prompts");
     let catalog = PromptCatalog::new(root);
     let flags = [
         "SEED_INITIAL_MEMORIES",
@@ -149,7 +148,8 @@ fn supplied_postdsl_rules_match_python_reference() {
     use neuromita::{generation::StructuredResponse, prompts::PostDslProgram};
     use serde_json::{Map, json};
 
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/prompt-corpus");
+    let project = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = project.join("tests/fixtures/prompt-corpus");
     let reference: Value =
         serde_json::from_slice(&std::fs::read(root.join("python_postdsl_reference.json")).unwrap())
             .unwrap();
@@ -157,7 +157,8 @@ fn supplied_postdsl_rules_match_python_reference() {
     let mut total = 0;
     for (name, expected) in reference["sets"].as_object().unwrap() {
         let script = std::fs::read_to_string(
-            root.join("Prompts")
+            project
+                .join("Prompts")
                 .join(name)
                 .join("PostScripts/main_rules.postscript"),
         )
@@ -201,8 +202,7 @@ fn supplied_custom_params_apply_real_formulas_and_boolean_fields() {
     use neuromita::generation::StructuredResponse;
     use serde_json::{Map, json};
 
-    let root =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/prompt-corpus/Prompts");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Prompts");
     let catalog = PromptCatalog::new(root);
     for name in ["By_mactep_kot_new_mini", "By_mactep_kot_new_mini_Json"] {
         let snapshot = catalog

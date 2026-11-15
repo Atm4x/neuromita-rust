@@ -9,4 +9,5 @@ Cargo.lock text eol=lf
 vendor/** -text -eol
 assets/** -text -eol whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 future/gui-reference/** -text -eol
+Prompts/** binary -eol -whitespace
 localization/python/** -text -eol whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

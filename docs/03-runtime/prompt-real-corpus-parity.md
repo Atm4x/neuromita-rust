@@ -2,7 +2,10 @@
 
 Validated on **2026-11-05** against the user-supplied `Prompts.zip`.
 The full original directory is kept byte-for-byte under
-`tests/fixtures/prompt-corpus/Prompts/` (538 files, 31 prompt sets, 9 characters).
+`Prompts/` (538 files, 31 prompt sets, 9 characters). It is byte-identical to
+the `Prompts/` directory in `PythonBuild-v2026.06.22.1`. For a portable
+desktop profile, place this directory under its data root or explicitly set
+`NEUROMITA_PROMPTS_DIR` to the desired source directory.
 The uploaded archive SHA-256 was:
 `0e5cae2801096d47be4eef3230a15c5f0c914bcb93b4eee16430eb17384073c6`.
 `Legacy` files are preserved as fixtures; they were not modified or integrated.
@@ -84,7 +87,7 @@ With the Python NeuroMita source checkout and its supported interpreter:
 ```bash
 python3 tools/prompt_parity/python_reference.py \
   --python-src /path/to/NeuroMita/src \
-  --prompts tests/fixtures/prompt-corpus/Prompts \
+  --prompts Prompts \
   --output /tmp/prompt-reference
 cargo test --offline --test prompt_corpus
 ```
