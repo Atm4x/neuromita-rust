@@ -65,6 +65,31 @@ impl ChatPresenter {
         self.api.registry.trace(id)
     }
 
+    /// Use the same last-retained-request selection as the desktop GUI. A missing
+    /// trace is not evidence that a request never existed (retention is bounded).
+    pub fn latest_diagnostics(
+        &self,
+        character: CharacterId,
+    ) -> Result<Option<(RequestId, String)>, serde_json::Error> {
+        let model = self.snapshot();
+        let trace = model
+            .requests
+            .iter()
+            .rev()
+            .find(|row| row.metadata.character_id == character)
+            .and_then(|row| {
+                self.trace(row.metadata.id)
+                    .map(|trace| (row.metadata.id, trace))
+            });
+        trace
+            .map(|(id, trace)| {
+                trace
+                    .section_json(crate::request::DiagnosticSection::All)
+                    .map(|text| (id, text))
+            })
+            .transpose()
+    }
+
     pub fn reply(
         &self,
         character: CharacterId,

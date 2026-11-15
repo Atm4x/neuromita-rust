@@ -32,8 +32,8 @@ use neuromita::{
     },
     onboarding::GuideChange,
     presentation::{
-        ConversationChange, ConversationChangePreview, ConversationSnapshot, GuiPresenter,
-        PresetSlot, native_download::NativeDownloadPresenter,
+        ChatSelection, ConversationChange, ConversationChangePreview, ConversationSnapshot,
+        GuiPresenter, PresetSlot, native_download::NativeDownloadPresenter,
     },
     remote_voice::{RemoteVoiceCatalogAction, RemoteVoiceConfig, RemoteVoicePreset},
     request::{CancelResult, RequestId},
@@ -166,7 +166,7 @@ pub enum Command {
     SetToolDepth(u8),
     SetMemoryDedupEnabled(bool),
     SetMemoryDedupThreshold(u16),
-    Select(ChatOrigin),
+    Select(ChatOrigin, CharacterId),
     Send(ChatOrigin, String),
     AttachFile(ChatOrigin, String, String),
     Cancel(ChatOrigin, RequestId),
@@ -253,6 +253,7 @@ pub enum Update {
     GraphApplyResult(uuid::Uuid, Result<(), String>),
     Confirmation(ChatOrigin, Option<(ConversationChange, usize)>),
     Diagnostics(ChatOrigin, String),
+    Selection(ChatSelection),
     ConversationError(ChatOrigin, String),
     Connections(std::sync::Arc<neuromita::server::ServerSnapshot>),
     Administration(Box<super::settings::AdministrationSnapshot>),
@@ -421,7 +422,16 @@ async fn enable_speech_session(
         },
     )
     .unwrap_or_default();
-    app.start_speech_capture_for(origin.character, origin.selection_revision, ffmpeg, ffplay)
+    app.presenter()
+        .selection
+        .start_capture(
+            ChatSelection {
+                character: origin.character,
+                revision: origin.selection_revision,
+            },
+            ffmpeg,
+            ffplay,
+        )
         .await
 }
 
@@ -723,10 +733,11 @@ async fn observe(
         phase: i32::from(telegram_status.phase),
         status: format!("Telegram: {}", telegram_status.status),
     });
-    let mut character = CharacterId::Crazy;
-    let mut selection_revision = 0;
-    app.set_speech_gui_route(character, selection_revision);
-    let mut speech_owner: Option<ChatOrigin> = None;
+    let current = administration.selection.snapshot();
+    let mut character = current.character;
+    let mut selection_revision = current.revision;
+    let mut selected = administration.selection.observe();
+    publish(Update::Selection(current));
     let mut debug_character = CharacterId::Crazy;
     let mut requests = presenter.observe_requests();
     let mut settings = presenter.observe_settings().map_err(|e| e.to_string())?;
@@ -816,6 +827,17 @@ async fn observe(
                 } else {
                     telegram_watch_closed = true;
                 }
+            },
+            changed = selected.changed() => {
+                changed.map_err(|_| "Chat selection observer closed")?;
+                let value = *selected.borrow_and_update();
+                character = value.character;
+                selection_revision = value.revision;
+                pending = None;
+                publish(Update::Selection(value));
+                publish(Update::Confirmation(ChatOrigin {
+                    character, selection_revision,
+                }, None));
             },
             command = receive.recv() => match command {
                 Some(command @ Command::SaveCharacterProfile(character, ..)) |
@@ -949,12 +971,9 @@ async fn observe(
                             character, selection_revision,
                         }).await
                     } else {
-                        app.stop_speech_capture().await;
+                        administration.selection.stop_capture().await;
                         Ok(())
                     };
-                    if result.is_ok() {
-                        speech_owner = enabled.then_some(ChatOrigin { character, selection_revision });
-                    }
                     if let Err(error) = result { publish(Update::AdminError(error)); }
                     publish(Update::SpeechSessionStatus(administration.speech.snapshot()));
                 },
@@ -979,7 +998,7 @@ async fn observe(
                                     match app.press_speech_button(true).await {
                                         Ok(()) => Ok(()),
                                         Err(error) => {
-                                            app.stop_speech_capture().await;
+                                            administration.selection.stop_capture().await;
                                             Err(error.to_string())
                                         }
                                     }
@@ -991,12 +1010,9 @@ async fn observe(
                         }
                     } else {
                         let _ = app.press_speech_button(false).await;
-                        app.stop_speech_capture().await;
+                        administration.selection.stop_capture().await;
                         Ok(())
                     };
-                    if result.is_ok() {
-                        speech_owner = enabled.then_some(origin);
-                    }
                     if let Err(error) = result { publish(Update::ChatError(origin, error)); }
                     publish(Update::SpeechSessionStatus(administration.speech.snapshot()));
                 },
@@ -1242,29 +1258,22 @@ async fn observe(
                         character.index() as i32,
                         selection_revision,
                     ) {
-                        let model = administration.chat.snapshot();
-                        let trace = model.requests.iter().rev().find(|r| r.metadata.character_id == origin.character).and_then(|r| administration.chat.trace(r.metadata.id));
-                        let text = match trace {
-                            Some(trace) => match trace.section_json(neuromita::request::DiagnosticSection::All) {
-                                Ok(text) => text,
-                                Err(error) => format!("Cannot export request diagnostics: {error}"),
-                            },
-                            None => "No retained request trace".into(),
+                        let text = match administration.chat.latest_diagnostics(origin.character) {
+                            Ok(Some((_, text))) => text,
+                            Ok(None) => "No retained request trace".into(),
+                            Err(error) => format!("Cannot export request diagnostics: {error}"),
                         };
                         publish(Update::Diagnostics(origin, text));
                     }
                 },
-                Some(Command::Select(origin)) => {
-                    if speech_owner.is_some_and(|owner| owner != origin) {
-                        app.stop_speech_capture().await;
-                        speech_owner = None;
-                        publish(Update::SpeechSessionStatus(administration.speech.snapshot()));
+                Some(Command::Select(origin, new_character)) => {
+                    let expected = ChatSelection {
+                        character: origin.character,
+                        revision: origin.selection_revision,
+                    };
+                    if let Err(error) = administration.selection.select(expected, new_character).await {
+                        publish(Update::AdminError(error));
                     }
-                    character = origin.character;
-                    selection_revision = origin.selection_revision;
-                    app.set_speech_gui_route(character, selection_revision);
-                    pending = None;
-                    publish(Update::Confirmation(origin, None));
                 },
                 Some(Command::Refresh) => {},
                 Some(Command::LoadOlder(origin, ticket, at, expected, offset)) => {

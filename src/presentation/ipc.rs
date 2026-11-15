@@ -248,6 +248,7 @@ pub(crate) enum PresenterSurface {
 #[derive(Clone)]
 pub(crate) struct PresenterProbe {
     pub(super) chat: ChatPresenter,
+    pub(super) selection: std::sync::Arc<super::ChatSelectionPresenter>,
     runtime: RuntimeStatePresenter,
     speech: super::SpeechSessionPresenter,
     releases: ReleasesPresenter,
@@ -316,6 +317,7 @@ pub(super) fn request_status_json(row: &super::RequestView) -> Value {
 impl PresenterProbe {
     pub(crate) fn new(
         chat: ChatPresenter,
+        selection: std::sync::Arc<super::ChatSelectionPresenter>,
         runtime: RuntimeStatePresenter,
         speech: super::SpeechSessionPresenter,
         releases: ReleasesPresenter,
@@ -344,6 +346,7 @@ impl PresenterProbe {
     ) -> Self {
         Self {
             chat,
+            selection,
             runtime,
             speech,
             releases,
@@ -615,12 +618,19 @@ impl PresenterProbe {
                         };
                     let ffmpeg = checked_path(ffmpeg)?;
                     let ffplay = checked_path(ffplay)?;
-                    self.speech_capture
-                        .start(character, revision, ffmpeg, ffplay)
+                    self.selection
+                        .start_capture(
+                            super::ChatSelection {
+                                character,
+                                revision,
+                            },
+                            ffmpeg,
+                            ffplay,
+                        )
                         .await?;
                     if press_on_start {
                         if let Err(error) = self.speech_controller.lock().await.press(true).await {
-                            self.speech_capture.stop().await;
+                            self.selection.stop_capture().await;
                             return Err(error.to_string());
                         }
                     }
@@ -639,7 +649,7 @@ impl PresenterProbe {
                                 .into(),
                         );
                     }
-                    self.speech_capture.stop().await;
+                    self.selection.stop_capture().await;
                     json!({"action":"speech_capture","enabled":false,"phase":format!("{:?}",self.speech.snapshot().phase)})
                 }
             }

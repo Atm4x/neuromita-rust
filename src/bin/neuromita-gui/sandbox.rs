@@ -273,6 +273,29 @@ pub fn attach(
     Ok(runtime)
 }
 
+fn render_chat_selection(
+    window: &AppWindow,
+    revision: &AtomicU64,
+    selected: neuromita::presentation::ChatSelection,
+) {
+    revision.store(selected.revision, Ordering::Release);
+    window.set_chat_character(selected.character.index() as i32);
+    window.set_chat_has_older(false);
+    window.set_chat_older_loading(false);
+    reconcile_rows(window, Vec::new());
+    let conversation = window.global::<ConversationUi>();
+    conversation.set_confirmation(0);
+    conversation.set_diagnostics("".into());
+    conversation.set_history(false);
+    conversation.set_edit_target("".into());
+    conversation.set_edit_draft("".into());
+    conversation.set_copy_open(false);
+    conversation.set_copy_text("".into());
+    window.set_chat_sending(false);
+    window.set_chat_active_request_id("".into());
+    window.set_chat_error("".into());
+}
+
 pub(super) fn bind_chat_actions(
     window: &AppWindow,
     dispatch: std::rc::Rc<dyn Fn(Command)>,
@@ -395,32 +418,9 @@ pub(super) fn bind_chat_actions(
         let Some(window) = weak.upgrade() else {
             return;
         };
-        let Ok(previous) = revision.fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
-            value.checked_add(1)
-        }) else {
-            window.set_chat_error("Chat selection revision exhausted".into());
-            return;
-        };
-        window.set_chat_character(id);
-        window.set_chat_has_older(false);
-        window.set_chat_older_loading(false);
-        reconcile_rows(&window, Vec::new());
-        let next = previous + 1;
-        let conversation = window.global::<ConversationUi>();
-        conversation.set_confirmation(0);
-        conversation.set_diagnostics("".into());
-        conversation.set_history(false);
-        conversation.set_edit_target("".into());
-        conversation.set_edit_draft("".into());
-        conversation.set_copy_open(false);
-        conversation.set_copy_text("".into());
-        window.set_chat_sending(false);
-        window.set_chat_active_request_id("".into());
-        window.set_chat_error("".into());
-        send(Command::Select(ChatOrigin {
-            character,
-            selection_revision: next,
-        }));
+        if let Some(origin) = current_origin(&window, &revision) {
+            send(Command::Select(origin, character));
+        }
     });
     let send = dispatch.clone();
     let weak = window.as_weak();
@@ -563,6 +563,14 @@ fn apply_with_catalog(
     hub: &mut super::ai_hub::HubCatalogState,
 ) {
     match update {
+        Update::Selection(selected) => {
+            if current_origin(window, revision).is_none_or(|current| {
+                current.character != selected.character
+                    || current.selection_revision != selected.revision
+            }) {
+                render_chat_selection(window, revision, selected);
+            }
+        }
         Update::RecognizedText {
             origin,
             text,

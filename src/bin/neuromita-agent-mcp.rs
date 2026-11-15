@@ -88,6 +88,21 @@ impl ServerHandler for NeuroMita {
                 json!({"request_id": {"type":"string", "format":"uuid"}}),
             ),
             inspection_tool(
+                "presenter_chat_selection",
+                "Read the canonical ChatSelectionPresenter character and revision shared by GUI and MCP. No window state or session ID.",
+                &[],json!({})),
+            admin_write_tool(
+                "presenter_select_character",
+                "Select a character using the Core-owned ChatSelectionPresenter and its CAS revision. GUI observes changes; GUI need not exist. Requires --allow-write, NEUROMITA_ENABLE_LOCAL_CHAT_SELECTION_CONTROL=1 and a shared 32+ character NEUROMITA_LOCAL_CHAT_SELECTION_TOKEN.",
+                &["character","expected_character","expected_revision"],json!({
+                    "character":{"type":"string"},"expected_character":{"type":"string"},
+                    "expected_revision":{"type":"integer","minimum":0}
+                })),
+            inspection_tool(
+                "presenter_diagnostic_export",
+                "Export exactly the latest retained full GUI request trace for a character. Contains PRIVATE prompt and provider data. Requires --allow-content, Core NEUROMITA_ENABLE_LOCAL_DIAGNOSTICS_EXPORT=1 and a shared random 32+ character NEUROMITA_LOCAL_DIAGNOSTICS_TOKEN on both processes. Do not share or log the token. Disabled by default.",
+                &["character"], json!({"character":{"type":"string"}})),
+            inspection_tool(
                 "presenter_chat_diagnostics",
                 "Read bounded per-character ChatPresenter request statuses, stages and outcome codes. No messages, prompts, provider errors or raw trace. This is not a full diagnostic export.",
                 &["character"],
@@ -505,6 +520,12 @@ impl ServerHandler for NeuroMita {
                 None,
             ));
         }
+        if request.name == "presenter_diagnostic_export" && !self.allow_content {
+            return Err(ErrorData::invalid_params(
+                "diagnostic export requires --allow-content",
+                None,
+            ));
+        }
         if request.name == "presenter_conversation"
             && args.get("include_content") == Some(&Value::Bool(true))
             && !self.allow_content
@@ -545,6 +566,7 @@ impl ServerHandler for NeuroMita {
                 | "presenter_attach_file"
                 | "presenter_guide_retry"
                 | "presenter_settings_retry"
+                | "presenter_select_character"
         ) && !self.allow_write
         {
             return Err(ErrorData::invalid_params(
@@ -757,7 +779,29 @@ impl ServerHandler for NeuroMita {
                 None,
             ));
         }
-        let command = command_for_tool(request.name.as_ref(), args)?;
+        let mut command = command_for_tool(request.name.as_ref(), args)?;
+        if request.name == "presenter_select_character" {
+            let token = std::env::var("NEUROMITA_LOCAL_CHAT_SELECTION_TOKEN")
+                .map_err(|_| ErrorData::invalid_params("chat selection secret missing", None))?;
+            if !(32..=256).contains(&token.len()) {
+                return Err(ErrorData::invalid_params(
+                    "chat selection secret length invalid",
+                    None,
+                ));
+            }
+            command["change"]["authorization"] = json!(token);
+        }
+        if request.name == "presenter_diagnostic_export" {
+            let token = std::env::var("NEUROMITA_LOCAL_DIAGNOSTICS_TOKEN")
+                .map_err(|_| ErrorData::invalid_params("diagnostic export secret missing", None))?;
+            if !(32..=256).contains(&token.len()) {
+                return Err(ErrorData::invalid_params(
+                    "diagnostic export secret length invalid",
+                    None,
+                ));
+            }
+            command["query"]["authorization"] = json!(token);
+        }
         let response = match call_local_control(self.core, self.timeout, command).await {
             Ok(response) if response["type"] != "error" => CallToolResult::structured(response),
             Ok(response) => CallToolResult::structured_error(json!({"code": response["code"]})),
@@ -888,6 +932,27 @@ fn command_for_tool(name: &str, mut args: Map<String, Value>) -> Result<Value, E
                 }
             }
             json!({"command":"presenter_admin_read","query":query})
+        }
+        "presenter_chat_selection" => {
+            json!({"command":"presenter_admin_read","query":{"query":"chat_selection"}})
+        }
+        "presenter_select_character" => {
+            let character = string(&mut args, "character")?;
+            let expected_character = string(&mut args, "expected_character")?;
+            let expected_revision = args
+                .remove("expected_revision")
+                .ok_or_else(|| ErrorData::invalid_params("missing expected_revision", None))?;
+            if !expected_revision.is_u64() {
+                return Err(ErrorData::invalid_params("invalid expected_revision", None));
+            }
+            json!({"command":"presenter_admin_write","change":{
+                "change":"chat_select","character":character,
+                "expected_character":expected_character,"expected_revision":expected_revision}})
+        }
+        "presenter_diagnostic_export" => {
+            let character = string(&mut args, "character")?;
+            json!({"command":"presenter_admin_read","query":{
+                "query":"diagnostic_export","character":character}})
         }
         "presenter_chat_diagnostics" => {
             let character = string(&mut args, "character")?;
@@ -2346,6 +2411,59 @@ mod cycle16_gui_parity_tests {
             command_for_tool(
                 "presenter_attach_file",
                 args(json!({"character":"Crazy","version":{},"text":"x","source":"relative"}))
+            )
+            .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod presenter_selection_and_diagnostics_contract_tests {
+    use super::*;
+
+    fn args(value: Value) -> Map<String, Value> {
+        value.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn selection_and_trace_are_typed_and_never_accept_ambiguous_arguments() {
+        let read = command_for_tool("presenter_chat_selection", args(json!({}))).unwrap();
+        assert_eq!(read["query"]["query"], "chat_selection");
+        let selected = command_for_tool(
+            "presenter_select_character",
+            args(json!({"character":"Kind", "expected_character":"Crazy", "expected_revision":7})),
+        )
+        .unwrap();
+        assert_eq!(selected["command"], "presenter_admin_write");
+        assert_eq!(selected["change"]["change"], "chat_select");
+        assert_eq!(selected["change"]["expected_revision"], 7);
+        assert!(selected.to_string().contains("Kind"));
+        assert!(!selected.to_string().contains("authorization"));
+        let diagnostic = command_for_tool(
+            "presenter_diagnostic_export",
+            args(json!({"character":"Crazy"})),
+        )
+        .unwrap();
+        assert_eq!(diagnostic["query"]["query"], "diagnostic_export");
+        assert!(!diagnostic.to_string().contains("authorization"));
+        for invalid in [
+            json!({"character":"Kind", "expected_character":"Crazy"}),
+            json!({"character":"Kind", "expected_character":"Crazy", "expected_revision":-1}),
+            json!({"character":"Kind", "expected_character":"Crazy", "expected_revision":"7"}),
+            json!({"character":"Kind", "expected_character":"Crazy", "expected_revision":7, "session_id":"fake"}),
+        ] {
+            assert!(command_for_tool("presenter_select_character", args(invalid)).is_err());
+        }
+        for invalid in [
+            json!({}),
+            json!({"character":"Crazy", "include_content":false}),
+        ] {
+            assert!(command_for_tool("presenter_diagnostic_export", args(invalid)).is_err());
+        }
+        assert!(
+            command_for_tool(
+                "presenter_chat_selection",
+                args(json!({"session_id":"fake"}))
             )
             .is_err()
         );

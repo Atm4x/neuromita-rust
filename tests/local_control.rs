@@ -3500,8 +3500,6 @@ async fn speech_transcript_observation_uses_the_same_ticket_fenced_hub_as_gui() 
     use tokio_util::sync::CancellationToken;
 
     let bus = std::sync::Arc::new(SpeechTranscriptHub::default());
-    bus.set_gui_route(CharacterId::Crazy, 12);
-    assert_eq!(bus.gui_route(), Some((CharacterId::Crazy, 12)));
     let mut gui = bus.subscribe();
     let mut observer = bus.observe();
     let stream = SpeechStream::new(CancellationToken::new());
@@ -4218,5 +4216,151 @@ async fn conversation_refresh_reads_gui_snapshot_without_creating_another_owner(
     assert_eq!(isolated["type"], "presenter_admin_read", "{isolated}");
     assert_eq!(isolated["snapshot"]["character_request_count"], 0);
     assert!(!isolated.to_string().contains(&request_id.to_string()));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn chat_selection_presenter_is_single_owner_for_gui_and_local_control() {
+    use neuromita::presentation::ChatSelection;
+
+    let fixture = Fixture::start(|_| {}).await;
+    let owner = fixture.app.presenter().selection.clone();
+    let start = ChatSelection {
+        character: CharacterId::Crazy,
+        revision: 0,
+    };
+    assert_eq!(owner.snapshot(), start);
+    let mut observer = owner.observe();
+    let mut client = fixture.connect().await;
+    let mut inspect = command("presenter_admin_read");
+    inspect["query"] = json!({"query":"chat_selection"});
+    client.send(inspect.clone()).await;
+    let initial = client
+        .until(|r| r["command_id"] == inspect["command_id"])
+        .await;
+    assert_eq!(initial["type"], "presenter_admin_read", "{initial}");
+    assert_eq!(initial["snapshot"]["selection"]["character"], "Crazy");
+    assert_eq!(initial["snapshot"]["selection"]["revision"], 0);
+    assert_eq!(initial["snapshot"]["gui_session_required"], false);
+
+    let selected = bounded(owner.select(start, CharacterId::Kind))
+        .await
+        .unwrap();
+    assert_eq!(selected.character, CharacterId::Kind);
+    assert_eq!(selected.revision, 1);
+    bounded(observer.changed()).await.unwrap();
+    assert_eq!(*observer.borrow_and_update(), selected);
+    assert_eq!(owner.snapshot(), selected);
+    assert!(owner.select(start, CharacterId::Crazy).await.is_err());
+    assert_eq!(owner.snapshot(), selected);
+    assert_eq!(
+        owner.select(selected, CharacterId::Kind).await.unwrap(),
+        selected
+    );
+    assert_eq!(owner.snapshot().revision, 1);
+    assert_eq!(
+        owner
+            .start_capture(start, Default::default(), Default::default())
+            .await
+            .unwrap_err(),
+        "chat selection revision conflict"
+    );
+
+    inspect["command_id"] = json!(Uuid::new_v4());
+    client.send(inspect.clone()).await;
+    let after = client
+        .until(|r| r["command_id"] == inspect["command_id"])
+        .await;
+    assert_eq!(after["snapshot"]["selection"]["character"], "Kind");
+    assert_eq!(after["snapshot"]["selection"]["revision"], 1);
+    assert!(!after.to_string().contains("session_id"));
+
+    let mut unauthorized = command("presenter_admin_write");
+    unauthorized["change"] = json!({
+        "change":"chat_select","expected_character":"Kind", "expected_revision":1,
+        "character":"Crazy", "authorization":"invalid-capability"
+    });
+    client.send(unauthorized.clone()).await;
+    let denied = client
+        .until(|r| r["command_id"] == unauthorized["command_id"])
+        .await;
+    assert_eq!(denied["type"], "error", "{denied}");
+    assert_eq!(owner.snapshot(), selected);
+    assert!(!denied.to_string().contains("invalid-capability"));
+
+    let second = bounded(owner.select(selected, CharacterId::Crazy))
+        .await
+        .unwrap();
+    assert_eq!(second.revision, 2);
+    assert_eq!(second.character, CharacterId::Crazy);
+    bounded(observer.changed()).await.unwrap();
+    assert_eq!(*observer.borrow_and_update(), second);
+    let (left, right) = tokio::join!(
+        owner.select(second, CharacterId::Kind),
+        owner.select(second, CharacterId::Kind),
+    );
+    assert_ne!(
+        left.is_ok(),
+        right.is_ok(),
+        "CAS must serialize concurrent selections"
+    );
+    assert_eq!(owner.snapshot().revision, 3);
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn full_chat_trace_uses_presenter_and_denies_unprivileged_core_reads() {
+    let mut fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+    let mut reply = command("presenter_action");
+    reply["action"] = json!({
+        "action":"chat_reply", "character":"Crazy",
+        "text":"PRIVATE_FULL_TRACE_INPUT"
+    });
+    client.send(reply.clone()).await;
+    let accepted = client.accepted(uuid(&reply["command_id"])).await;
+    let request_id = uuid(&accepted["request_id"]);
+    fixture.call().await.finish("PRIVATE_FULL_TRACE_OUTPUT");
+    assert_eq!(client.terminal(request_id).await["outcome"], "success");
+
+    let published = fixture
+        .app
+        .presenter()
+        .chat
+        .latest_diagnostics(CharacterId::Crazy)
+        .unwrap()
+        .expect("latest retained GUI trace");
+    assert_eq!(published.0.0, request_id);
+    let full: Value = serde_json::from_str(&published.1).unwrap();
+    assert!(
+        full.is_object(),
+        "GUI trace should be complete diagnostic JSON"
+    );
+    assert!(
+        fixture
+            .app
+            .presenter()
+            .chat
+            .latest_diagnostics(CharacterId::Kind)
+            .unwrap()
+            .is_none(),
+        "trace selection must be character-scoped"
+    );
+
+    let mut read = command("presenter_admin_read");
+    read["query"] = json!({
+        "query":"diagnostic_export","character":"Crazy",
+        "authorization":"unauthorized-local-client"
+    });
+    client.send(read.clone()).await;
+    let denied = client
+        .until(|r| r["command_id"] == read["command_id"])
+        .await;
+    assert_eq!(denied["type"], "error", "{denied}");
+    let frame = denied.to_string();
+    assert!(!frame.contains("PRIVATE_FULL_TRACE_INPUT"));
+    assert!(!frame.contains("PRIVATE_FULL_TRACE_OUTPUT"));
+    assert!(!frame.contains("unauthorized-local-client"));
+    assert!(!frame.contains("unused-fixture-key"));
     fixture.shutdown().await;
 }

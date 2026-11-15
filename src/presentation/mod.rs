@@ -20,9 +20,11 @@ mod ipc;
 mod ipc_admin;
 mod knowledge_admin;
 mod prompt_folder;
+mod selection;
 pub use guide_persistence::{GuidePersistencePresenter, GuideSaveError};
 pub use knowledge_admin::{GraphMaintenancePresenter, GraphReview};
 pub use prompt_folder::{PromptFolderPresenter, PromptInventory};
+pub use selection::{ChatSelection, ChatSelectionPresenter};
 mod presets;
 mod releases;
 mod runtime;
@@ -57,6 +59,7 @@ pub use settings::{
 pub use speech::SpeechSessionPresenter;
 
 pub struct GuiPresenter {
+    pub selection: std::sync::Arc<ChatSelectionPresenter>,
     pub audio_input: AudioInputPresenter,
     pub prompts: Option<std::sync::Arc<crate::prompts::PromptCatalog>>,
     pub speech: SpeechSessionPresenter,

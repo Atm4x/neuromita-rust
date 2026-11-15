@@ -26,6 +26,11 @@ pub(crate) enum PresenterRead {
         #[serde(default = "default_limit")]
         limit: usize,
     },
+    DiagnosticExport {
+        character: CharacterId,
+        authorization: String,
+    },
+    ChatSelection {},
     ConversationRefresh {
         character: CharacterId,
     },
@@ -129,6 +134,38 @@ fn mode_name(mode: crate::knowledge::maintenance::GraphMaintenanceMode) -> &'sta
 
 fn default_prompt_catalog_limit() -> usize {
     100
+}
+
+/// A random, process-inherited bearer token is required in addition to a
+/// dedicated Core-host opt-in. MCP's --allow-content is an independent gate.
+fn authorize_diagnostic_export(authorization: &str) -> Result<(), String> {
+    authorize_host_token(
+        "NEUROMITA_ENABLE_LOCAL_DIAGNOSTICS_EXPORT",
+        "NEUROMITA_LOCAL_DIAGNOSTICS_TOKEN",
+        authorization,
+    )
+}
+
+fn authorize_host_token(
+    opt_in: &str,
+    token_variable: &str,
+    authorization: &str,
+) -> Result<(), String> {
+    use subtle::ConstantTimeEq;
+
+    if std::env::var(opt_in).as_deref() != Ok("1") {
+        return Err("host capability is not enabled".into());
+    }
+    let token = std::env::var(token_variable)
+        .map_err(|_| "host capability secret is missing".to_owned())?;
+    if token.len() < 32
+        || token.len() > 256
+        || authorization.len() != token.len()
+        || !bool::from(authorization.as_bytes().ct_eq(token.as_bytes()))
+    {
+        return Err("host capability authorization rejected".into());
+    }
+    Ok(())
 }
 
 fn default_wait_ms() -> u64 {
@@ -265,6 +302,12 @@ pub(crate) enum PresenterWrite {
     SettingsRetry {},
     PromptFolderOpen {
         character: CharacterId,
+    },
+    ChatSelect {
+        expected_character: CharacterId,
+        expected_revision: u64,
+        character: CharacterId,
+        authorization: String,
     },
     AttachFile {
         character: CharacterId,
@@ -421,6 +464,36 @@ impl PresenterProbe {
 
     pub(crate) async fn admin_read(&self, query: PresenterRead) -> Result<Value, String> {
         match query {
+            PresenterRead::ChatSelection {} => Ok(json!({"source":"chat_selection_presenter",
+                    "selection":self.selection.snapshot(),"gui_session_required":false})),
+            PresenterRead::DiagnosticExport {
+                character,
+                authorization,
+            } => {
+                authorize_diagnostic_export(&authorization)?;
+                let trace = self
+                    .chat
+                    .latest_diagnostics(character)
+                    .map_err(|error| format!("diagnostic serialization failed: {error}"))?;
+                let Some((request_id, text)) = trace else {
+                    return Ok(
+                        json!({"source":"chat_presenter_trace","character":character,
+                        "available":false,"retention_bounded":true}),
+                    );
+                };
+                let exported: Value = serde_json::from_str(&text)
+                    .map_err(|_| "diagnostic serialization failed".to_owned())?;
+                tracing::warn!(
+                    ?character,
+                    request_id = ?request_id,
+                    "privileged full chat diagnostics exported via local control"
+                );
+                Ok(
+                    json!({"source":"chat_presenter_trace","character":character,
+                    "request_id":request_id,"available":true,"content_included":true,
+                    "retention_bounded":true,"trace":exported}),
+                )
+            }
             PresenterRead::ConversationRefresh { character } => {
                 let state = self
                     .conversation
@@ -599,7 +672,7 @@ impl PresenterProbe {
 
             PresenterRead::SpeechTranscript { include_content } => {
                 let hub = self.speech_capture.transcripts();
-                let ui_route = hub.gui_route();
+                let selected = self.selection.snapshot();
                 let last = hub.latest();
                 let mut record = match last {
                     Some(event) => {
@@ -617,8 +690,8 @@ impl PresenterProbe {
                     None => json!({"source":"application_speech_transcript_hub",
                         "revision":0,"available":false,"content_included":include_content}),
                 };
-                record["gui_selected_character"] = json!(ui_route.map(|route| route.0));
-                record["gui_selection_revision"] = json!(ui_route.map(|route| route.1));
+                record["selected_character"] = json!(selected.character);
+                record["selection_revision"] = json!(selected.revision);
                 Ok(record)
             }
             PresenterRead::SpeechInventory {} => {
@@ -1166,6 +1239,29 @@ impl PresenterProbe {
 
     pub(crate) async fn admin_write(&self, change: PresenterWrite) -> Result<Value, String> {
         match change {
+            PresenterWrite::ChatSelect {
+                expected_character,
+                expected_revision,
+                character,
+                authorization,
+            } => {
+                authorize_host_token(
+                    "NEUROMITA_ENABLE_LOCAL_CHAT_SELECTION_CONTROL",
+                    "NEUROMITA_LOCAL_CHAT_SELECTION_TOKEN",
+                    &authorization,
+                )?;
+                let selection = self
+                    .selection
+                    .select(
+                        super::ChatSelection {
+                            character: expected_character,
+                            revision: expected_revision,
+                        },
+                        character,
+                    )
+                    .await?;
+                serde_json::to_value(selection).map_err(|error| error.to_string())
+            }
             PresenterWrite::AttachFile {
                 character,
                 version,

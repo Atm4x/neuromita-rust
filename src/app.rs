@@ -1559,11 +1559,15 @@ impl ApplicationLifecycle {
             prompts.clone(),
             Arc::clone(&settings_presenter),
         );
+        let selection_presenter = std::sync::Arc::new(
+            crate::presentation::ChatSelectionPresenter::new(speech_capture.clone()),
+        );
         owner.server_task = Some(tokio::spawn(server_lifecycle.run_with_presenter(
             owner.server_stop.clone(),
             Arc::clone(&bindings),
             Some(crate::presentation::PresenterProbe::new(
                 chat.clone(),
+                std::sync::Arc::clone(&selection_presenter),
                 ai_runtime_status.clone(),
                 speech_view.clone(),
                 releases.clone(),
@@ -1597,6 +1601,7 @@ impl ApplicationLifecycle {
         });
         Ok(Self {
             presenter: GuiPresenter {
+                selection: selection_presenter,
                 audio_input: crate::presentation::AudioInputPresenter::new(Arc::clone(
                     &audio_input,
                 )),
@@ -1736,24 +1741,6 @@ impl ApplicationLifecycle {
                 )
             })?;
         self.audio_input.start_capture(handler, stop, config).await
-    }
-
-    pub async fn start_speech_capture_for(
-        &self,
-        character: CharacterId,
-        selection_revision: u64,
-        ffmpeg: std::path::PathBuf,
-        ffplay: std::path::PathBuf,
-    ) -> Result<(), String> {
-        self.speech_capture
-            .start(character, selection_revision, ffmpeg, ffplay)
-            .await
-    }
-
-    pub fn set_speech_gui_route(&self, character: CharacterId, selection_revision: u64) {
-        self.speech_capture
-            .transcripts
-            .set_gui_route(character, selection_revision);
     }
 
     pub fn observe_transcripts(
