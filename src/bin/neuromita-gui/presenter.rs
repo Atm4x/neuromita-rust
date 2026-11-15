@@ -75,14 +75,14 @@ impl LauncherAction {
 }
 
 pub enum ComponentKind {
-    Python,
+    Rust,
     Unity,
 }
 
 impl ComponentKind {
     pub fn title(&self) -> LocalizedText {
         match self {
-            Self::Python => i18n("launcher.component.python", "Python-бэкенд"),
+            Self::Rust => i18n("launcher.core.title", "Ядро Rust"),
             Self::Unity => i18n("launcher.component.unity", "Unity"),
         }
     }
@@ -103,8 +103,8 @@ impl HomePreview {
     pub fn runtime() -> Self {
         Self {
             backend: ComponentPreview {
-                kind: ComponentKind::Python,
-                version: "",
+                kind: ComponentKind::Rust,
+                version: neuromita::version::VERSION,
                 update: "",
             },
             client: ComponentPreview {

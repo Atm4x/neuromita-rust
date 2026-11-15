@@ -331,6 +331,11 @@ pub struct InterfaceSettingsPresenter {
 }
 
 impl InterfaceSettingsPresenter {
+    pub async fn save_language(&self, language: Language) -> Result<(), SettingsError> {
+        self.language.set(language)?;
+        self.owner.flush().await
+    }
+
     pub fn set_font_size(&self, size: u16) -> Result<(), SettingsError> {
         self.owner
             .edit::<InterfaceSettings>(|settings| settings.font_size = size)

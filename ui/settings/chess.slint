@@ -1,0 +1,119 @@
+import { ActionSurface, Label } from "../components/controls.slint";
+import { SettingsChoiceRow, SettingsText } from "../components/settings-kit.slint";
+import { Theme } from "../theme.slint";
+import { I18n } from "../i18n.slint";
+
+export struct ChessCell { square: string, piece: string, dark: bool, selectable: bool }
+
+export global ChessUi {
+    in-out property <[ChessCell]> board;
+    in-out property <int> status;
+    in-out property <string> history;
+    in-out property <string> error;
+    in-out property <bool> busy;
+    callback opened();
+    callback start(bool, int);
+    callback played(string, string, string);
+    callback close();
+}
+
+export component ChessPanel inherits VerticalLayout {
+    private property <string> selected;
+    private property <bool> white: true;
+    private property <int> difficulty: 1;
+    private property <string> promotion: "Q";
+    spacing: 7px;
+    padding: 5px;
+    alignment: start;
+
+    HorizontalLayout {
+        spacing: 8px;
+        alignment: start;
+        ActionSurface {
+            width: 100px; height: 36px; border-radius: 8px;
+            background: root.white ? Theme.accent : Theme.panel;
+            label: I18n.i18n("chess.white", "Белые");
+            Label { text: parent.label; horizontal-alignment: center; }
+            activated => { root.white = true; }
+        }
+        ActionSurface {
+            width: 100px; height: 36px; border-radius: 8px;
+            background: !root.white ? Theme.accent : Theme.panel;
+            label: I18n.i18n("chess.black", "Чёрные");
+            Label { text: parent.label; horizontal-alignment: center; }
+            activated => { root.white = false; }
+        }
+        ActionSurface {
+            width: 144px; height: 36px; border-radius: 8px;
+            background: Theme.accent;
+            enabled: !ChessUi.busy;
+            label: I18n.i18n("chess.new", "Новая партия");
+            Label { text: parent.label; horizontal-alignment: center; }
+            activated => { root.selected = ""; ChessUi.start(root.white, root.difficulty); }
+        }
+        if ChessUi.board.length == 64: ActionSurface {
+            width: 100px; height: 36px; border-radius: 8px;
+            background: Theme.panel;
+            enabled: !ChessUi.busy;
+            label: I18n.i18n("chess.close", "Завершить");
+            Label { text: parent.label; horizontal-alignment: center; }
+            activated => { root.selected = ""; ChessUi.close(); }
+        }
+    }
+    HorizontalLayout {
+        spacing: 8px;
+        alignment: start;
+        for option[index] in [I18n.i18n("chess.easy", "Легко"), I18n.i18n("chess.medium", "Средне"), I18n.i18n("chess.hard", "Сложно")]: ActionSurface {
+            width: 100px; height: 30px; border-radius: 7px;
+            background: root.difficulty == index ? Theme.accent : Theme.panel;
+            label: option;
+            Label { text: parent.label; horizontal-alignment: center; }
+            activated => { root.difficulty = index; }
+        }
+    }
+    if ChessUi.error != "": SettingsText { text: ChessUi.error; color: Theme.danger; wrap: word-wrap; }
+    if ChessUi.board.length == 64: VerticalLayout {
+        alignment: start;
+        spacing: 6px;
+        SettingsText {
+            text: ChessUi.status == 1 ? I18n.i18n("chess.player-turn", "Ваш ход") :
+                ChessUi.status == 2 ? I18n.i18n("chess.engine-turn", "Ход Миты") :
+                ChessUi.status == 3 ? I18n.i18n("chess.win", "Мат. Вы выиграли.") :
+                ChessUi.status == 4 ? I18n.i18n("chess.loss", "Мат. Мита выиграла.") :
+                I18n.i18n("chess.draw", "Ничья");
+        }
+        VerticalLayout {
+            alignment: start;
+            for rank in 8: HorizontalLayout {
+                alignment: start;
+                for file in 8: ActionSurface {
+                    private property <ChessCell> cell: ChessUi.board[rank * 8 + file];
+                    width: 44px; height: 44px; border-radius: 0px;
+                    background: root.selected == cell.square ? Theme.accent : cell.dark ? #49415e : #d0b9cb;
+                    label: cell.square + " " + cell.piece;
+                    enabled: ChessUi.status == 1 && !ChessUi.busy;
+                    Label {
+                        text: cell.piece;
+                        font-family: "Segoe UI Symbol"; font-size: 28px;
+                        horizontal-alignment: center;
+                        color: cell.dark || root.selected == cell.square ? #ffffff : #171320;
+                    }
+                    activated => {
+                        if root.selected == cell.square { root.selected = ""; }
+                        else if cell.selectable { root.selected = cell.square; }
+                        else if root.selected != "" {
+                            ChessUi.played(root.selected, cell.square, root.promotion);
+                            root.selected = "";
+                        }
+                    }
+                }
+            }
+        }
+        SettingsChoiceRow {
+            title: I18n.i18n("chess.promotion", "Превращение пешки");
+            options: ["Q", "R", "B", "N"]; value: root.promotion;
+            changed(value) => { root.promotion = value; }
+        }
+        if ChessUi.history != "": SettingsText { text: ChessUi.history; wrap: word-wrap; color: Theme.muted; }
+    }
+}

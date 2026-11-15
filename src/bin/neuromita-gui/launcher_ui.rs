@@ -17,6 +17,7 @@ impl LauncherUi {
             let _ = window.upgrade_in_event_loop(move |window| {
                 window.set_launcher_inspected(true);
                 window.set_unity_installed(update.installed);
+                window.set_unity_version(update.installed_version.unwrap_or_default().into());
                 window.set_game_running(matches!(update.state, OwnedProcessState::Running { .. }));
                 window.set_game_running_external(update.external_running);
                 window.set_launcher_busy(update.busy);

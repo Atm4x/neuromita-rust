@@ -1,4 +1,10 @@
-use std::{cell::RefCell, error::Error, path::PathBuf, process::Command, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    error::Error,
+    path::PathBuf,
+    process::Command,
+    rc::Rc,
+};
 
 use neuromita::localization::{
     FallbackPolicy, LocaleId, LocalizationError, LocalizedText, Localizer, i18n,
@@ -89,8 +95,9 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
     window.set_onboarding_required(requires_consent);
     window.set_onboarding_guide_visible(onboarding.requires_guide);
     let initial_code = options.locale.as_str();
-    window.set_onboarding_language(initial_code.into());
-    window.set_onboarding_eula_text(neuromita::onboarding::eula_text(initial_code).into());
+    let guide_language = if initial_code == "ru" { "ru" } else { "en" };
+    window.set_onboarding_language(guide_language.into());
+    window.set_onboarding_eula_text(neuromita::onboarding::eula_text(guide_language).into());
     window.set_onboarding_guide_level(onboarding.guide_level.index());
     window.set_onboarding_guide_page(i32::from(onboarding.guide_page));
     update_guide(&window, i32::from(onboarding.guide_page));
@@ -105,6 +112,7 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
         )?);
     }
     let catalog = Rc::new(RefCell::new(catalog));
+    let languages = catalog.clone();
     window
         .global::<I18n>()
         .on_lookup(translation_lookup(catalog.clone()));
@@ -128,7 +136,7 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
             .borrow_mut()
             .dispatch(ShellCommand::Navigate(Page::Sandbox));
     }
-    window.set_version(format!("v{}", env!("CARGO_PKG_VERSION")).into());
+    window.set_version(format!("v{}", neuromita::version::VERSION).into());
     window.set_releases(ModelRc::new(VecModel::<ReleaseItem>::default()));
     render(&window, &presenter.borrow(), &catalog.borrow());
     if let Some(mode) = options.voice_preview {
@@ -486,11 +494,42 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
         }
     });
     let handler = dispatch.clone();
-    window.on_language_selected(move |code| {
+    window.on_apply_language(move |code| {
         handler(match LocaleId::new(&code) {
             Ok(locale) => ShellCommand::SelectLanguage(locale),
             Err(error) => ShellCommand::LocalizationFailed(error.to_string()),
         })
+    });
+    let handler = dispatch.clone();
+    let language_runtime = desktop.clone();
+    let language_window = window.as_weak();
+    window.on_language_selected(move |code| {
+        let Ok(locale) = LocaleId::new(&code) else {
+            handler(ShellCommand::LocalizationFailed(format!(
+                "Invalid locale: {code}"
+            )));
+            return;
+        };
+        if !languages.borrow().contains_locale(&locale) {
+            handler(ShellCommand::LocalizationFailed(format!(
+                "Unknown locale: {code}"
+            )));
+            return;
+        }
+        let runtime = language_runtime.borrow();
+        if let Some(runtime) = runtime.as_ref() {
+            let language = neuromita::settings::Language::from_locale(locale);
+            if let Err(error) = runtime
+                .commands
+                .try_send(super::runtime::Command::SetInterfaceLanguage(language))
+            {
+                handler(ShellCommand::LocalizationFailed(error.to_string()));
+            }
+        } else if let Some(window) = language_window.upgrade()
+            && window.get_onboarding_required()
+        {
+            window.invoke_onboarding_language_selected(code);
+        }
     });
     let handler = dispatch.clone();
     window.on_reload_translations(move || handler(ShellCommand::ReloadTranslations));
@@ -500,7 +539,17 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
     window.on_toggle_client(move || handler(ShellCommand::ToggleClient));
     let handler = dispatch.clone();
     let launcher_for_play = launcher.clone();
+    let play_window = window.as_weak();
     window.on_play(move || {
+        if let Some(window) = play_window.upgrade()
+            && !window.get_game_running()
+            && !window.get_game_running_external()
+            && window.get_backend_selected()
+            && !window.get_native_update_version().is_empty()
+        {
+            window.invoke_launcher_action(LauncherMenuAction::InstallNativeUpdate);
+            return;
+        }
         let notice = launcher_for_play.borrow_mut().toggle_play();
         handler(ShellCommand::LauncherFeedback(notice));
     });
@@ -508,10 +557,27 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
     let finished_checker = update_checker.clone();
     let update_handler = dispatch.clone();
     let install_directory = root.path().to_path_buf();
+    let update_window = window.as_weak();
+    let automatic_check = Rc::new(Cell::new(false));
+    let finishing_automatic_check = automatic_check.clone();
     window.on_native_update_finished(move || {
         let Some(completion) = finished_checker.take_result() else {
             return;
         };
+        if let NativeUpdateCompletion::Checked(Ok(status)) = &completion
+            && let Some(window) = update_window.upgrade()
+        {
+            let version = match status {
+                neuromita::updater::check::NativeUpdateResult::Available { tag, .. } => {
+                    tag.strip_prefix(['v', 'V']).unwrap_or(tag)
+                }
+                _ => "",
+            };
+            window.set_native_update_version(version.into());
+        }
+        if finishing_automatic_check.replace(false) {
+            return;
+        }
         if let NativeUpdateCompletion::InstallPrepared(Ok(
             neuromita::updater::install::NativeInstallOutcome::Prepared { .. },
         )) = &completion
@@ -554,6 +620,7 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
     let handler = dispatch.clone();
     let launcher_for_action = launcher.clone();
     let download_directory = root.path().to_path_buf();
+    automatic_check.set(update_checker.check().is_ok());
     window.on_launcher_action(move |action| {
         let action = launcher_action(action);
         match action {
@@ -933,12 +1000,9 @@ impl Options {
         if !explicit_language {
             let path = options.data_directory.join("settings.json");
             if path.exists() {
-                use neuromita::settings::{JsonSettingsRepository, Language, SettingsRepository};
+                use neuromita::settings::{JsonSettingsRepository, SettingsRepository};
                 let stored = JsonSettingsRepository::new(path).load()?;
-                options.locale = match stored.settings.interface.language {
-                    Language::Russian => LocaleId::russian(),
-                    Language::English => LocaleId::english(),
-                };
+                options.locale = stored.settings.interface.language.locale();
             }
         }
         Ok(options)

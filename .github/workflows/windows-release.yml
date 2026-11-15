@@ -1,0 +1,66 @@
+name: Publish NeuroMita Windows release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.100.0'
+      - name: Verify the release tag
+        shell: pwsh
+        run: |
+          $metadata = cargo metadata --locked --offline --no-deps --format-version 1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $version = ((ConvertFrom-Json -InputObject $metadata).packages | Where-Object name -eq 'neuromita').version
+          if ($env:GITHUB_REF_NAME -ne "v$version") { throw 'Tag does not match Cargo.toml' }
+      - name: Build and test
+        shell: pwsh
+        run: |
+          cargo test --locked --offline --test updater_native_apply_e2e --test updater_offline_recovery
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --locked --offline --release --features gui,mcp --bin neuromita-gui --bin neuromita-agent-mcp
+          exit $LASTEXITCODE
+      - name: Create Windows assets
+        shell: pwsh
+        run: ./scripts/package-windows.ps1 -BinaryDirectory target/release -OutputDirectory target/windows-release
+      - name: Publish to GitHub Releases
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $assets = @(
+            'target/windows-release/neuromita-gui-windows-x86_64.exe',
+            "target/windows-release/NeuroMita-$tag-windows-x86_64.zip"
+          )
+          gh release create $tag @assets --verify-tag --title "NeuroMita $tag" --generate-notes
+          exit $LASTEXITCODE
+      - name: Verify the published assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $files = @('neuromita-gui-windows-x86_64.exe', "NeuroMita-$tag-windows-x86_64.zip")
+          gh release download $tag --dir target/published --pattern $files[0] --pattern $files[1]
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($file in $files) {
+            $expected = (Get-FileHash -LiteralPath "target/windows-release/$file").Hash
+            $published = (Get-FileHash -LiteralPath "target/published/$file").Hash
+            if ($expected -ne $published) { throw "Published asset checksum mismatch: $file" }
+          }

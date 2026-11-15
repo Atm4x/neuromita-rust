@@ -3,6 +3,7 @@ import { CollapsibleSettingsSection, InnerSettingsSection } from "../components/
 import { SettingsScrollView } from "scroll-view.slint";
 import { SettingsTheme } from "theme.slint";
 import { I18n } from "../i18n.slint";
+import { ChessPanel, ChessUi } from "chess.slint";
 
 export component GameSettingsPage inherits SettingsScrollView {
     in-out property <bool> mod-open;
@@ -14,6 +15,8 @@ export component GameSettingsPage inherits SettingsScrollView {
     in-out property <bool> manual-games-open;
     in-out property <bool> beat-management-open;
     in-out property <bool> beat-cache-open;
+    in property <bool> core-ready;
+    private property <bool> chess-open;
     in-out property <bool> ignore-requests;
     in-out property <bool> world-tree;
     in-out property <string> block-level: "Idle events";
@@ -76,7 +79,13 @@ export component GameSettingsPage inherits SettingsScrollView {
             InnerSettingsSection {
                 title: I18n.i18n("settings.game.manual", "Ручной запуск");
                 expanded <=> root.manual-games-open;
-                SettingsButtonRow { title: I18n.i18n("settings.game.launch-chess", "Запустить шахматы"); button-text: I18n.i18n("settings.game.start", "Запустить"); active: false; }
+                SettingsButtonRow {
+                    title: I18n.i18n("settings.game.launch-chess", "Запустить шахматы");
+                    button-text: I18n.i18n("settings.game.start", "Запустить");
+                    active: root.core-ready && root.games-enabled && root.chess-enabled;
+                    clicked => { root.chess-open = true; ChessUi.opened(); }
+                }
+                if root.chess-open: ChessPanel {}
                 SettingsButtonRow { title: I18n.i18n("settings.game.launch-sea", "Запустить морской бой"); button-text: I18n.i18n("settings.game.start", "Запустить"); active: false; }
             }
         }

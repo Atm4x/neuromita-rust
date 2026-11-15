@@ -144,6 +144,8 @@ pub enum Command {
     SectionVisibility(neuromita::settings::SettingsArea, bool),
     HidePrivate(bool),
     StructuredDisplay(neuromita::settings::StructuredDisplayMode),
+    SetInterfaceLanguage(neuromita::settings::Language),
+    Chess(neuromita::presentation::ChessAction),
     ChangeGuide {
         request_id: u64,
         change: GuideChange,
@@ -249,6 +251,8 @@ pub enum Update {
     },
     PresetCreated(PresetId, PresetRecord),
     AdminSaved,
+    InterfaceLanguage(neuromita::settings::Language),
+    Chess(Result<Option<Box<neuromita::games::chess::ChessProjection>>, String>),
     GuidePersisted {
         request_id: u64,
         change: GuideChange,
@@ -612,6 +616,7 @@ async fn observe(
     let mut telegram_updates = telegram_admin.observe();
     let mut telegram_watch_closed = false;
     let mut releases = administration.releases.observe();
+    let _ = administration.releases.refresh();
     let presenter = &administration.conversation;
     let mut connections = administration.connections.observe();
     let mut memories = MemoryWatch::start(administration, CharacterId::Crazy)?;
@@ -624,6 +629,7 @@ async fn observe(
     });
     let current = administration.selection.snapshot();
     let mut character = current.character;
+    let mut chess_character = character;
     let mut selection_revision = current.revision;
     let mut selected = administration.selection.observe();
     publish(Update::Selection(current));
@@ -752,6 +758,21 @@ async fn observe(
                         Err(neuromita::presentation::GuideSaveError::Rejected(error)) =>
                             publish(Update::GuideRejected { request_id, error }),
                     }
+                },
+                Some(Command::SetInterfaceLanguage(language)) => {
+                    let result = administration.settings.interface.save_language(language.clone()).await;
+                    match result {
+                        Ok(()) => publish(Update::InterfaceLanguage(language)),
+                        Err(error) => publish(Update::AdminError(error.to_string())),
+                    }
+                },
+                Some(Command::Chess(action)) => {
+                    if matches!(action, neuromita::presentation::ChessAction::Inspect) {
+                        chess_character = character;
+                    }
+                    let result = administration.characters.chess_action(chess_character, action)
+                        .await.map(|projection| projection.map(Box::new)).map_err(|e| e.to_string());
+                    publish(Update::Chess(result));
                 },
                 Some(Command::RetryGuideChange { request_id }) => {
                     match administration.guide_persistence.retry().await {

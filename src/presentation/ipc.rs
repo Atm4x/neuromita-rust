@@ -50,6 +50,10 @@ pub(crate) enum PresenterAction {
     ChatCancel {
         request_id: uuid::Uuid,
     },
+    Chess {
+        character: CharacterId,
+        command: super::ChessAction,
+    },
     AudioDevices {},
     AudioStartTest {
         backend: String,
@@ -426,6 +430,27 @@ impl PresenterProbe {
                     .cancel(RequestId(request_id))
                     .map_err(|e| e.to_string())?;
                 json!({"action":"chat_cancel","request_id":request_id,"result":format!("{result:?}")})
+            }
+            Chess { character, command } => {
+                let game = self
+                    .characters
+                    .chess_action(character, command)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let snapshot = game.map(|game| {
+                    json!({
+                        "session": game.session,
+                        "revision": game.revision,
+                        "player_white": game.player_white,
+                        "player_turn": game.player_turn(),
+                        "difficulty": game.difficulty,
+                        "result": format!("{:?}", game.view.result),
+                        "board": game.view.board,
+                        "legal_uci": game.view.legal_uci,
+                        "moves": game.moves,
+                    })
+                });
+                json!({"action":"chess","character":character,"game":snapshot})
             }
             AudioDevices {} => {
                 let devices = self

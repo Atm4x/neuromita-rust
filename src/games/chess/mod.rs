@@ -89,3 +89,36 @@ impl ChessProjection {
         }
     }
 }
+
+pub(crate) fn basic_reply(game: &ChessProjection) -> Option<&str> {
+    game.view
+        .legal_uci
+        .iter()
+        .rev()
+        .max_by_key(|uci| {
+            let destination = uci.as_bytes();
+            let file = i32::from(destination[2] - b'a');
+            let rank = i32::from(destination[3] - b'1');
+            let captured = game.view.board[(7 - rank) as usize].as_bytes()[file as usize];
+            let material = match captured.to_ascii_lowercase() {
+                b'p' => 1,
+                b'b' | b'n' => 3,
+                b'r' => 5,
+                b'q' => 9,
+                _ => 0,
+            };
+            let center = 14 - (2 * file - 7).abs() - (2 * rank - 7).abs();
+            let promotion = if destination.get(4) == Some(&b'q') {
+                9
+            } else {
+                0
+            };
+            let weight = match game.difficulty {
+                ChessDifficulty::Easy => 3,
+                ChessDifficulty::Medium => 8,
+                ChessDifficulty::Hard => 16,
+            };
+            center + weight * (material + promotion)
+        })
+        .map(String::as_str)
+}

@@ -23,8 +23,9 @@ struct NeuroMita {
 
 impl ServerHandler for NeuroMita {
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("neuromita", env!("CARGO_PKG_VERSION")))
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_server_info(
+            Implementation::new("neuromita", neuromita::version::VERSION),
+        )
     }
 
     async fn list_tools(
@@ -164,6 +165,9 @@ impl ServerHandler for NeuroMita {
                     })),
                 ])
             ).with_annotations(ToolAnnotations::new().read_only(false)),
+            admin_write_tool("presenter_chess",
+                "Inspect or play a local chess game using the same canonical character owner as GUI. Commands: inspect, start {player_white,difficulty}, move {from,to,promotion}, close.",
+                &["character","command"],json!({"character":{"type":"string"},"command":{"type":"object"}})),
             Tool::new("presenter_guide",
                 "Save Guide level, page or completion through the same persistence presenter as the GUI. Success confirms storage; inspect_presenter(surface=guide) reads the current state.",
                 serde_json::Map::from_iter([
@@ -750,6 +754,7 @@ impl ServerHandler for NeuroMita {
             "presenter_chat"
                 | "presenter_audio_input"
                 | "presenter_guide"
+                | "presenter_chess"
                 | "presenter_voice"
                 | "presenter_refresh"
                 | "presenter_presets"
@@ -1276,6 +1281,15 @@ fn command_for_tool(name: &str, mut args: Map<String, Value>) -> Result<Value, E
                 _ => return Err(ErrorData::invalid_params("unknown audio action", None)),
             };
             json!({"command":"presenter_action","action":payload})
+        }
+        "presenter_chess" => {
+            let character = string(&mut args, "character")?;
+            let command: neuromita::presentation::ChessAction = serde_json::from_value(
+                args.remove("command")
+                    .ok_or_else(|| ErrorData::invalid_params("missing command", None))?,
+            )
+            .map_err(|error| ErrorData::invalid_params(error.to_string(), None))?;
+            json!({"command":"presenter_action","action":{"action":"chess","character":character,"command":command}})
         }
         "presenter_guide" => {
             let field = string(&mut args, "field")?;

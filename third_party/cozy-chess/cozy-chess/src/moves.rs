@@ -174,7 +174,7 @@ pub const fn get_between_rays(from: Square, to: Square) -> BitBoard {
         }
         between
     }
-    const TABLE: [[BitBoard; Square::NUM]; Square::NUM] = {
+    static TABLE: [[BitBoard; Square::NUM]; Square::NUM] = {
         let mut table = [[BitBoard::EMPTY; Square::NUM]; Square::NUM];
         let mut i = 0;
         while i < table.len() {
@@ -222,7 +222,7 @@ pub const fn get_line_rays(from: Square, to: Square) -> BitBoard {
         }
         BitBoard::EMPTY
     }
-    const TABLE: [[BitBoard; Square::NUM]; Square::NUM] = {
+    static TABLE: [[BitBoard; Square::NUM]; Square::NUM] = {
         let mut table = [[BitBoard::EMPTY; Square::NUM]; Square::NUM];
         let mut i = 0;
         while i < table.len() {

@@ -14,6 +14,30 @@ pub struct InstallSelection {
     pub executable: PathBuf,
 }
 
+impl InstallSelection {
+    pub fn reported_version(&self) -> Option<String> {
+        let path = self.root.join("_version.txt");
+        if !std::fs::symlink_metadata(&path).ok()?.file_type().is_file() {
+            return None;
+        }
+        let mut version = String::new();
+        File::open(path)
+            .ok()?
+            .take(129)
+            .read_to_string(&mut version)
+            .ok()?;
+        let version = version.trim();
+        let version = version.strip_prefix(['v', 'V']).unwrap_or(version);
+        (!version.is_empty()
+            && version.len() <= 128
+            && version.starts_with(|c: char| c.is_ascii_digit())
+            && version
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'-' | b'+')))
+        .then(|| version.to_owned())
+    }
+}
+
 pub(crate) fn resolve_install(config: &LauncherConfig) -> Result<InstallSelection, LauncherError> {
     let root = existing_root(&config.install_root)?;
     let candidate = match &config.candidate {

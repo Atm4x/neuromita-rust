@@ -59,6 +59,25 @@ pub struct CaptureSettings {
 pub enum Language {
     Russian,
     English,
+    Locale(crate::localization::LocaleId),
+}
+
+impl Language {
+    pub fn from_locale(locale: crate::localization::LocaleId) -> Self {
+        match locale.as_str() {
+            "ru" => Self::Russian,
+            "en" => Self::English,
+            _ => Self::Locale(locale),
+        }
+    }
+
+    pub fn locale(&self) -> crate::localization::LocaleId {
+        match self {
+            Self::Russian => crate::localization::LocaleId::russian(),
+            Self::English => crate::localization::LocaleId::english(),
+            Self::Locale(locale) => locale.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

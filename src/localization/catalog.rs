@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, fmt, fs, path::Path, sync::Arc};
 
 use serde::{
-    Deserialize, Deserializer,
+    Deserialize, Deserializer, Serialize, Serializer,
     de::{MapAccess, Visitor},
 };
 
@@ -50,6 +50,19 @@ impl LocaleId {
 impl fmt::Display for LocaleId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
+    }
+}
+
+impl Serialize for LocaleId {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for LocaleId {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let code = String::deserialize(deserializer)?;
+        Self::new(&code).map_err(serde::de::Error::custom)
     }
 }
 
