@@ -35,7 +35,7 @@ struct Execution {
 
 #[derive(Clone)]
 enum PendingTerminal {
-    Failure(RequestOutcome),
+    Failure(Box<RequestOutcome>),
     Cancelled,
 }
 
@@ -488,7 +488,7 @@ impl RequestRecord {
         match self.abandon_durable(ingress.as_ref(), request) {
             Ok(()) => {
                 match pending {
-                    PendingTerminal::Failure(outcome) => self.finish_volatile(outcome),
+                    PendingTerminal::Failure(outcome) => self.finish_volatile(*outcome),
                     PendingTerminal::Cancelled => self.finish_cancelled_volatile(),
                 }
                 Ok(Some(RegenerateTerminalReconciliation::Abandoned))
@@ -546,7 +546,7 @@ impl RequestRecord {
                 }
                 let mut inner = self.inner.lock().expect("request mutex poisoned");
                 if !inner.snapshot.is_resolved() && inner.phase != EffectPhase::Applied {
-                    inner.pending_terminal = Some(PendingTerminal::Failure(outcome));
+                    inner.pending_terminal = Some(PendingTerminal::Failure(Box::new(outcome)));
                 }
                 tracing::warn!(%request, %error, "regenerate failure remains pending durable reconciliation");
                 return;
