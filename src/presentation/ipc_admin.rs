@@ -39,6 +39,10 @@ pub(crate) enum PresenterRead {
     PromptFolder {
         character: CharacterId,
     },
+    PromptCatalog {
+        #[serde(default = "default_prompt_catalog_limit")]
+        limit: usize,
+    },
     SpeechTranscript {
         #[serde(default)]
         include_content: bool,
@@ -113,6 +117,10 @@ fn mode_name(mode: crate::knowledge::maintenance::GraphMaintenanceMode) -> &'sta
         crate::knowledge::maintenance::GraphMaintenanceMode::Clear => "clear",
         crate::knowledge::maintenance::GraphMaintenanceMode::Reindex => "reindex",
     }
+}
+
+fn default_prompt_catalog_limit() -> usize {
+    100
 }
 
 fn default_wait_ms() -> u64 {
@@ -430,6 +438,38 @@ impl PresenterProbe {
                     "note":"bounded Presenter retention only; request errors and content are withheld",
                     "evidence_level":"presenter_snapshot"}),
                 )
+            }
+            PresenterRead::PromptCatalog { limit } => {
+                if !(1..=200).contains(&limit) {
+                    return Err("prompt catalog limit must be 1..200".into());
+                }
+                let inventory = self.prompt_folder.inventory();
+                let total = inventory.sets.len();
+                let sets = inventory
+                    .sets
+                    .iter()
+                    .take(limit)
+                    .map(|set| {
+                        json!({
+                            "character": set.character,
+                            "name": set.name.chars().take(255).collect::<String>(),
+                            "author": set.author.chars().take(512).collect::<String>(),
+                            "version": set.version.chars().take(128).collect::<String>(),
+                            "description": set.description.chars().take(512).collect::<String>(),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                Ok(json!({
+                    "source": "prompt_folder_presenter",
+                    "configured": inventory.configured,
+                    "total": total,
+                    "returned": sets.len(),
+                    "truncated": total > sets.len(),
+                    "read_error_count": inventory.read_error_count,
+                    "sets": sets,
+                    "live_scan": true,
+                    "content_included": true,
+                }))
             }
             PresenterRead::PromptFolder { character } => {
                 let path = self.prompt_folder.locate(character)?;

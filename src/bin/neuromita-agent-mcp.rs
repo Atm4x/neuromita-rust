@@ -383,6 +383,9 @@ impl ServerHandler for NeuroMita {
                 &["character","version","source","text"],json!({"character":{"type":"string"},
                     "version":{"type":"object"},"source":{"type":"string","maxLength":4096},
                     "text":{"type":"string","maxLength":65536}})),
+            inspection_tool("presenter_prompt_catalog",
+                "Rescan the exact PromptCatalog used by the GUI and return a bounded list of currently installed prompt set metadata. Requires --allow-content; no prompt source text or filesystem paths are returned.",
+                &[], json!({"limit":{"type":"integer","minimum":1,"maximum":200}})),
             Tool::new("presenter_prompt_folder",
                 "Locate or open selected character PromptCatalog folder on Core host. Locate requires --allow-content (exposes host path); open also requires --allow-write and NEUROMITA_ENABLE_LOCAL_HOST_ACTIONS=1.",
                 serde_json::Map::from_iter([
@@ -446,7 +449,10 @@ impl ServerHandler for NeuroMita {
         let args = request.arguments.unwrap_or_default();
         if matches!(
             request.name.as_ref(),
-            "presenter_memory_recall" | "presenter_attach_file" | "presenter_prompt_folder"
+            "presenter_memory_recall"
+                | "presenter_attach_file"
+                | "presenter_prompt_folder"
+                | "presenter_prompt_catalog"
         ) && !self.allow_content
         {
             return Err(ErrorData::invalid_params(
@@ -873,6 +879,13 @@ fn command_for_tool(name: &str, mut args: Map<String, Value>) -> Result<Value, E
             }
             json!({"command":"presenter_admin_read","query":{
                 "query":"chat_diagnostics","character":character,"limit":limit}})
+        }
+        "presenter_prompt_catalog" => {
+            let limit = args.remove("limit").unwrap_or(json!(100));
+            if !limit.as_u64().is_some_and(|n| (1..=200).contains(&n)) {
+                return Err(ErrorData::invalid_params("limit must be 1..200", None));
+            }
+            json!({"command":"presenter_admin_read","query":{"query":"prompt_catalog","limit":limit}})
         }
         "presenter_conversation_preview" => {
             let character = string(&mut args, "character")?;
@@ -2224,6 +2237,18 @@ mod cycle16_gui_parity_tests {
         )
         .unwrap();
         assert_eq!(file["change"]["change"], "attach_file");
+        let catalog =
+            command_for_tool("presenter_prompt_catalog", args(json!({"limit":15}))).unwrap();
+        assert_eq!(catalog["query"]["query"], "prompt_catalog");
+        assert_eq!(catalog["query"]["limit"], 15);
+        for invalid in [
+            json!({"limit":0}),
+            json!({"limit":201}),
+            json!({"limit":"10"}),
+            json!({"unexpected":true}),
+        ] {
+            assert!(command_for_tool("presenter_prompt_catalog", args(invalid)).is_err());
+        }
         let folder = command_for_tool(
             "presenter_prompt_folder",
             args(json!({"action":"open","character":"Crazy"})),

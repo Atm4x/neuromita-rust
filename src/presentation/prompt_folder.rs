@@ -1,7 +1,19 @@
 //! Host-side prompt-folder operation shared by GUI and MCP.
 use super::SettingsPresenter;
-use crate::{character::CharacterId, prompts::PromptCatalog};
+use crate::{
+    character::CharacterId,
+    prompts::{PromptCatalog, PromptSetInfo},
+};
 use std::{path::PathBuf, sync::Arc};
+
+/// A live filesystem inventory. The catalog remains the sole prompt-set authority.
+/// One corrupt character folder must not conceal valid sets of other characters.
+#[derive(Debug, Clone)]
+pub struct PromptInventory {
+    pub configured: bool,
+    pub sets: Vec<PromptSetInfo>,
+    pub read_error_count: usize,
+}
 
 #[derive(Clone)]
 pub struct PromptFolderPresenter {
@@ -12,6 +24,29 @@ impl PromptFolderPresenter {
     pub fn new(catalog: Option<Arc<PromptCatalog>>, settings: Arc<SettingsPresenter>) -> Self {
         Self { catalog, settings }
     }
+    pub fn inventory(&self) -> PromptInventory {
+        let Some(catalog) = &self.catalog else {
+            return PromptInventory {
+                configured: false,
+                sets: Vec::new(),
+                read_error_count: 0,
+            };
+        };
+        let mut sets = Vec::new();
+        let mut read_error_count = 0;
+        for character in CharacterId::ALL {
+            match catalog.list(character) {
+                Ok(found) => sets.extend(found),
+                Err(_) => read_error_count += 1,
+            }
+        }
+        PromptInventory {
+            configured: true,
+            sets,
+            read_error_count,
+        }
+    }
+
     pub fn validate_selection(&self, character: CharacterId, name: &str) -> Result<(), String> {
         self.catalog
             .as_ref()

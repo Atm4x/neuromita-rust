@@ -162,15 +162,20 @@ impl Fixture {
     }
 
     async fn with_remote_voice() -> Self {
-        Self::with_voice_hub_telegram(8, |_| {}, false, None, false, true, None).await
+        Self::with_voice_hub_telegram(8, |_| {}, false, None, false, true, None, None).await
     }
 
     async fn with_telegram() -> Self {
-        Self::with_voice_hub_telegram(8, |_| {}, false, None, true, false, None).await
+        Self::with_voice_hub_telegram(8, |_| {}, false, None, true, false, None, None).await
+    }
+
+    async fn with_prompt_catalog(root: std::path::PathBuf) -> Self {
+        Self::with_voice_hub_telegram(8, |_| {}, false, None, false, false, None, Some(root)).await
     }
 
     async fn with_settings_repository(repository: Arc<dyn SettingsRepository>) -> Self {
-        Self::with_voice_hub_telegram(8, |_| {}, false, None, false, false, Some(repository)).await
+        Self::with_voice_hub_telegram(8, |_| {}, false, None, false, false, Some(repository), None)
+            .await
     }
 
     async fn with_voice_and_hub(
@@ -179,7 +184,10 @@ impl Fixture {
         enabled: bool,
         hub_root: Option<std::path::PathBuf>,
     ) -> Self {
-        Self::with_voice_hub_telegram(queue, configure, enabled, hub_root, false, false, None).await
+        Self::with_voice_hub_telegram(
+            queue, configure, enabled, hub_root, false, false, None, None,
+        )
+        .await
     }
 
     async fn with_voice_hub_telegram(
@@ -190,6 +198,7 @@ impl Fixture {
         telegram: bool,
         remote_voice: bool,
         settings_repository: Option<Arc<dyn SettingsRepository>>,
+        prompt_root: Option<std::path::PathBuf>,
     ) -> Self {
         let serial = APPLICATION.lock().await;
         let preset = GenerationPreset::new(ProviderTemplate::Gemini(
@@ -215,6 +224,9 @@ impl Fixture {
             "127.0.0.1:0".parse().unwrap(),
         );
         configure(&mut config.server);
+        if let Some(root) = prompt_root {
+            config = config.with_prompt_catalog(neuromita::prompts::PromptCatalog::new(root));
+        }
         if let Some(repository) = settings_repository {
             config.settings.repository = repository;
         }
@@ -4015,4 +4027,65 @@ async fn presenter_chat_diagnostics_are_character_scoped_bounded_and_content_fre
         .await;
     assert_eq!(invalid["type"], "error", "{invalid}");
     fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn prompt_catalog_refresh_uses_same_live_owner_as_gui() {
+    let root = std::env::temp_dir().join(format!("nm-mcp-prompt-catalog-{}", Uuid::new_v4()));
+    let crazy = root.join("Crazy");
+    let first = crazy.join("Alpha");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::write(
+        first.join("main_template.txt"),
+        "PRIVATE_PROMPT_NEVER_EXPOSED",
+    )
+    .unwrap();
+    let fixture = Fixture::with_prompt_catalog(root.clone()).await;
+    let mut client = fixture.connect().await;
+    let mut scan = command("presenter_admin_read");
+    scan["query"] = json!({"query":"prompt_catalog","limit":1});
+    client.send(scan.clone()).await;
+    let initial = client
+        .until(|r| r["command_id"] == scan["command_id"])
+        .await;
+    assert_eq!(initial["type"], "presenter_admin_read", "{initial}");
+    assert_eq!(initial["snapshot"]["source"], "prompt_folder_presenter");
+    assert_eq!(initial["snapshot"]["configured"], true);
+    assert_eq!(initial["snapshot"]["total"], 1);
+    assert_eq!(initial["snapshot"]["sets"][0]["name"], "Alpha");
+    let second = crazy.join("Beta");
+    std::fs::create_dir_all(&second).unwrap();
+    std::fs::write(second.join("main_template.txt"), "ANOTHER_PRIVATE_PROMPT").unwrap();
+    scan["command_id"] = json!(Uuid::new_v4());
+    client.send(scan.clone()).await;
+    let updated = client
+        .until(|r| r["command_id"] == scan["command_id"])
+        .await;
+    assert_eq!(updated["snapshot"]["total"], 2);
+    assert_eq!(updated["snapshot"]["returned"], 1);
+    assert_eq!(updated["snapshot"]["truncated"], true);
+    assert!(!updated.to_string().contains("PRIVATE_PROMPT_NEVER_EXPOSED"));
+    assert!(
+        !updated
+            .to_string()
+            .contains(root.to_string_lossy().as_ref())
+    );
+    scan["command_id"] = json!(Uuid::new_v4());
+    scan["query"]["limit"] = json!(20);
+    client.send(scan.clone()).await;
+    let all = client
+        .until(|r| r["command_id"] == scan["command_id"])
+        .await;
+    assert_eq!(all["snapshot"]["returned"], 2);
+    assert_eq!(all["snapshot"]["sets"][1]["name"], "Beta");
+    std::fs::remove_dir_all(&first).unwrap();
+    scan["command_id"] = json!(Uuid::new_v4());
+    client.send(scan.clone()).await;
+    let removed = client
+        .until(|r| r["command_id"] == scan["command_id"])
+        .await;
+    assert_eq!(removed["snapshot"]["total"], 1);
+    assert_eq!(removed["snapshot"]["sets"][0]["name"], "Beta");
+    fixture.shutdown().await;
+    std::fs::remove_dir_all(&root).unwrap();
 }

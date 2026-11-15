@@ -20,7 +20,7 @@ mod knowledge_admin;
 mod prompt_folder;
 pub use guide_persistence::{GuidePersistencePresenter, GuideSaveError};
 pub use knowledge_admin::{GraphMaintenancePresenter, GraphReview};
-pub use prompt_folder::PromptFolderPresenter;
+pub use prompt_folder::{PromptFolderPresenter, PromptInventory};
 mod presets;
 mod releases;
 mod runtime;

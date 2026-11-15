@@ -772,16 +772,7 @@ async fn observe(
                     super::settings::AdministrationSnapshot {
                         settings,
                         presets: administration.presets.snapshot(),
-                        prompt_sets: administration
-                            .prompts
-                            .as_ref()
-                            .map(|catalog| {
-                                CharacterId::ALL
-                                    .into_iter()
-                                    .flat_map(|id| catalog.list(id).unwrap_or_default())
-                                    .collect()
-                            })
-                            .unwrap_or_default(),
+                        prompt_sets: administration.prompt_folder.inventory().sets,
                     },
                 ))),
                 Err(error) => publish(Update::AdminError(error.to_string())),
