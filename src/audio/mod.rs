@@ -8,4 +8,5 @@ pub mod native;
 pub mod segment;
 pub mod session;
 pub mod ticket;
+pub mod transcript_bridge;
 pub mod vad;

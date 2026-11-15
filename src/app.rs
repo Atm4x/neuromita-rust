@@ -368,6 +368,79 @@ pub enum ApplicationError {
     Server(#[from] std::io::Error),
 }
 
+/// Shared application speech capture administration for GUI and MCP clients.
+/// Neither interface owns a separate ASR worker, controller, or transcript queue.
+#[derive(Clone)]
+pub(crate) struct SharedSpeechCapture {
+    settings: Arc<SettingsPresenter>,
+    runtime: crate::presentation::RuntimeStatePresenter,
+    recognizer: Option<Arc<dyn crate::audio::session::SpeechTranscriber>>,
+    audio_input: Arc<crate::audio::input_owner::AudioInputOwner>,
+    transcripts: Arc<crate::audio::transcript_bridge::SpeechTranscriptHub>,
+    stop: CancellationToken,
+}
+
+impl SharedSpeechCapture {
+    pub(crate) fn transcripts(&self) -> Arc<crate::audio::transcript_bridge::SpeechTranscriptHub> {
+        Arc::clone(&self.transcripts)
+    }
+
+    pub(crate) async fn start(
+        &self,
+        character: CharacterId,
+        selection_revision: u64,
+        ffmpeg: std::path::PathBuf,
+        ffplay: std::path::PathBuf,
+    ) -> Result<(), String> {
+        if self.stop.is_cancelled() {
+            return Err("application is stopping".into());
+        }
+        let runtime = self.runtime.refresh_status().await;
+        if runtime.service(AiService::Asr).phase
+            != crate::ai_runtime::runtime_status::RuntimePhase::ModelReady
+        {
+            return Err("ASR model must be initialized before capture".into());
+        }
+        let recognizer = self
+            .recognizer
+            .as_ref()
+            .ok_or("ASR worker has not been activated")?;
+        let settings = self
+            .settings
+            .snapshot()
+            .map_err(|error| error.to_string())?;
+        let preferences = &settings.values.speech.asr;
+        let devices = crate::presentation::AudioInputPresenter::new(Arc::clone(&self.audio_input))
+            .devices()
+            .await
+            .map_err(|error| error.to_string())?;
+        if !devices.iter().any(|device| {
+            device.id == preferences.device_id && device.backend == preferences.audio_backend
+        }) {
+            return Err("selected recording device is unavailable for configured backend".into());
+        }
+        let config = crate::audio::controller::SpeechCaptureConfig::from_preferences(
+            preferences,
+            ffmpeg,
+            ffplay,
+        )
+        .map_err(|error| error.to_string())?;
+        let handler = crate::audio::session::SpeechInputHandler::new(
+            Arc::clone(recognizer),
+            self.transcripts.destination(character, selection_revision),
+            crate::audio::controller::playback(&config),
+        );
+        self.audio_input
+            .start_capture(handler, self.stop.child_token(), config)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) async fn stop(&self) {
+        self.audio_input.stop_capture().await;
+    }
+}
+
 pub struct ApplicationLifecycle {
     bindings: Arc<ApiBindings>,
     timeline: Arc<Mutex<SessionTimeline>>,
@@ -378,6 +451,7 @@ pub struct ApplicationLifecycle {
     speech: Option<Arc<dyn crate::audio::session::SpeechTranscriber>>,
     audio_input: Arc<crate::audio::input_owner::AudioInputOwner>,
     speech_controller: Arc<tokio::sync::Mutex<crate::audio::controller::SpeechSessionController>>,
+    speech_capture: SharedSpeechCapture,
     speech_startup_warning: Option<String>,
     ai_recovery: Option<crate::ai_runtime::application::AiRecoveryHandle>,
     recovery_workers: Arc<ServiceWorkerRegistry>,
@@ -1404,6 +1478,14 @@ impl ApplicationLifecycle {
         let audio_input = Arc::new(crate::audio::input_owner::AudioInputOwner::new(Arc::clone(
             &speech_controller,
         )));
+        let speech_capture = SharedSpeechCapture {
+            settings: Arc::clone(&settings_presenter),
+            runtime: ai_runtime_status.clone(),
+            recognizer: speech.clone(),
+            audio_input: Arc::clone(&audio_input),
+            transcripts: Arc::new(crate::audio::transcript_bridge::SpeechTranscriptHub::default()),
+            stop: owners_stop.child_token(),
+        };
         let speech_watch_task = live_speech.as_ref().map(|live| {
             tokio::spawn(watch_speech_settings(
                 Arc::clone(live),
@@ -1477,6 +1559,7 @@ impl ApplicationLifecycle {
                 ai_hub_install.clone(),
                 speech_model_catalog,
                 Arc::clone(&speech_controller),
+                speech_capture.clone(),
             )),
         )));
         let stop = CancellationToken::new();
@@ -1511,6 +1594,7 @@ impl ApplicationLifecycle {
             speech,
             audio_input,
             speech_controller,
+            speech_capture,
             speech_startup_warning,
             ai_recovery,
             recovery_workers: Arc::clone(&service_workers),
@@ -1624,8 +1708,26 @@ impl ApplicationLifecycle {
         self.audio_input.start_capture(handler, stop, config).await
     }
 
+    pub async fn start_speech_capture_for(
+        &self,
+        character: CharacterId,
+        selection_revision: u64,
+        ffmpeg: std::path::PathBuf,
+        ffplay: std::path::PathBuf,
+    ) -> Result<(), String> {
+        self.speech_capture
+            .start(character, selection_revision, ffmpeg, ffplay)
+            .await
+    }
+
+    pub fn observe_transcripts(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<crate::audio::transcript_bridge::RoutedTranscript> {
+        self.speech_capture.transcripts.subscribe()
+    }
+
     pub async fn stop_speech_capture(&self) {
-        self.audio_input.stop_capture().await;
+        self.speech_capture.stop().await;
     }
 
     pub async fn press_speech_button(

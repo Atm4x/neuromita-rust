@@ -199,6 +199,24 @@ impl ServerHandler for NeuroMita {
                     })),
                 ])
             ).with_annotations(ToolAnnotations::new().read_only(false)),
+            Tool::new("presenter_speech_capture",
+                "Start or stop the same ASR capture owned by ApplicationLifecycle and used by GUI. On start supply selected character and selection_revision; optional absolute FFmpeg/FFplay paths for non-native backend. Requires --allow-write; actual ASR model must be ready.",
+                serde_json::Map::from_iter([
+                    ("type".into(),json!("object")),("additionalProperties".into(),json!(false)),
+                    ("required".into(),json!(["enabled"])),
+                    ("properties".into(),json!({
+                        "enabled":{"type":"boolean"},
+                        "character":{"type":"string"},
+                        "selection_revision":{"type":"integer","minimum":0},
+                        "press_on_start":{"type":"boolean"},
+                        "ffmpeg":{"type":"string"},
+                        "ffplay":{"type":"string"}
+                    })),
+                ])
+            ).with_annotations(ToolAnnotations::new().read_only(false)),
+            inspection_tool("presenter_speech_transcript",
+                "Read the latest recognized transcript and routing identity emitted by the SAME application-owned transcript hub observed by GUI. Requires --allow-content for text.",
+                &[],json!({"include_content":{"type":"boolean"}})),
             Tool::new("presenter_speech_session",
                 "Send push-to-talk press/release into the running SpeechSessionController. Requires an active speech capture started by the host; does NOT start a new ASR worker/session.",
                 serde_json::Map::from_iter([
@@ -252,7 +270,7 @@ impl ServerHandler for NeuroMita {
                 })),
             inspection_tool("presenter_wait",
                 "Wait for an actual Settings/Chat/CharacterMemory observer change (no polling). Timeout max 30s.",
-                &["target"],json!({"target":{"type":"string","enum":["settings","chat","memory","native_download","ai_hub_install"]},
+                &["target"],json!({"target":{"type":"string","enum":["settings","chat","memory","native_download","ai_hub_install","speech_transcript"]},
                     "character":{"type":"string"},"after_revision":{"type":"integer","minimum":0},
                     "after_version":{"type":"string","minLength":64,"maxLength":64},
                     "timeout_ms":{"type":"integer","minimum":1,"maximum":30000}})),
@@ -336,6 +354,15 @@ impl ServerHandler for NeuroMita {
         _: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
         let args = request.arguments.unwrap_or_default();
+        if request.name == "presenter_speech_transcript"
+            && args.get("include_content") == Some(&Value::Bool(true))
+            && !self.allow_content
+        {
+            return Err(ErrorData::invalid_params(
+                "transcript text requires --allow-content",
+                None,
+            ));
+        }
         if request.name == "presenter_conversation"
             && args.get("include_content") == Some(&Value::Bool(true))
             && !self.allow_content
@@ -367,6 +394,7 @@ impl ServerHandler for NeuroMita {
                 | "presenter_ai_hub_install"
                 | "presenter_speech_settings"
                 | "presenter_speech_session"
+                | "presenter_speech_capture"
                 | "presenter_tool_settings"
         ) && !self.allow_write
         {
@@ -541,6 +569,7 @@ impl ServerHandler for NeuroMita {
                 | "presenter_presets"
                 | "presenter_speech_settings"
                 | "presenter_speech_session"
+                | "presenter_speech_capture"
                 | "presenter_tool_settings"
         ) && !self.allow_write
         {
@@ -868,6 +897,50 @@ fn command_for_tool(name: &str, mut args: Map<String, Value>) -> Result<Value, E
                 ));
             }
             json!({"command":"presenter_action","action":payload})
+        }
+        "presenter_speech_transcript" => {
+            let include_content = args.remove("include_content").unwrap_or(json!(false));
+            if !include_content.is_boolean() || !args.is_empty() {
+                return Err(ErrorData::invalid_params(
+                    "invalid transcript read options",
+                    None,
+                ));
+            }
+            json!({"command":"presenter_admin_read","query":{
+                "query":"speech_transcript","include_content":include_content}})
+        }
+        "presenter_speech_capture" => {
+            let enabled = args
+                .remove("enabled")
+                .and_then(|v| v.as_bool())
+                .ok_or_else(|| ErrorData::invalid_params("enabled must be bool", None))?;
+            let mut action = json!({"action":"speech_capture","enabled":enabled});
+            for key in [
+                "character",
+                "selection_revision",
+                "press_on_start",
+                "ffmpeg",
+                "ffplay",
+            ] {
+                if let Some(value) = args.remove(key) {
+                    action[key] = value;
+                }
+            }
+            if !args.is_empty() {
+                return Err(ErrorData::invalid_params(
+                    "unexpected speech capture options",
+                    None,
+                ));
+            }
+            if enabled
+                && (!action["character"].is_string() || !action["selection_revision"].is_u64())
+            {
+                return Err(ErrorData::invalid_params(
+                    "start requires character and selection_revision",
+                    None,
+                ));
+            }
+            json!({"command":"presenter_action","action":action})
         }
         "presenter_speech_inventory" => {
             if !args.is_empty() {
@@ -1492,5 +1565,51 @@ mod speech_admin_tests {
         ] {
             assert!(command_for_tool("presenter_speech_settings", args(invalid)).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod speech_capture_admin_tests {
+    use super::*;
+    fn args(value: Value) -> Map<String, Value> {
+        value.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn maps_capture_and_transcript_to_typed_owner_commands() {
+        let start = command_for_tool(
+            "presenter_speech_capture",
+            args(json!({
+                "enabled":true,"character":"Crazy","selection_revision":4,"press_on_start":true
+            })),
+        )
+        .unwrap();
+        assert_eq!(start["command"], "presenter_action");
+        assert_eq!(start["action"]["action"], "speech_capture");
+        assert_eq!(start["action"]["selection_revision"], 4);
+        assert_eq!(start["action"]["press_on_start"], true);
+        let stop =
+            command_for_tool("presenter_speech_capture", args(json!({"enabled":false}))).unwrap();
+        assert_eq!(stop["action"]["enabled"], false);
+        let read = command_for_tool(
+            "presenter_speech_transcript",
+            args(json!({"include_content":false})),
+        )
+        .unwrap();
+        assert_eq!(read["query"]["query"], "speech_transcript");
+        assert!(
+            command_for_tool("presenter_speech_capture", args(json!({"enabled":true}))).is_err()
+        );
+        assert!(
+            command_for_tool("presenter_speech_capture", args(json!({"enabled":"yes"}))).is_err()
+        );
+        assert!(command_for_tool("presenter_speech_capture",args(json!({"enabled":true,"character":"Crazy","selection_revision":2,"shell":"exec"}))).is_err());
+        assert!(
+            command_for_tool(
+                "presenter_speech_transcript",
+                args(json!({"include_content":"yes"}))
+            )
+            .is_err()
+        );
     }
 }

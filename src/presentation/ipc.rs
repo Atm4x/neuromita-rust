@@ -91,6 +91,19 @@ pub(crate) enum PresenterAction {
     SpeechPushToTalk {
         pressed: bool,
     },
+    SpeechCapture {
+        enabled: bool,
+        #[serde(default)]
+        character: Option<CharacterId>,
+        #[serde(default)]
+        selection_revision: Option<u64>,
+        #[serde(default)]
+        press_on_start: bool,
+        #[serde(default)]
+        ffmpeg: Option<std::path::PathBuf>,
+        #[serde(default)]
+        ffplay: Option<std::path::PathBuf>,
+    },
     SpeechSelectModel {
         service: AiService,
         model: Option<SpeechModelReference>,
@@ -209,6 +222,7 @@ pub(crate) struct PresenterProbe {
     pub(super) speech_catalog: Option<crate::ai_runtime::speech_catalog::SpeechModelCatalog>,
     speech_controller:
         std::sync::Arc<tokio::sync::Mutex<crate::audio::controller::SpeechSessionController>>,
+    pub(super) speech_capture: crate::app::SharedSpeechCapture,
     pub(super) ai_hub_install:
         Option<std::sync::Arc<crate::ai_runtime::install_coordinator::AiHubInstallCoordinator>>,
 }
@@ -235,6 +249,7 @@ impl PresenterProbe {
         speech_controller: std::sync::Arc<
             tokio::sync::Mutex<crate::audio::controller::SpeechSessionController>,
         >,
+        speech_capture: crate::app::SharedSpeechCapture,
     ) -> Self {
         Self {
             chat,
@@ -252,6 +267,7 @@ impl PresenterProbe {
             native,
             speech_catalog,
             speech_controller,
+            speech_capture,
             ai_hub_install,
         }
     }
@@ -462,6 +478,60 @@ impl PresenterProbe {
                     .map_err(|e| e.to_string())?;
                 json!({"action":"tool_set_depth","depth":depth,
                     "settings_revision":self.settings.snapshot().map_err(|e|e.to_string())?.revision})
+            }
+            SpeechCapture {
+                enabled,
+                character,
+                selection_revision,
+                press_on_start,
+                ffmpeg,
+                ffplay,
+            } => {
+                if enabled {
+                    let character = character.ok_or("start requires character")?;
+                    let revision = selection_revision.ok_or("start requires selection_revision")?;
+                    let checked_path =
+                        |value: Option<std::path::PathBuf>| -> Result<std::path::PathBuf, String> {
+                            let path = value.unwrap_or_default();
+                            if !path.as_os_str().is_empty()
+                                && (!path.is_absolute() || !path.is_file())
+                            {
+                                return Err(
+                                    "speech capture executable must be an existing absolute file"
+                                        .into(),
+                                );
+                            }
+                            Ok(path)
+                        };
+                    let ffmpeg = checked_path(ffmpeg)?;
+                    let ffplay = checked_path(ffplay)?;
+                    self.speech_capture
+                        .start(character, revision, ffmpeg, ffplay)
+                        .await?;
+                    if press_on_start {
+                        if let Err(error) = self.speech_controller.lock().await.press(true).await {
+                            self.speech_capture.stop().await;
+                            return Err(error.to_string());
+                        }
+                    }
+                    json!({"action":"speech_capture","enabled":true,
+                        "character":character,"selection_revision":revision,
+                        "phase":format!("{:?}",self.speech.snapshot().phase)})
+                } else {
+                    if character.is_some()
+                        || selection_revision.is_some()
+                        || ffmpeg.is_some()
+                        || ffplay.is_some()
+                        || press_on_start
+                    {
+                        return Err(
+                            "stop does not accept a character, revision, path or press_on_start"
+                                .into(),
+                        );
+                    }
+                    self.speech_capture.stop().await;
+                    json!({"action":"speech_capture","enabled":false,"phase":format!("{:?}",self.speech.snapshot().phase)})
+                }
             }
             SpeechPushToTalk { pressed } => {
                 self.speech_controller

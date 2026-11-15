@@ -2594,7 +2594,7 @@ async fn mcp_stdio_probes_the_same_running_core() {
             let result = &response["result"];
             match id {
                 1 => assert_eq!(result["serverInfo"]["name"], "neuromita"),
-                2 => assert_eq!(result["tools"].as_array().unwrap().len(), 37),
+                2 => assert_eq!(result["tools"].as_array().unwrap().len(), 39),
                 3 => {
                     let frame = &result["structuredContent"];
                     assert_eq!(frame["type"], "presenter_inspect");
@@ -3288,4 +3288,87 @@ async fn mcp_tool_options_and_depth_share_settings_presenter_without_exposing_cr
         4
     );
     fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn mcp_speech_capture_reuses_core_owner_and_rejects_unready_asr() {
+    let fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+    let mut read = command("presenter_admin_read");
+    read["query"] = json!({"query":"speech_transcript","include_content":false});
+    client.send(read.clone()).await;
+    let snapshot = client
+        .until(|r| r["command_id"] == read["command_id"])
+        .await;
+    assert_eq!(snapshot["type"], "presenter_admin_read", "{snapshot}");
+    assert_eq!(snapshot["snapshot"]["revision"], 0);
+    assert_eq!(snapshot["snapshot"]["available"], false);
+    assert!(!snapshot.to_string().contains("transcript_text"));
+
+    let mut start = command("presenter_action");
+    start["action"] = json!({"action":"speech_capture","enabled":true,
+        "character":"Crazy","selection_revision":0});
+    client.send(start.clone()).await;
+    let reject = client
+        .until(|r| r["command_id"] == start["command_id"])
+        .await;
+    assert_eq!(reject["type"], "error", "{reject}");
+    assert_eq!(reject["code"], "invalid_value");
+    assert!(reject["error"].as_str().unwrap().contains("ASR model"));
+
+    let mut invalid = command("presenter_action");
+    invalid["action"] = json!({"action":"speech_capture","enabled":false,"character":"Crazy"});
+    client.send(invalid.clone()).await;
+    let reject = client
+        .until(|r| r["command_id"] == invalid["command_id"])
+        .await;
+    assert_eq!(reject["type"], "error", "{reject}");
+
+    let mut stop = command("presenter_action");
+    stop["action"] = json!({"action":"speech_capture","enabled":false});
+    client.send(stop.clone()).await;
+    let receipt = client
+        .until(|r| r["command_id"] == stop["command_id"])
+        .await;
+    assert_eq!(receipt["type"], "presenter_action", "{receipt}");
+    assert_eq!(receipt["result"]["result"]["enabled"], false);
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn speech_transcript_observation_uses_the_same_ticket_fenced_hub_as_gui() {
+    use neuromita::ai_runtime::speech::Transcript;
+    use neuromita::audio::{
+        session::SpeechConversation, ticket::SpeechStream, transcript_bridge::SpeechTranscriptHub,
+    };
+    use tokio_util::sync::CancellationToken;
+
+    let bus = std::sync::Arc::new(SpeechTranscriptHub::default());
+    let mut gui = bus.subscribe();
+    let mut observer = bus.observe();
+    let stream = SpeechStream::new(CancellationToken::new());
+    let conversation = bus.destination(CharacterId::Crazy, 12);
+    let ticket = stream.ticket();
+    let transcript = Transcript {
+        text: "spoken text".into(),
+        language: Some("ru".into()),
+    };
+    conversation.reply(&ticket, &transcript).await.unwrap();
+    let event = gui.try_recv().unwrap();
+    assert_eq!(event.revision, 1);
+    assert_eq!(event.character, CharacterId::Crazy);
+    assert_eq!(event.selection_revision, 12);
+    assert_eq!(event.transcript, transcript);
+    assert_eq!(observer.borrow_and_update().as_ref().unwrap().revision, 1);
+    conversation.reply(&ticket, &transcript).await.unwrap();
+    assert!(gui.try_recv().is_err());
+    stream.invalidate();
+    conversation.reply(&ticket, &transcript).await.unwrap();
+    assert!(gui.try_recv().is_err());
+    conversation
+        .reply(&stream.ticket(), &transcript)
+        .await
+        .unwrap();
+    assert_eq!(gui.try_recv().unwrap().revision, 2);
+    assert_eq!(bus.latest().unwrap().revision, 2);
 }

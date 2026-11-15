@@ -365,11 +365,13 @@ fn find_binary(directory: &std::path::Path, variable: &str, filename: &str) -> O
     .find(|path| path.is_absolute() && path.is_file())
 }
 
+#[cfg(test)]
 struct DesktopTranscriptSink {
     send: mpsc::UnboundedSender<(ChatOrigin, Transcript)>,
     origin: ChatOrigin,
 }
 
+#[cfg(test)]
 fn speech_conversation(
     send: &mpsc::UnboundedSender<(ChatOrigin, Transcript)>,
     origin: ChatOrigin,
@@ -380,6 +382,7 @@ fn speech_conversation(
     })
 }
 
+#[cfg(test)]
 impl SpeechConversation for DesktopTranscriptSink {
     fn reply<'a>(
         &'a self,
@@ -409,28 +412,8 @@ fn dispatch_policy(preferences: &AsrPreferences) -> Option<Duration> {
 async fn enable_speech_session(
     app: &ApplicationLifecycle,
     directory: &std::path::Path,
-    conversation: Arc<dyn SpeechConversation>,
+    origin: ChatOrigin,
 ) -> Result<(), String> {
-    let administration = app.presenter();
-    let runtime = administration.ai_runtime.refresh_status().await;
-    if runtime.service(neuromita::ai_runtime::AiService::Asr).phase != RuntimePhase::ModelReady {
-        return Err("ASR модель не инициализирована; выберите и активируйте её в AI Engine".into());
-    }
-    let settings = administration
-        .settings
-        .snapshot()
-        .map_err(|e| e.to_string())?;
-    let preferences = &settings.values.speech.asr;
-    let devices = administration
-        .audio_input
-        .devices()
-        .await
-        .map_err(|error| error.to_string())?;
-    if !devices.iter().any(|device| {
-        device.id == preferences.device_id && device.backend == preferences.audio_backend
-    }) {
-        return Err("Выбранное устройство ввода не найдено или не соответствует backend".into());
-    }
     let ffmpeg = find_binary(
         directory,
         "NEUROMITA_FFMPEG",
@@ -451,11 +434,8 @@ async fn enable_speech_session(
         },
     )
     .unwrap_or_default();
-    let config = SpeechCaptureConfig::from_preferences(preferences, ffmpeg, ffplay)
-        .map_err(|e| e.to_string())?;
-    app.start_speech_capture_routed(config, conversation)
+    app.start_speech_capture_for(origin.character, origin.selection_revision, ffmpeg, ffplay)
         .await
-        .map_err(|e| e.to_string())
 }
 
 async fn start(
@@ -873,7 +853,7 @@ async fn observe(
     let (native_download_events, mut native_download_updates) =
         mpsc::unbounded_channel::<NativeDownloadEvent>();
     let mut active_native_download: Option<uuid::Uuid> = None;
-    let (transcripts, mut transcript_updates) = mpsc::unbounded_channel();
+    let mut transcript_updates = app.observe_transcripts();
     let mut liveness = tokio::time::interval(Duration::from_secs(5));
     liveness.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let native_owner = app
@@ -1209,9 +1189,9 @@ async fn observe(
                 },
                 Some(Command::SpeechSessionEnabled(enabled)) => {
                     let result = if enabled {
-                        enable_speech_session(app, directory, speech_conversation(&transcripts, ChatOrigin {
+                        enable_speech_session(app, directory, ChatOrigin {
                             character, selection_revision,
-                        })).await
+                        }).await
                     } else {
                         app.stop_speech_capture().await;
                         Ok(())
@@ -1235,7 +1215,7 @@ async fn observe(
                         match enable_speech_session(
                             app,
                             directory,
-                            speech_conversation(&transcripts, origin),
+                            origin,
                         ).await {
                             Ok(()) => {
                                 let mode = administration.settings.asr.preferences.get().input_mode;
@@ -1761,7 +1741,10 @@ async fn observe(
                 refresh_views = false;
             },
             transcript = transcript_updates.recv() => {
-                if let Some((origin, transcript)) = transcript {
+                if let Ok(transcript) = transcript {
+                    let origin = ChatOrigin { character: transcript.character,
+                        selection_revision: transcript.selection_revision };
+                    let transcript = transcript.transcript;
                     if !chat_fence::accepts(
                         origin.character.index() as i32,
                         origin.selection_revision,

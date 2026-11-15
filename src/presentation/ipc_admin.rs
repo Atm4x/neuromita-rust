@@ -21,6 +21,10 @@ use crate::{
 #[serde(tag = "query", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum PresenterRead {
     SpeechInventory {},
+    SpeechTranscript {
+        #[serde(default)]
+        include_content: bool,
+    },
     NativeModels {
         #[serde(default)]
         refresh: bool,
@@ -91,6 +95,7 @@ pub(crate) enum WaitTarget {
     Memory,
     NativeDownload,
     AiHubInstall,
+    SpeechTranscript,
 }
 
 fn default_limit() -> usize {
@@ -305,6 +310,25 @@ fn messages_json(
 impl PresenterProbe {
     pub(crate) async fn admin_read(&self, query: PresenterRead) -> Result<Value, String> {
         match query {
+            PresenterRead::SpeechTranscript { include_content } => {
+                let last = self.speech_capture.transcripts().latest();
+                Ok(match last {
+                    Some(event) => {
+                        let mut record = json!({"source":"application_speech_transcript_hub",
+                            "revision":event.revision,"character":event.character,
+                            "selection_revision":event.selection_revision,
+                            "language":event.transcript.language,
+                            "text_length":event.transcript.text.chars().count(),
+                            "content_included":include_content});
+                        if include_content {
+                            record["text"] = json!(event.transcript.text);
+                        }
+                        record
+                    }
+                    None => json!({"source":"application_speech_transcript_hub",
+                        "revision":0,"available":false,"content_included":include_content}),
+                })
+            }
             PresenterRead::SpeechInventory {} => {
                 let catalog = self
                     .speech_catalog
@@ -410,6 +434,38 @@ impl PresenterProbe {
                 }
                 let deadline = std::time::Duration::from_millis(timeout_ms);
                 match target {
+                    WaitTarget::SpeechTranscript => {
+                        if character.is_some()
+                            || after_version.is_some()
+                            || after_revision.is_none()
+                        {
+                            return Err("speech transcript wait requires after_revision without character or version".into());
+                        }
+                        let previous = after_revision.expect("validated");
+                        let mut updates = self.speech_capture.transcripts().observe();
+                        let wait = async {
+                            loop {
+                                let snapshot = updates.borrow_and_update().clone();
+                                let revision = snapshot.as_ref().map_or(0, |value| value.revision);
+                                if revision != previous {
+                                    return Ok::<_, String>(json!({"target":"speech_transcript",
+                                        "changed":true,"revision":revision,
+                                        "character":snapshot.as_ref().map(|v|v.character),
+                                        "selection_revision":snapshot.as_ref().map(|v|v.selection_revision)}));
+                                }
+                                updates
+                                    .changed()
+                                    .await
+                                    .map_err(|_| "speech transcript observer closed".to_string())?;
+                            }
+                        };
+                        match tokio::time::timeout(deadline, wait).await {
+                            Ok(result) => result,
+                            Err(_) => Ok(
+                                json!({"target":"speech_transcript","changed":false,"timed_out":true}),
+                            ),
+                        }
+                    }
                     WaitTarget::AiHubInstall => {
                         if character.is_some()
                             || after_version.is_some()
