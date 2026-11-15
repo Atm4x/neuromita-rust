@@ -247,8 +247,8 @@ impl NativeModelWorkflow {
             .collect();
         let mut service_workers = self
             .speech_workers
-            .iter()
-            .map(|(_, session)| session.snapshot())
+            .values()
+            .map(|session| session.snapshot())
             .collect::<Vec<_>>();
         service_workers.sort_by_key(|worker| match worker.service {
             NativeSpeechKind::Tts => 0,
@@ -600,16 +600,16 @@ impl NativeModelWorkflow {
     pub async fn deactivate_all(&mut self) -> Result<(), NativeWorkflowError> {
         let mut first_error = None;
         for service in [NativeSpeechKind::Tts, NativeSpeechKind::Asr] {
-            if self.speech_workers.contains_key(&service) {
-                if let Err(error) = self.deactivate_for_service(service).await {
-                    first_error.get_or_insert(error);
-                }
-            }
-        }
-        if self.active.is_some() {
-            if let Err(error) = self.deactivate().await {
+            if self.speech_workers.contains_key(&service)
+                && let Err(error) = self.deactivate_for_service(service).await
+            {
                 first_error.get_or_insert(error);
             }
+        }
+        if self.active.is_some()
+            && let Err(error) = self.deactivate().await
+        {
+            first_error.get_or_insert(error);
         }
         if let Some(error) = first_error {
             Err(error)

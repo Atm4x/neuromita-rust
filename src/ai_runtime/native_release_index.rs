@@ -235,13 +235,12 @@ impl NativeReleaseIndexStore {
         let index = verify_index(index_bytes, &trust.load_verifier()?, publisher_id, now)?;
         let receipt_path = self.root.join(format!("{publisher_id}.json"));
         let current = read_receipt(&receipt_path, publisher_id)?;
-        if let Some(ref receipt) = current {
-            if index.generation < receipt.generation
+        if let Some(ref receipt) = current
+            && (index.generation < receipt.generation
                 || (index.generation == receipt.generation
-                    && index.index_sha256 != parse_sha256(&receipt.index_sha256)?)
-            {
-                return Err(NativeIndexError::Rollback);
-            }
+                    && index.index_sha256 != parse_sha256(&receipt.index_sha256)?))
+        {
+            return Err(NativeIndexError::Rollback);
         }
         let replayed = current.is_some_and(|r| r.generation == index.generation);
         let mut authorized = trust.available_releases()?;

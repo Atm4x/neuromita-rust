@@ -267,10 +267,7 @@ impl Interpreter {
     ) -> Result<String, PromptError> {
         let mut value = input.to_owned();
         let mut offset = 0;
-        loop {
-            let Some(start_rel) = value[offset..].find("[<") else {
-                break;
-            };
+        while let Some(start_rel) = value[offset..].find("[<") {
             let start = offset + start_rel;
             let end = value[start..]
                 .find(">]")

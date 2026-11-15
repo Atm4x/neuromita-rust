@@ -165,7 +165,7 @@ impl ServerHandler for NeuroMita {
                 ])
             ).with_annotations(ToolAnnotations::new().read_only(false)),
             Tool::new("presenter_guide",
-                "Set Guide level, page or completion via the actual OnboardingSettingsPresenter; inspect_presenter(surface=guide) afterwards. Does not claim GUI navigation was rendered.",
+                "Save Guide level, page or completion through the same persistence presenter as the GUI. Success confirms storage; inspect_presenter(surface=guide) reads the current state.",
                 serde_json::Map::from_iter([
                     ("type".into(),json!("object")),("additionalProperties".into(),json!(false)),
                     ("required".into(),json!(["field","value"])),

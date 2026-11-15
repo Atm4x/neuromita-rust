@@ -313,54 +313,34 @@ pub(super) fn request_status_json(row: &super::RequestView) -> Value {
 
 impl PresenterProbe {
     pub(crate) fn new(
-        chat: ChatPresenter,
-        selection: std::sync::Arc<super::ChatSelectionPresenter>,
-        speech_chat: super::SpeechChatPresenter,
-        runtime: RuntimeStatePresenter,
-        speech: super::SpeechSessionPresenter,
-        releases: ReleasesPresenter,
-        audio_input: AudioInputPresenter,
-        voice: VoiceSettingsPresenter,
-        guide: OnboardingSettingsPresenter,
-        conversation: super::ConversationPresenter,
-        presets: super::PresetsPresenter,
-        preset_selection: super::PresetsSettingsPresenter,
-        settings: std::sync::Arc<super::SettingsPresenter>,
-        characters: super::CharactersPresenter,
-        graph: super::GraphMaintenancePresenter,
-        guide_persistence: super::GuidePersistencePresenter,
-        prompt_folder: super::PromptFolderPresenter,
-        native: Option<super::NativeHubApi>,
-        ai_hub_install: Option<super::AiHubInstallPresenter>,
+        presenter: &super::GuiPresenter,
         speech_catalog: Option<crate::ai_runtime::speech_catalog::SpeechModelCatalog>,
         speech_capture: crate::app::SharedSpeechCapture,
-        telegram_admin: Option<super::TelegramPresenter>,
-        remote_voice_admin: Option<super::RemoteVoicePresenter>,
     ) -> Self {
         Self {
-            chat,
-            selection,
-            speech_chat,
-            runtime,
-            speech,
-            releases,
-            audio_input,
-            voice,
-            guide,
-            conversation,
-            presets,
-            preset_selection,
-            settings,
-            characters,
-            graph,
-            guide_persistence,
-            prompt_folder,
-            native,
+            chat: presenter.chat.clone(),
+            selection: presenter.selection.clone(),
+            speech_chat: presenter.speech_chat.clone(),
+            runtime: presenter.ai_runtime.clone(),
+            speech: presenter.speech.clone(),
+            releases: presenter.releases.clone(),
+            audio_input: presenter.audio_input.clone(),
+            voice: presenter.settings.voice.clone(),
+            guide: presenter.settings.onboarding.clone(),
+            conversation: presenter.conversation.clone(),
+            presets: presenter.presets.clone(),
+            preset_selection: presenter.settings.presets.clone(),
+            settings: presenter.settings.clone(),
+            characters: presenter.characters.clone(),
+            graph: presenter.graph.clone(),
+            guide_persistence: presenter.guide_persistence.clone(),
+            prompt_folder: presenter.prompt_folder.clone(),
+            native: presenter.native_hub.clone(),
             speech_catalog,
             speech_capture,
-            ai_hub_install,
-            telegram_admin,
-            remote_voice_admin,
+            ai_hub_install: presenter.ai_install.clone(),
+            telegram_admin: presenter.telegram.clone(),
+            remote_voice_admin: presenter.remote_voice.clone(),
         }
     }
 
@@ -504,22 +484,32 @@ impl PresenterProbe {
                 json!({"action":"voice_set_volume","value":volume.get()})
             }
             GuideSetLevel { level } => {
-                self.guide
-                    .guide_level
-                    .set(level)
+                self.guide_persistence
+                    .change(crate::onboarding::GuideChange::Level(level))
+                    .await
                     .map_err(|e| e.to_string())?;
-                json!({"action":"guide_set_level","level":level})
+                json!({"action":"guide_set_level","level":level,"persisted":true})
             }
             GuideSetPage { page } => {
-                self.guide.guide_page.set(page).map_err(|e| e.to_string())?;
-                json!({"action":"guide_set_page","page":page})
+                self.guide_persistence
+                    .change(crate::onboarding::GuideChange::Page(page))
+                    .await
+                    .map_err(|e| e.to_string())?;
+                json!({"action":"guide_set_page","page":page,"persisted":true})
             }
             GuideSetCompleted { completed } => {
-                self.guide
-                    .guide_completed
-                    .set(completed)
+                use crate::onboarding::GuideChange;
+
+                let change = if completed {
+                    GuideChange::Complete
+                } else {
+                    GuideChange::MarkIncomplete
+                };
+                self.guide_persistence
+                    .change(change)
+                    .await
                     .map_err(|e| e.to_string())?;
-                json!({"action":"guide_set_completed","completed":completed})
+                json!({"action":"guide_set_completed","completed":completed,"persisted":true})
             }
             PresetSelect { preset_id } => {
                 let id = crate::generation::PresetId(preset_id);

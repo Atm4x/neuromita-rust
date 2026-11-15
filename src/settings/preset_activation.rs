@@ -5,6 +5,8 @@ use std::{
     path::Path,
 };
 
+use crate::portable::create_private_directory as create_private_dir;
+
 use thiserror::Error;
 
 use super::python_presets::{parse_credentials, parse_unique_json, sha256_hex};
@@ -748,16 +750,6 @@ fn read_file(path: &Path, limit: usize) -> Result<Option<Vec<u8>>, PresetActivat
         return Err(PresetActivationError::SnapshotConflict);
     }
     Ok(Some(bytes))
-}
-
-fn create_private_dir(path: &Path) -> io::Result<()> {
-    let mut builder = fs::DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    builder.create(path)
 }
 
 fn write_private(path: &Path, data: &[u8]) -> io::Result<()> {

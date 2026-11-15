@@ -382,10 +382,9 @@ pub async fn install_reviewed_wheel_stage(
 #[cfg(test)]
 mod wheel_admission_tests {
     use super::*;
-    use crate::ai_runtime::{
-        install::PluginInstallPlan,
-        install_review::{InstallReviewIdentity, preview_installed_environment},
-    };
+    #[cfg(target_os = "linux")]
+    use crate::ai_runtime::install_review::preview_installed_environment;
+    use crate::ai_runtime::{install::PluginInstallPlan, install_review::InstallReviewIdentity};
     use serde_json::json;
 
     fn wheel_review() -> InstallPlanReview {

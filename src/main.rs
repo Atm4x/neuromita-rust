@@ -184,11 +184,18 @@ async fn run(logging: &neuromita::diagnostics::DiagnosticBootstrap) -> Result<()
         return Ok(());
     }
     if command.as_deref() == Some(std::ffi::OsStr::new("settings")) {
+        let parameters = arguments.collect::<Vec<_>>();
+        if parameters.first().is_some_and(|value| value == "--help")
+            && std::env::var_os("NEUROMITA_DATA_DIR").is_some()
+        {
+            let root = neuromita::portable::PortableDataRoot::resolve(None)?;
+            logging.attach(&root)?;
+        }
         neuromita::diagnostics::boundary(
             neuromita::diagnostics::Boundary::CliStart,
             neuromita::diagnostics::Outcome::Started,
         );
-        return settings_cli::run(arguments.collect());
+        return settings_cli::run(parameters);
     }
     let Some(options) = terminal::Options::parse()? else {
         return Ok(());

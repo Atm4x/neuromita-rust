@@ -213,6 +213,7 @@ impl RequestRegistry {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn register_with_regenerate_cancellation(
         &self,
         message: Box<dyn GenerationCommand>,

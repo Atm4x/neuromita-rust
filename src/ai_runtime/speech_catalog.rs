@@ -295,11 +295,11 @@ impl SpeechModelCatalog {
                 match ModelModuleDeclaration::from_python_manifest(&manifest, &source) {
                     Ok(module) => {
                         let key = (manifest.kind, manifest.id);
-                        if models.contains_key(&key) {
+                        if let std::collections::btree_map::Entry::Vacant(e) = models.entry(key) {
+                            e.insert(module);
+                        } else {
                             discovery.errors.push(format!("ambiguous module id: {id}"));
                             blocked.insert(id.to_owned());
-                        } else {
-                            models.insert(key, module);
                         }
                     }
                     Err(error) => {

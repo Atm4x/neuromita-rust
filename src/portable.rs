@@ -85,6 +85,19 @@ impl PortableDataRoot {
     }
 }
 
+pub(crate) fn create_private_directory(path: &Path) -> io::Result<()> {
+    let builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    let builder = {
+        use std::os::unix::fs::DirBuilderExt;
+
+        let mut builder = builder;
+        builder.mode(0o700);
+        builder
+    };
+    builder.create(path)
+}
+
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }

@@ -1143,7 +1143,7 @@ impl PresenterProbe {
                 Ok(
                     json!({"source":"characters_settings_presenter","character":character,"revision":profile.revision(),
                     "presets":s.presets,"has_prompt_set":s.prompt_set.is_some(),
-                    "prompt_set":include_content.then(||s.prompt_set.as_deref()).flatten()}),
+                    "prompt_set":include_content.then_some(s.prompt_set.as_deref()).flatten()}),
                 )
             }
             PresenterRead::Memories {

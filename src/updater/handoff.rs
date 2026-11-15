@@ -392,7 +392,7 @@ fn run_apply_helper(
     if executable.file_name() != Some(OsStr::new(HELPER_NAME)) {
         return Err(HandoffError::UnsafeHelper);
     }
-    require_regular_file(&executable)?;
+    require_regular_file(executable)?;
     if !runtime.is_armed(executable)? {
         return Err(HandoffError::MissingRecoveryGuard);
     }
@@ -419,7 +419,7 @@ fn run_apply_helper(
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err(HandoffError::NonPortableDataRoot);
     }
-    let data_root = PortableDataRoot::from_executable(&executable, Some(&data_directory), None)?;
+    let data_root = PortableDataRoot::from_executable(executable, Some(&data_directory), None)?;
     let activator = SingleFileActivator::new(install_root, &data_root, &target_name)?;
     let result = (|| -> Result<&'static str, HandoffError> {
         activator.verify_handoff_nonce(nonce)?;
@@ -757,12 +757,11 @@ fn restart_and_verify(
         READY_WAIT,
     );
     if result.is_err() {
-        if child.try_wait()?.is_none() {
-            if let Err(error) = child.kill()
-                && child.try_wait()?.is_none()
-            {
-                return Err(error.into());
-            }
+        if child.try_wait()?.is_none()
+            && let Err(error) = child.kill()
+            && child.try_wait()?.is_none()
+        {
+            return Err(error.into());
         }
         child.wait()?;
     } else if child.try_wait()?.is_some() {

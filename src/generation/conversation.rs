@@ -158,10 +158,10 @@ pub(crate) fn project_history_window(
     let mut messages = Vec::with_capacity(entries.len());
     let mut target_present = false;
     for entry in entries {
-        if let (Some(window), ContextEntry::Message(message)) = (window, &entry) {
-            if !window.is_active(message.event_id) {
-                continue;
-            }
+        if let (Some(window), ContextEntry::Message(message)) = (window, &entry)
+            && !window.is_active(message.event_id)
+        {
+            continue;
         }
         let (id, role, mut text, source, has_media) = match entry {
             ContextEntry::Message(message) => {

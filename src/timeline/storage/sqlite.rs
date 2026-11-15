@@ -1261,11 +1261,9 @@ impl TimelineRepository for SqliteTimelineRepository {
                     let fact: TimelineFact = decode(&row[0])?;
                     if crate::timeline::domain::accepted_reply_request(&fact, character)
                         == Some(request)
-                    {
-                        if accepted.replace(fact).is_some() {
+                        && accepted.replace(fact).is_some() {
                             return Err(TimelineError::Conflict);
                         }
-                    }
                 }
             }
             Ok(accepted)

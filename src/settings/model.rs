@@ -433,6 +433,7 @@ impl GuideLevel {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(Default)]
 pub struct OnboardingSettings {
     pub eula_accepted: bool,
     #[serde(default)]
@@ -445,17 +446,6 @@ pub struct OnboardingSettings {
 
 const fn legacy_guide_completed() -> bool {
     true
-}
-
-impl Default for OnboardingSettings {
-    fn default() -> Self {
-        Self {
-            eula_accepted: false,
-            guide_level: GuideLevel::default(),
-            guide_completed: false,
-            guide_page: 0,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

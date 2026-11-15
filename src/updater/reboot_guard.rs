@@ -134,7 +134,7 @@ mod windows {
         if status != 0 {
             return Err(io::Error::from_raw_os_error(status as i32));
         }
-        if kind != REG_SZ || size < 2 || size > MAX_REGISTRY_BYTES || size % 2 != 0 {
+        if kind != REG_SZ || !(2..=MAX_REGISTRY_BYTES).contains(&size) || !size.is_multiple_of(2) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "unsafe recovery startup registry entry",
@@ -154,14 +154,16 @@ mod windows {
         if status != 0 {
             return Err(io::Error::from_raw_os_error(status as i32));
         }
-        if kind != REG_SZ || size < 2 || size as usize > bytes.len() || size % 2 != 0 {
+        if kind != REG_SZ || size < 2 || size as usize > bytes.len() || !size.is_multiple_of(2) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "recovery registry entry changed while reading",
             ));
         }
         let units: Vec<u16> = bytes[..size as usize]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|unit| u16::from_le_bytes([unit[0], unit[1]]))
             .collect();
         if units.last() != Some(&0) || units[..units.len() - 1].contains(&0) {

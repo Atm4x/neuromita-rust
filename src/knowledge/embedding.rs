@@ -53,8 +53,8 @@ pub enum EmbeddingError {
     Response(String),
     #[error("embedding model space mismatch: expected {expected:?}, received {actual:?}")]
     ModelSpaceMismatch {
-        expected: EmbeddingSpace,
-        actual: EmbeddingSpace,
+        expected: Box<EmbeddingSpace>,
+        actual: Box<EmbeddingSpace>,
     },
     #[error("semantic retrieval context has been superseded")]
     StaleKnowledge,
@@ -95,8 +95,8 @@ impl Embedding {
     pub fn ensure_space(&self, expected: &EmbeddingSpace) -> Result<(), EmbeddingError> {
         if self.space != *expected {
             return Err(EmbeddingError::ModelSpaceMismatch {
-                expected: expected.clone(),
-                actual: self.space.clone(),
+                expected: Box::new(expected.clone()),
+                actual: Box::new(self.space.clone()),
             });
         }
         Ok(())

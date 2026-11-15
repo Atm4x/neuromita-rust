@@ -84,11 +84,9 @@ impl ChatSelectionPresenter {
         self.speech_capture
             .start(expected.character, expected.revision, ffmpeg, ffplay)
             .await?;
-        if press_on_start {
-            if let Err(error) = self.speech_capture.press(true).await {
-                self.speech_capture.stop().await;
-                return Err(error);
-            }
+        if press_on_start && let Err(error) = self.speech_capture.press(true).await {
+            self.speech_capture.stop().await;
+            return Err(error);
         }
         Ok(())
     }

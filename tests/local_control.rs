@@ -2914,7 +2914,12 @@ async fn presenter_ipc_projects_live_gui_presenters_without_private_payloads() {
 
 #[tokio::test]
 async fn mcp_presenter_controls_use_actual_gui_owners_and_snapshot_observations() {
-    let mut fixture = Fixture::start(|_| {}).await;
+    let repository = Arc::new(MemorySettingsRepository::new());
+    let mut fixture = Fixture::with_settings_repository(repository.clone()).await;
+    SettingsApi::edit::<neuromita::settings::OnboardingSettings>(|state| {
+        state.eula_accepted = true;
+    })
+    .unwrap();
     let mut client = fixture.connect().await;
 
     for (action, surface, key, value) in [
@@ -2950,6 +2955,20 @@ async fn mcp_presenter_controls_use_actual_gui_owners_and_snapshot_observations(
             .until(|frame| frame["command_id"] == operation["command_id"])
             .await;
         assert_eq!(accepted["type"], "presenter_action", "{accepted}");
+        if surface == "guide" {
+            assert_eq!(
+                accepted["result"]["result"]["persisted"], true,
+                "{accepted}"
+            );
+            let stored = repository.load().unwrap().settings.onboarding;
+            let actual = match key {
+                "level" => json!(stored.guide_level),
+                "page" => json!(stored.guide_page),
+                "completed" => json!(stored.guide_completed),
+                _ => unreachable!("unexpected Guide setting"),
+            };
+            assert_eq!(actual, value);
+        }
         let mut inspect = command("presenter_inspect");
         inspect["surface"] = json!(surface);
         client.send(inspect.clone()).await;

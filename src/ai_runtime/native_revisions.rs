@@ -206,7 +206,7 @@ impl NativeRevisionStore {
                 });
             }
         }
-        revisions.sort_by(|a, b| a.manifest_sha256.cmp(&b.manifest_sha256));
+        revisions.sort_by_key(|a| a.manifest_sha256);
         Ok(revisions)
     }
 
@@ -588,13 +588,7 @@ fn ensure_directory(path: &Path) -> Result<(), NativeRevisionError> {
         "missing managed directory parent",
     ))?;
     check_path(parent, true)?;
-    let mut builder = fs::DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    match builder.create(path) {
+    match crate::portable::create_private_directory(path) {
         Ok(()) => sync_dir(parent)?,
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
         Err(error) => return Err(error.into()),

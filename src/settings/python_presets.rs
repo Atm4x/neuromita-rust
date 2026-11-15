@@ -444,13 +444,7 @@ impl PythonPresetStage {
             ".python-presets-stage-{}",
             uuid::Uuid::new_v4().simple()
         ));
-        let mut builder = fs::DirBuilder::new();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        builder.create(&sibling)?;
+        crate::portable::create_private_directory(&sibling)?;
         let result = (|| -> Result<(), PythonPresetStageError> {
             for (name, bytes) in &self.files {
                 let mut options = fs::OpenOptions::new();

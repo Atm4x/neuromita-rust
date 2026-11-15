@@ -376,7 +376,7 @@ impl MessageHandler {
                             "history evidence rejected: {error}"
                         )))? {
                             match &mut selected {
-                                Some(text) => { text.push_str("\n"); text.push_str(&evidence); }
+                                Some(text) => { text.push('\n'); text.push_str(&evidence); }
                                 None => selected = Some(evidence),
                             }
                         }
@@ -406,7 +406,7 @@ impl MessageHandler {
                     )))?;
                     if let Some(documents) = documents {
                         match &mut selected {
-                            Some(text) => { text.push_str("\n"); text.push_str(&documents); }
+                            Some(text) => { text.push('\n'); text.push_str(&documents); }
                             None => selected = Some(documents),
                         }
                     }

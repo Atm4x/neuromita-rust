@@ -149,8 +149,10 @@ impl PromptSetSnapshot {
 #[derive(Debug, Clone)]
 pub struct PromptCatalog {
     root: PathBuf,
-    admitted: Arc<Mutex<BTreeMap<(CharacterId, String), Weak<PromptSetSnapshot>>>>,
+    admitted: Arc<Mutex<AdmittedPromptSets>>,
 }
+
+type AdmittedPromptSets = BTreeMap<(CharacterId, String), Weak<PromptSetSnapshot>>;
 
 impl PromptCatalog {
     pub fn new(root: impl Into<PathBuf>) -> Self {

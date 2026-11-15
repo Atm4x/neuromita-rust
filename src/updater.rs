@@ -425,18 +425,12 @@ fn valid_github_segment(segment: &str) -> bool {
 }
 
 fn safe_download_url(url: &Url) -> bool {
-    if url.scheme() == "https" {
-        return true;
-    }
-    #[cfg(test)]
-    if url.scheme() == "http"
-        && url
-            .host_str()
-            .is_some_and(|host| host == "127.0.0.1" || host == "::1" || host == "localhost")
-    {
-        return true;
-    }
-    false
+    url.scheme() == "https"
+        || (cfg!(test)
+            && url.scheme() == "http"
+            && url
+                .host_str()
+                .is_some_and(|host| matches!(host, "127.0.0.1" | "::1" | "localhost")))
 }
 
 fn secured_client() -> Result<Client, UpdateError> {

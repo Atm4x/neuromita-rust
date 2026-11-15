@@ -838,13 +838,13 @@ impl PresetCatalog {
         edit: PresetConnectionEdit,
     ) -> Result<(), PresetCatalogError> {
         let mut state = self.state.write().expect("preset catalog poisoned");
-        if let Some(expected) = expected_revision {
-            if state.revision != expected {
-                return Err(PresetCatalogError::Invalid(format!(
-                    "preset catalog revision conflict: expected {expected}, actual {}",
-                    state.revision
-                )));
-            }
+        if let Some(expected) = expected_revision
+            && state.revision != expected
+        {
+            return Err(PresetCatalogError::Invalid(format!(
+                "preset catalog revision conflict: expected {expected}, actual {}",
+                state.revision
+            )));
         }
         if state.runtime.contains_key(&id) {
             return Err(PresetCatalogError::RuntimeOnly(id));

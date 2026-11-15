@@ -795,13 +795,7 @@ fn fork_changing_with_hooks(
         .transpose()?;
     let replacement_sha256 = replacement_bytes.as_ref().map(|bytes| sha256(bytes));
     let stage = parent.join(format!(".neuromita-document-fork-{}", uuid::Uuid::new_v4()));
-    let mut builder = fs::DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    builder.create(&stage)?;
+    crate::portable::create_private_directory(&stage)?;
     let mut published = false;
     let publication = (|| -> Result<usize, DocumentError> {
         for document in &original.documents {

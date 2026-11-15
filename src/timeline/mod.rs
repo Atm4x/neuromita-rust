@@ -521,6 +521,7 @@ impl SessionTimeline {
     /// Privileged, revisioned changes to a character's knowledge of specific
     /// existing events. This is not message routing or an implicit story transfer.
     /// History Reset remains a separate, broader CharacterContextReset event.
+    #[cfg(test)]
     pub(crate) fn change_character_knowledge(
         &mut self,
         expected: TimelineSelection,
@@ -1145,10 +1146,10 @@ impl SessionTimeline {
                 continue;
             }
             let receipt = SameBranchRegenerateReceipt::from_fact(&fact.draft)?;
-            if receipt.request == request {
-                if receipt.branch != branch || found.replace((receipt, fact.sequence)).is_some() {
-                    return Err(domain::TimelineError::Conflict);
-                }
+            if receipt.request == request
+                && (receipt.branch != branch || found.replace((receipt, fact.sequence)).is_some())
+            {
+                return Err(domain::TimelineError::Conflict);
             }
         }
         found.ok_or(domain::TimelineError::NotFound)
@@ -1166,8 +1167,8 @@ impl SessionTimeline {
         let dispatched = domain::dispatch_may_have_started(&facts, request.0)?;
         let mut accepted = None;
         for fact in &facts {
-            if domain::accepted_reply_request(fact, admission.character) == Some(request.0) {
-                if fact.branch_id != branch
+            if domain::accepted_reply_request(fact, admission.character) == Some(request.0)
+                && (fact.branch_id != branch
                     || fact.sequence <= admitted_at
                     || fact
                         .draft
@@ -1179,10 +1180,9 @@ impl SessionTimeline {
                         != vec![admission.original_input]
                     || fact.draft.payload.get("reply_to").and_then(|v| v.as_str())
                         != Some(admission.original_input.0.to_string().as_str())
-                    || accepted.replace(fact).is_some()
-                {
-                    return Err(domain::TimelineError::Conflict);
-                }
+                    || accepted.replace(fact).is_some())
+            {
+                return Err(domain::TimelineError::Conflict);
             }
         }
         if accepted.is_some() && abandoned.is_some() {

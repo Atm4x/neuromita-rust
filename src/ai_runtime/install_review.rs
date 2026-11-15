@@ -435,7 +435,9 @@ impl InstallPlanReview {
 mod tests {
     use super::*;
     use crate::ai_runtime::install::{ModelAssetRequirement, PluginInstallPlan};
-    use crate::ai_runtime::install_admission::{InstallApprovalGate, install_reviewed_overlay};
+    use crate::ai_runtime::install_admission::InstallApprovalGate;
+    #[cfg(unix)]
+    use crate::ai_runtime::install_admission::install_reviewed_overlay;
     use serde_json::json;
 
     fn identity() -> InstallReviewIdentity {

@@ -136,10 +136,9 @@ impl AiHubInstallCoordinator {
             .active
             .as_ref()
             .is_some_and(|(_, task)| task.is_finished())
+            && let Some((_, task)) = state.active.take()
         {
-            if let Some((_, task)) = state.active.take() {
-                let _ = task.await;
-            }
+            let _ = task.await;
         }
         state.gate.invalidate();
         state.visible_preview = Some((category.clone(), id.clone(), token));
@@ -279,10 +278,9 @@ impl AiHubInstallCoordinator {
             .active
             .as_ref()
             .is_some_and(|(_, task)| task.is_finished())
+            && let Some((_, task)) = state.active.take()
         {
-            if let Some((_, task)) = state.active.take() {
-                let _ = task.await;
-            }
+            let _ = task.await;
         }
         if state.active.is_some() {
             return Err("Установка уже выполняется");
@@ -363,23 +361,23 @@ impl AiHubInstallCoordinator {
                     ))),
                 },
             };
-            if !stop.is_cancelled() {
-                if let Some(owner) = owner.upgrade() {
-                    owner.publish_status(InstallStatus {
-                        category: category.clone(),
-                        id: id.clone(),
-                        token,
-                        stage: match &result {
-                            Ok(_) => "installed",
-                            Err(InstallPreviewError::Cancelled) => "cancelled",
-                            Err(_) => "failed",
-                        },
-                        operation_id: Some(operation),
-                        action: Some(action_name),
-                        error_code: result.as_ref().err().map(install_error_code),
-                        ..InstallStatus::default()
-                    });
-                }
+            if !stop.is_cancelled()
+                && let Some(owner) = owner.upgrade()
+            {
+                owner.publish_status(InstallStatus {
+                    category: category.clone(),
+                    id: id.clone(),
+                    token,
+                    stage: match &result {
+                        Ok(_) => "installed",
+                        Err(InstallPreviewError::Cancelled) => "cancelled",
+                        Err(_) => "failed",
+                    },
+                    operation_id: Some(operation),
+                    action: Some(action_name),
+                    error_code: result.as_ref().err().map(install_error_code),
+                    ..InstallStatus::default()
+                });
             }
         });
         state.active = Some((operation, task));
