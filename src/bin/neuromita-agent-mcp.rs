@@ -2391,9 +2391,10 @@ mod cycle16_gui_parity_tests {
         )
         .unwrap();
         assert_eq!(recall["query"]["query"], "memory_recall");
+        let attachment_source = std::env::current_dir().unwrap().join("local.txt");
         let file = command_for_tool(
             "presenter_attach_file",
-            args(json!({"character":"Crazy","version":{},"text":"x","source":"/tmp/local.txt"})),
+            args(json!({"character":"Crazy","version":{},"text":"x","source":attachment_source})),
         )
         .unwrap();
         assert_eq!(file["change"]["change"], "attach_file");

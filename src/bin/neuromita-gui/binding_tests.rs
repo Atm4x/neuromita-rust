@@ -1636,6 +1636,24 @@ fn conversation_admin_callbacks_reject_late_a_b_a_results() {
     assert!(matches!(&recorded[7], Command::Abort(origin) if *origin == selected));
 }
 
+fn apply_chat_selection(
+    window: &AppWindow,
+    editor: &std::sync::Arc<std::sync::Mutex<super::super::memory::MemoryEditor>>,
+    revision: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+    character: neuromita::character::CharacterId,
+    selected_revision: u64,
+) {
+    super::super::sandbox::apply(
+        window,
+        super::super::runtime::Update::Selection(neuromita::presentation::ChatSelection {
+            character,
+            revision: selected_revision,
+        }),
+        editor,
+        revision,
+    );
+}
+
 #[test]
 fn chat_single_message_hide_callback_uses_event_id_and_origin_revision() {
     slint::platform::set_platform(Box::new(TestPlatform)).unwrap();
@@ -1665,6 +1683,7 @@ fn chat_single_message_hide_callback_uses_event_id_and_origin_revision() {
         if origin.character == CharacterId::Crazy && origin.selection_revision == 0 && *id == target)
     );
     window.invoke_chat_select_character(CharacterId::Kind.index() as i32);
+    apply_chat_selection(&window, &editor, &revision, CharacterId::Kind, 1);
     super::super::sandbox::apply(
         &window,
         Update::Confirmation(
@@ -1679,6 +1698,7 @@ fn chat_single_message_hide_callback_uses_event_id_and_origin_revision() {
     );
     assert_eq!(window.global::<ConversationUi>().get_confirmation(), 0);
     window.invoke_chat_select_character(CharacterId::Crazy.index() as i32);
+    apply_chat_selection(&window, &editor, &revision, CharacterId::Crazy, 2);
     window.invoke_chat_hide_message(target.0.to_string().into());
     assert!(
         matches!(&received.borrow()[3], Command::Preview(origin, ConversationChange::HideMessage(id))
@@ -1993,6 +2013,7 @@ fn chat_message_revision_callback_is_fenced_across_character_reselection() {
         if origin.character == CharacterId::Crazy && origin.selection_revision == 0 && *id == event && content == "changed")
     );
     window.invoke_chat_select_character(CharacterId::Kind.index() as i32);
+    apply_chat_selection(&window, &editor, &revision, CharacterId::Kind, 1);
     let stale = ChatOrigin {
         character: CharacterId::Crazy,
         selection_revision: 0,
@@ -2011,6 +2032,7 @@ fn chat_message_revision_callback_is_fenced_across_character_reselection() {
     );
     assert_eq!(window.global::<ConversationUi>().get_confirmation(), 0);
     window.invoke_chat_select_character(CharacterId::Crazy.index() as i32);
+    apply_chat_selection(&window, &editor, &revision, CharacterId::Crazy, 2);
     assert_eq!(window.global::<ConversationUi>().get_edit_target(), "");
     window
         .global::<ConversationUi>()
@@ -2052,6 +2074,7 @@ fn chat_copy_selection_dialog_scopes_text_to_active_character() {
     let commands = Rc::new(RefCell::new(Vec::<Command>::new()));
     let collected = Rc::clone(&commands);
     let revision = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let editor = Default::default();
     bind_chat_actions(
         &window,
         Rc::new(move |command| collected.borrow_mut().push(command)),
@@ -2066,9 +2089,11 @@ fn chat_copy_selection_dialog_scopes_text_to_active_character() {
     );
 
     window.invoke_chat_select_character(CharacterId::Kind.index() as i32);
+    apply_chat_selection(&window, &editor, &revision, CharacterId::Kind, 1);
     assert!(!window.global::<ConversationUi>().get_copy_open());
     assert_eq!(window.global::<ConversationUi>().get_copy_text(), "");
     window.invoke_chat_select_character(CharacterId::Crazy.index() as i32);
+    apply_chat_selection(&window, &editor, &revision, CharacterId::Crazy, 2);
     assert_eq!(revision.load(std::sync::atomic::Ordering::Acquire), 2);
     assert!(!window.global::<ConversationUi>().get_copy_open());
 
@@ -2195,6 +2220,7 @@ fn chat_retry_callback_preserves_original_request_identity_and_selection() {
     let revision = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let recorded = Rc::new(RefCell::new(Vec::new()));
     let commands = recorded.clone();
+    let editor = Default::default();
     sandbox::bind_chat_actions(
         &window,
         Rc::new(move |cmd| commands.borrow_mut().push(cmd)),
@@ -2205,7 +2231,9 @@ fn chat_retry_callback_preserves_original_request_identity_and_selection() {
     assert!(matches!(&recorded.borrow()[0], Command::Retry(origin, id)
         if *origin == ChatOrigin{ character: CharacterId::Crazy, selection_revision: 0 } && id.0 == first));
     window.invoke_chat_select_character(CharacterId::Kind.index() as i32);
+    apply_chat_selection(&window, &editor, &revision, CharacterId::Kind, 1);
     window.invoke_chat_select_character(CharacterId::Crazy.index() as i32);
+    apply_chat_selection(&window, &editor, &revision, CharacterId::Crazy, 2);
     let new_attempt = uuid::Uuid::new_v4();
     window.invoke_chat_retry(new_attempt.to_string().into());
     assert!(matches!(&recorded.borrow()[3], Command::Retry(origin, id)
