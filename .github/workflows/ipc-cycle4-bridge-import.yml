@@ -21,11 +21,11 @@ jobs:
         run: |
           set -euo pipefail
           BASE=fcff568e698753f3784f2516513b77c0b18ea52f
-          EXPECTED=ae3fb5910e1f473b2b40fa0808621fe45f0f314c
+          EXPECTED=4e445f5011c8c2bb8f3ff33ab7a4529d7b604e2e
           git fetch origin refs/heads/bridge/ipc-cycle4-candidate-20261114:refs/remotes/origin/ipc-candidate
           test "$(git rev-parse refs/remotes/origin/ipc-candidate)" = "$BASE"
           base64 -d .bridge/ipc-cycle4-outgoing.b64 > /tmp/cycle15.bundle
-          echo "d60a151ed95b9ca46eabec018b2b97e8aed84efc714ec20deb4fdd0cbde4daaf  /tmp/cycle15.bundle" | sha256sum -c -
+          echo "4bfe9d62a9e306cdae1e92fe885b5ed786a12fcd8880bd888b5c6832c32563dd  /tmp/cycle15.bundle" | sha256sum -c -
           git bundle verify /tmp/cycle15.bundle
           git fetch /tmp/cycle15.bundle HEAD:refs/heads/ipc-cycle15-imported
           test "$(git rev-parse refs/heads/ipc-cycle15-imported)" = "$EXPECTED"
