@@ -1,4 +1,4 @@
-name: Git Bridge MCP Cycle 11 AI Hub install import
+name: Git Bridge MCP Cycle12 Speech Presenter Import
 on:
   push:
     branches:
@@ -16,22 +16,20 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true
-      - name: Verify local source and stage onto PR 446
+      - name: Verify source bundle and stage matching local commit
         shell: bash
         run: |
           set -euo pipefail
-          EXPECTED_PR_HEAD=7403e70f1ecf25a71665e3f1acd50ba8adafa80d
-          EXPECTED_LOCAL_HEAD=e74442d6320365d84d179effd838c885d628e3c7
+          BASE=9544d443fd9094968eba22a2cfbfff669ea81bee
+          EXPECTED=a15d41620dfb5dad2895cfb3fcf6ee8e1fb90dd0
           git fetch origin refs/heads/bridge/ipc-cycle4-candidate-20261114:refs/remotes/origin/ipc-candidate
-          test "$(git rev-parse refs/remotes/origin/ipc-candidate)" = "$EXPECTED_PR_HEAD"
-          base64 -d .bridge/ipc-cycle4-outgoing.b64 > /tmp/cycle11.bundle
-          echo "a7cb07cacda4150fc31da2e1b27d4096499d9f58eda316f3803dff94e24ebc0b  /tmp/cycle11.bundle" | sha256sum -c -
-          git bundle verify /tmp/cycle11.bundle
-          git fetch /tmp/cycle11.bundle refs/heads/codex/mcp-presenter-control-20261114:refs/heads/cycle11-source
-          test "$(git rev-parse refs/heads/cycle11-source)" = "$EXPECTED_LOCAL_HEAD"
-          git merge-base --is-ancestor 8f1b6688975ffdf01ad5e21574ed98226f872b37 cycle11-source
-          git switch -c cycle11-stage "$EXPECTED_PR_HEAD"
-          git -c user.name='Git Bridge' -c user.email='git-bridge@users.noreply.github.com' cherry-pick "$EXPECTED_LOCAL_HEAD"
-          git diff "$EXPECTED_PR_HEAD" --check
-          git push origin refs/heads/cycle11-stage:refs/heads/bridge/ipc-cycle11-staged-20261115
-          git rev-parse HEAD
+          test "$(git rev-parse refs/remotes/origin/ipc-candidate)" = "$BASE"
+          base64 -d .bridge/ipc-cycle4-outgoing.b64 > /tmp/cycle12.bundle
+          echo "c35aaad9f2eb578783cc9a41a03c99307d052dd4cb5c9d01e84fdbde2a373cff  /tmp/cycle12.bundle" | sha256sum -c -
+          git bundle verify /tmp/cycle12.bundle
+          git fetch /tmp/cycle12.bundle refs/heads/ipc-candidate:refs/heads/ipc-cycle12-imported
+          test "$(git rev-parse refs/heads/ipc-cycle12-imported)" = "$EXPECTED"
+          git merge-base --is-ancestor "$BASE" "$EXPECTED"
+          git diff "$BASE" "$EXPECTED" --check
+          git push origin refs/heads/ipc-cycle12-imported:refs/heads/bridge/ipc-cycle12-staged-20261115
+          git rev-parse "$EXPECTED"
