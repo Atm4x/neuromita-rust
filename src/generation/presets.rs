@@ -668,6 +668,12 @@ impl PresetCatalog {
         })
     }
 
+    /// Check an identifier without materializing a provider or resolving credentials.
+    pub fn contains_id(&self, id: PresetId) -> bool {
+        let state = self.state.read().expect("preset catalog poisoned");
+        state.runtime.contains_key(&id) || state.stored.entries.contains_key(&id)
+    }
+
     pub fn get(&self, id: PresetId) -> Result<Option<GenerationPreset>, PresetCatalogError> {
         let state = self.state.read().expect("preset catalog poisoned");
         if let Some(preset) = state.runtime.get(&id) {
@@ -822,7 +828,24 @@ impl PresetCatalog {
         id: PresetId,
         edit: PresetConnectionEdit,
     ) -> Result<(), PresetCatalogError> {
+        self.update_connection_checked(id, None, edit)
+    }
+
+    pub fn update_connection_checked(
+        &self,
+        id: PresetId,
+        expected_revision: Option<u64>,
+        edit: PresetConnectionEdit,
+    ) -> Result<(), PresetCatalogError> {
         let mut state = self.state.write().expect("preset catalog poisoned");
+        if let Some(expected) = expected_revision {
+            if state.revision != expected {
+                return Err(PresetCatalogError::Invalid(format!(
+                    "preset catalog revision conflict: expected {expected}, actual {}",
+                    state.revision
+                )));
+            }
+        }
         if state.runtime.contains_key(&id) {
             return Err(PresetCatalogError::RuntimeOnly(id));
         }

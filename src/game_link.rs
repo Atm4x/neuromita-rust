@@ -71,10 +71,88 @@ impl GameLinkConfig {
 #[derive(Clone)]
 pub struct GameLinkHandle {
     address: SocketAddr,
+    sessions: Arc<Sessions>,
 }
 impl GameLinkHandle {
     pub fn address(&self) -> SocketAddr {
         self.address
+    }
+
+    /// Inspect the actual GameLink protocol owner. A result ACK proves that the
+    /// session sent an ACK, not that Unity rendered the result successfully.
+    pub fn inspection(&self, session_id: Option<Uuid>, request_id: Option<Uuid>) -> Value {
+        let sessions = self.sessions.0.lock().expect("game sessions poisoned");
+        let connected = sessions.values().filter(|s| s.connection.is_some()).count();
+        let selected = session_id.and_then(|id| sessions.get(&id));
+        let session = session_id.map(|id| match selected {
+            Some(session) => json!({
+                "session_id": id,
+                "observed": true,
+                "connected": session.connection.is_some(),
+                "context_revision": session.context.revision,
+                "resume_count": session.resume_count,
+                "receipts": session.receipts.len(),
+                "delivery_acks": session.deliveries.len(),
+                "playback_reports": session.playback.len(),
+                "ptt_active": session.ptt.is_some_and(|ptt| ptt.active),
+            }),
+            None => json!({"session_id": id, "observed": false}),
+        });
+        let request = request_id.map(|id| {
+            let receipt = selected.and_then(|session| {
+                session
+                    .receipts
+                    .values()
+                    .find_map(|(_, receipt)| match receipt {
+                        Receipt::Request(handle) if handle.id().0 == id => Some(handle),
+                        _ => None,
+                    })
+            });
+            match (selected, receipt) {
+                (Some(session), Some(handle)) => {
+                    let snapshot = handle.snapshot();
+                    let (phase, event_id) = match &snapshot.state {
+                        RequestState::Pending => ("pending", None),
+                        RequestState::Processing(_) => ("processing", None),
+                        RequestState::Cancelled => ("cancelled", None),
+                        RequestState::Finished(
+                            RequestOutcome::Success(response)
+                            | RequestOutcome::VoiceGenerationFailed { response, .. },
+                        ) => ("finished", Some(response.event_id.0)),
+                        RequestState::Finished(_) => ("finished", None),
+                    };
+                    let ack = session.deliveries.get(&id);
+                    json!({
+                        "request_id": id,
+                        "observed": true,
+                        "phase": phase,
+                        "terminal": snapshot.state.is_terminal(),
+                        "revision": snapshot.revision,
+                        "event_id": event_id,
+                        "delivery_ack": ack.map(|ack| json!({
+                            "event_id": ack.event_id,
+                            "applied": ack.applied,
+                            "error_present": ack.error.is_some(),
+                        })),
+                        "playback_phase": session.playback.get(&id).map(|p| p.phase),
+                    })
+                }
+                _ => json!({"request_id": id, "observed": false}),
+            }
+        });
+        json!({
+            "schema_version": 1,
+            "source": "game_link_protocol_session_owner",
+            "enabled": true,
+            "session_count": sessions.len(),
+            "connected_sessions": connected,
+            "session": session,
+            "request": request,
+            "privacy": "no session tokens, request text, audio, or Unity error content",
+            "ack_semantics": "receipt confirms GameLink ACK was accepted, not that Unity rendered output",
+            "evidence_level": "core_gamelink_tcp_only",
+            "full_stack_e2e_verified": false,
+        })
     }
 }
 
@@ -83,6 +161,7 @@ struct Session {
     command_gate: Arc<AsyncMutex<()>>,
     connection: Option<(Uuid, mpsc::Sender<Value>, CancellationToken)>,
     disconnected_at: Option<Instant>,
+    resume_count: u64,
     receipts: HashMap<Uuid, (Value, Receipt)>,
     context: Arc<GameRuntimeContext>,
     playback: HashMap<Uuid, PlaybackReport>,
@@ -163,6 +242,7 @@ impl Sessions {
                 command_gate: Arc::new(AsyncMutex::new(())),
                 connection: Some((connection, outbound, disconnect)),
                 disconnected_at: None,
+                resume_count: 0,
                 receipts: HashMap::new(),
                 context: Arc::new(GameRuntimeContext::default()),
                 playback: HashMap::new(),
@@ -199,6 +279,7 @@ impl Sessions {
         }
         session.connection = Some((connection, outbound, disconnect));
         session.disconnected_at = None;
+        session.resume_count = session.resume_count.saturating_add(1);
         Ok(session
             .receipts
             .values()
@@ -653,14 +734,15 @@ impl GameLinkLifecycle {
         }
         let listener = TcpListener::bind(config.bind).await?;
         let address = listener.local_addr()?;
+        let sessions = Arc::new(Sessions::default());
         Ok((
             Self {
                 listener,
                 config,
-                sessions: Arc::new(Sessions::default()),
+                sessions: Arc::clone(&sessions),
                 beats,
             },
-            GameLinkHandle { address },
+            GameLinkHandle { address, sessions },
         ))
     }
     pub(crate) async fn run_with_api(

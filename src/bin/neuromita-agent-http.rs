@@ -8,6 +8,7 @@ use tokio::{
     sync::Semaphore,
     time::timeout,
 };
+use uuid::Uuid;
 
 const MAX_HEADERS: usize = 16 * 1024;
 const MAX_BODY: usize = 64 * 1024;
@@ -179,9 +180,10 @@ async fn read_request(stream: &mut TcpStream) -> io::Result<HttpRequest> {
 
 fn authorized(received: &str, token: &str) -> bool {
     let expected = format!("Bearer {token}");
-    received.len() == expected.len()
-        && ring::constant_time::verify_slices_are_equal(received.as_bytes(), expected.as_bytes())
-            .is_ok()
+    bool::from(subtle::ConstantTimeEq::ct_eq(
+        received.as_bytes(),
+        expected.as_bytes(),
+    ))
 }
 
 fn get_command(path: &str) -> Option<Value> {
@@ -194,13 +196,46 @@ fn get_command(path: &str) -> Option<Value> {
         "/v1/timeline" => Some(json!({"command":"debug_inspect","scope":"timeline"})),
         "/v1/characters" => Some(json!({"command":"debug_inspect","scope":"character"})),
         "/v1/requests" => Some(json!({"command":"debug_inspect","scope":"requests"})),
+        "/v1/presets" => Some(json!({"command":"debug_inspect","scope":"presets"})),
+        "/v1/onboarding" => Some(json!({"command":"debug_inspect","scope":"onboarding"})),
+        "/v1/gamelink" => Some(json!({"command":"game_link_inspect"})),
         "/v1/presenter/ai_runtime" => {
             Some(json!({"command":"presenter_inspect","surface":"ai_runtime"}))
         }
         "/v1/presenter/connections" => {
             Some(json!({"command":"presenter_inspect","surface":"connections"}))
         }
+        "/v1/presenter/speech" => Some(json!({"command":"presenter_inspect","surface":"speech"})),
+        "/v1/presenter/releases" => {
+            Some(json!({"command":"presenter_inspect","surface":"releases"}))
+        }
         _ => {
+            if let Some(tail) = path.strip_prefix("/v1/gamelink/") {
+                let (session, request) = tail.split_once("/request/")?;
+                return Some(json!({"command":"game_link_inspect",
+                    "session_id":Uuid::parse_str(session).ok()?,
+                    "request_id":Uuid::parse_str(request).ok()?}));
+            }
+            if let Some(request) = path.strip_prefix("/v1/request/") {
+                return Uuid::parse_str(request).ok().map(
+                    |id| json!({"command":"debug_inspect","scope":"request","request_id":id}),
+                );
+            }
+            if let Some(tail) = path.strip_prefix("/v1/character/")
+                && let Some((character, event)) = tail.split_once("/event/")
+            {
+                if character.is_empty()
+                    || character.len() > 48
+                    || !character
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                {
+                    return None;
+                }
+                return Uuid::parse_str(event).ok().map(|id| {
+                    json!({"command":"debug_inspect","scope":"character", "character":character,"event_id":id})
+                });
+            }
             let (name, presenter) = match path.strip_prefix("/v1/presenter/chat/") {
                 Some(name) => (name, true),
                 None => (path.strip_prefix("/v1/character/")?, false),
@@ -227,7 +262,12 @@ fn admitted_post(value: Value, allow_write: bool) -> Result<Value, (u16, &'stati
         .ok_or((400, "missing command"))?;
     let read_only = matches!(
         name,
-        "ping" | "methods" | "server_status" | "debug_inspect" | "presenter_inspect"
+        "ping"
+            | "methods"
+            | "server_status"
+            | "debug_inspect"
+            | "presenter_inspect"
+            | "game_link_inspect"
     );
     let mutating = matches!(
         name,
@@ -337,6 +377,16 @@ mod tests {
     #[test]
     fn closed_routes_and_write_guard() {
         assert!(get_command("/v1/presenter/chat/Crazy").is_some());
+        assert_eq!(
+            get_command("/v1/gamelink").unwrap()["command"],
+            "game_link_inspect"
+        );
+        let scoped = format!("/v1/gamelink/{}/request/{}", Uuid::new_v4(), Uuid::new_v4());
+        assert_eq!(
+            get_command(&scoped).unwrap()["command"],
+            "game_link_inspect"
+        );
+        assert!(get_command("/v1/gamelink/../request/bad").is_none());
         assert!(get_command("/v1/timeline?dump=true").is_none());
         assert!(get_command("/v1/character/../../raw").is_none());
         assert!(admitted_post(json!({"command":"initiate"}), false).is_err());

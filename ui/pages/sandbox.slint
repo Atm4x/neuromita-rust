@@ -40,6 +40,7 @@ export component SandboxPage inherits Rectangle {
     in-out property <bool> follow-tail;
     callback connect(string);
     callback send(string);
+    callback draft-changed(string);
     callback attach(string, string);
     callback cancel(string);
     callback retry(string);
@@ -91,6 +92,7 @@ export component SandboxPage inherits Rectangle {
                     draft <=> root.draft; attachment-path <=> root.attachment-path;
                     follow-tail <=> root.follow-tail;
                     send(text) => { root.send(text); }
+                    draft-changed(text) => { root.draft-changed(text); }
                     attach(text, path) => { root.attach(text, path); }
                     cancel(id) => { root.cancel(id); }
                     retry(id) => { root.retry(id); }

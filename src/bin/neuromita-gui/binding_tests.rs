@@ -529,6 +529,19 @@ fn chat_feedback_and_asr_callbacks_are_scoped_to_selection_revision() {
     window.invoke_chat_select_character(CharacterId::Kind.index() as i32);
     assert_eq!(
         window.get_chat_character(),
+        CharacterId::Crazy.index() as i32
+    );
+    super::super::sandbox::apply(
+        &window,
+        Update::Selection(neuromita::presentation::ChatSelection {
+            character: CharacterId::Kind,
+            revision: 1,
+        }),
+        &editor,
+        &revision,
+    );
+    assert_eq!(
+        window.get_chat_character(),
         CharacterId::Kind.index() as i32
     );
     window.set_chat_draft("identical draft".into());
@@ -552,12 +565,14 @@ fn chat_feedback_and_asr_callbacks_are_scoped_to_selection_revision() {
     let old_draft = window.get_chat_draft();
     super::super::sandbox::apply(
         &window,
-        Update::RecognizedText {
-            origin: first,
-            text: "obsolete ASR".into(),
-            auto_send_after: Some(std::time::Duration::ZERO),
-            merge_with_draft: true,
-        },
+        Update::SpeechDraft(neuromita::presentation::SpeechDraftSnapshot {
+            selection: neuromita::presentation::ChatSelection {
+                character: first.character,
+                revision: first.selection_revision,
+            },
+            draft: "obsolete ASR".into(),
+            revision: 1,
+        }),
         &editor,
         &revision,
     );
@@ -576,6 +591,15 @@ fn chat_feedback_and_asr_callbacks_are_scoped_to_selection_revision() {
     );
     window.invoke_chat_attach("B draft".into(), "/test/b.png".into());
     window.invoke_chat_select_character(CharacterId::Crazy.index() as i32);
+    super::super::sandbox::apply(
+        &window,
+        Update::Selection(neuromita::presentation::ChatSelection {
+            character: CharacterId::Crazy,
+            revision: 2,
+        }),
+        &editor,
+        &revision,
+    );
     assert_eq!(
         window.get_chat_character(),
         CharacterId::Crazy.index() as i32
@@ -598,27 +622,28 @@ fn chat_feedback_and_asr_callbacks_are_scoped_to_selection_revision() {
     assert_eq!(window.get_chat_attachment_path(), "/test/identical.png");
     super::super::sandbox::apply(
         &window,
-        Update::RecognizedText {
-            origin: first,
-            text: "old A ASR".into(),
-            auto_send_after: Some(std::time::Duration::ZERO),
-            merge_with_draft: false,
-        },
+        Update::SpeechDraft(neuromita::presentation::SpeechDraftSnapshot {
+            selection: neuromita::presentation::ChatSelection {
+                character: first.character,
+                revision: first.selection_revision,
+            },
+            draft: "old A ASR".into(),
+            revision: 2,
+        }),
         &editor,
         &revision,
     );
     assert_eq!(window.get_chat_draft(), "identical draft");
     super::super::sandbox::apply(
         &window,
-        Update::RecognizedText {
-            origin: ChatOrigin {
+        Update::SpeechDraft(neuromita::presentation::SpeechDraftSnapshot {
+            selection: neuromita::presentation::ChatSelection {
                 character: CharacterId::Crazy,
-                selection_revision: 2,
+                revision: 2,
             },
-            text: "current ASR".into(),
-            auto_send_after: None,
-            merge_with_draft: true,
-        },
+            draft: "identical draft current ASR".into(),
+            revision: 3,
+        }),
         &editor,
         &revision,
     );
@@ -644,13 +669,13 @@ fn chat_feedback_and_asr_callbacks_are_scoped_to_selection_revision() {
     let recorded = commands.borrow();
     assert!(matches!(&recorded[0], Command::AttachFile(origin, _, _) if *origin == first));
     assert!(
-        matches!(&recorded[1], Command::Select(origin) if origin.character == CharacterId::Kind && origin.selection_revision == 1)
+        matches!(&recorded[1], Command::Select(origin, target) if *origin == first && *target == CharacterId::Kind)
     );
     assert!(
         matches!(&recorded[2], Command::AttachFile(origin, _, _) if origin.character == CharacterId::Kind && origin.selection_revision == 1)
     );
     assert!(
-        matches!(&recorded[3], Command::Select(origin) if origin.character == CharacterId::Crazy && origin.selection_revision == 2)
+        matches!(&recorded[3], Command::Select(origin, target) if origin.character == CharacterId::Kind && origin.selection_revision == 1 && *target == CharacterId::Crazy)
     );
     assert!(
         matches!(&recorded[4], Command::Cancel(origin, id) if origin.character == CharacterId::Crazy && origin.selection_revision == 2 && id.0 == cancel_id)
@@ -1502,6 +1527,15 @@ fn conversation_admin_callbacks_reject_late_a_b_a_results() {
     conversation.set_diagnostics("A-private-trace".into());
 
     window.invoke_chat_select_character(CharacterId::Kind.index() as i32);
+    super::super::sandbox::apply(
+        &window,
+        Update::Selection(neuromita::presentation::ChatSelection {
+            character: CharacterId::Kind,
+            revision: 1,
+        }),
+        &editor,
+        &revision,
+    );
     assert_eq!(conversation.get_confirmation(), 0);
     assert!(!conversation.get_history());
     assert_eq!(conversation.get_diagnostics(), "");
@@ -1528,6 +1562,15 @@ fn conversation_admin_callbacks_reject_late_a_b_a_results() {
     assert_eq!(window.get_chat_error(), "");
 
     window.invoke_chat_select_character(CharacterId::Crazy.index() as i32);
+    super::super::sandbox::apply(
+        &window,
+        Update::Selection(neuromita::presentation::ChatSelection {
+            character: CharacterId::Crazy,
+            revision: 2,
+        }),
+        &editor,
+        &revision,
+    );
     super::super::sandbox::apply(
         &window,
         Update::Confirmation(first, Some((ConversationChange::ResetContext, 8))),
@@ -1580,9 +1623,11 @@ fn conversation_admin_callbacks_reject_late_a_b_a_results() {
     );
     assert!(matches!(&recorded[1], Command::Diagnostics(origin) if *origin == first));
     assert!(
-        matches!(&recorded[2], Command::Select(origin) if origin.character == CharacterId::Kind && origin.selection_revision == 1)
+        matches!(&recorded[2], Command::Select(origin, target) if *origin == first && *target == CharacterId::Kind)
     );
-    assert!(matches!(&recorded[3], Command::Select(origin) if *origin == selected));
+    assert!(
+        matches!(&recorded[3], Command::Select(origin, target) if origin.character == CharacterId::Kind && origin.selection_revision == 1 && *target == CharacterId::Crazy)
+    );
     assert!(
         matches!(&recorded[4], Command::Preview(origin, ConversationChange::ResetContext) if *origin == selected)
     );
@@ -2113,9 +2158,19 @@ fn chat_composer_cancel_and_microphone_actions_follow_selection_and_speech_state
     );
 
     window.invoke_chat_select_character(CharacterId::Kind.index() as i32);
+    assert_ne!(window.get_chat_active_request_id(), "");
+    sandbox::apply(
+        &window,
+        Update::Selection(neuromita::presentation::ChatSelection {
+            character: CharacterId::Kind,
+            revision: 1,
+        }),
+        &editor,
+        &revision,
+    );
     assert_eq!(window.get_chat_active_request_id(), "");
     assert!(
-        matches!(&commands.borrow()[3], Command::Select(origin) if origin.character == CharacterId::Kind && origin.selection_revision == 1)
+        matches!(&commands.borrow()[3], Command::Select(origin, target) if *origin == owner && *target == CharacterId::Kind)
     );
     window.invoke_chat_microphone_toggle(true);
     assert!(

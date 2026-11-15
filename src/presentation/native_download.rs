@@ -10,9 +10,82 @@ pub struct NativeDownloadView {
     pub planned_bytes: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeDownloadPresentation {
+    pub summary: String,
+    pub percent: i32,
+    pub active: bool,
+}
+
 pub struct NativeDownloadPresenter;
 
 impl NativeDownloadPresenter {
+    /// Project Core-owned durable installation state for any client, GUI or MCP.
+    pub fn status(
+        status: &crate::ai_runtime::native_service::NativeDownloadStatus,
+    ) -> NativeDownloadPresentation {
+        let completed = status.planned_bytes.unwrap_or(0);
+        let (summary, percent, active) = match status.phase {
+            "idle" => (String::new(), -1, false),
+            "starting" => (
+                "Проверка подписи пройдена. Подключение к доверенному HTTPS-источнику…".into(),
+                -1,
+                true,
+            ),
+            "manifest" => ("Загрузка подписанного manifest…".into(), -1, true),
+            "downloading" => (
+                format!(
+                    "Загружено {} / {} МиБ. Пакет пока не установлен",
+                    status.transferred_bytes / (1024 * 1024),
+                    completed / (1024 * 1024)
+                ),
+                status
+                    .planned_bytes
+                    .filter(|total| *total > 0)
+                    .map_or(-1, |total| {
+                        (status.transferred_bytes.saturating_mul(100) / total).min(99) as i32
+                    }),
+                true,
+            ),
+            "publishing" => (
+                "Повторная проверка и атомарная публикация…".into(),
+                99,
+                true,
+            ),
+            "cancel_requested" => (
+                "Отмена запрошена. Начатая атомарная публикация может завершиться целиком".into(),
+                -1,
+                true,
+            ),
+            "transfer_completed" => (
+                "Переданные файлы проверяются и регистрируются…".into(),
+                99,
+                true,
+            ),
+            "transfer_failed" => (
+                "Передача завершилась ошибкой; проверяется журнал установки…".into(),
+                -1,
+                true,
+            ),
+            "installed" => (
+                "Нативный пакет опубликован и зарегистрирован".into(),
+                100,
+                false,
+            ),
+            "failed" => (
+                "Установка не выполнена или журнал не подтверждён".into(),
+                -1,
+                false,
+            ),
+            _ => ("Неизвестное состояние установки".into(), -1, false),
+        };
+        NativeDownloadPresentation {
+            summary,
+            percent,
+            active,
+        }
+    }
+
     pub fn project(progress: NativeTransferProgress) -> NativeDownloadView {
         let percent = match progress.phase {
             NativeTransferPhase::Manifest => None,

@@ -136,6 +136,9 @@ fn is_read_only(method: &str) -> bool {
             | "server_status"
             | "debug_inspect"
             | "presenter_inspect"
+            | "presenter_conversation"
+            | "presenter_admin_read"
+            | "game_link_inspect"
             | "diagnostics"
             | "diagnostics_recent"
             | "diagnostics_errors"
@@ -226,6 +229,173 @@ pub async fn call_local_control(
     })
     .await
     .map_err(|_| AgentError::Timeout)?
+}
+
+/// Execute bounded JSONL-equivalent acceptance steps over one TCP connection.
+/// This preserves LocalControl's connection-local receipt and cancellation ownership.
+/// All returned frames are recursively sanitized before leaving this API.
+pub async fn run_local_control_scenario(
+    address: SocketAddr,
+    timeout_limit: Duration,
+    allow_write: bool,
+    steps: Vec<Value>,
+) -> Result<Value, AgentError> {
+    if !address.ip().is_loopback() {
+        return Err(AgentError::Usage("LocalControl is loopback-only".into()));
+    }
+    if steps.is_empty() || steps.len() > 32 {
+        return Err(AgentError::Protocol("scenario requires 1..32 steps".into()));
+    }
+    if serde_json::to_vec(&steps)?.len() > MAX_SCRIPT {
+        return Err(AgentError::Protocol("scenario exceeds 1 MiB".into()));
+    }
+    let mut prepared = Vec::with_capacity(steps.len());
+    for mut step in steps {
+        let object = step
+            .as_object_mut()
+            .ok_or_else(|| AgentError::Protocol("each step must be an object".into()))?;
+        let wait_terminal = match object.remove("wait_terminal") {
+            Some(Value::Bool(value)) => value,
+            Some(_) => {
+                return Err(AgentError::Protocol(
+                    "wait_terminal must be a boolean".into(),
+                ));
+            }
+            None => false,
+        };
+        let expect = object.remove("expect");
+        let expect_terminal = object.remove("expect_terminal");
+        let name = object
+            .get("command")
+            .and_then(Value::as_str)
+            .ok_or_else(|| AgentError::Protocol("step missing command".into()))?;
+        if !is_read_only(name) && !allow_write {
+            return Err(AgentError::WriteDenied(name.to_owned()));
+        }
+        if !matches!(
+            name,
+            "ping"
+                | "methods"
+                | "server_status"
+                | "debug_inspect"
+                | "presenter_inspect"
+                | "presenter_conversation"
+                | "presenter_admin_read"
+                | "presenter_admin_write"
+                | "presenter_action"
+                | "game_link_inspect"
+                | "settings"
+                | "publish_message"
+                | "reply"
+                | "react"
+                | "initiate"
+                | "cancel"
+                | "set_volume"
+                | "set_active_preset"
+                | "diagnostics"
+                | "diagnostics_recent"
+                | "diagnostics_errors"
+        ) {
+            return Err(AgentError::Protocol("unsupported scenario command".into()));
+        }
+        prepared.push((
+            step,
+            wait_terminal || expect_terminal.is_some(),
+            expect,
+            expect_terminal,
+        ));
+    }
+    let mut client = Client::connect(address, timeout_limit).await?;
+    let mut last_request_id = None::<Value>;
+    let mut last_event_id = None::<Value>;
+    let mut results = Vec::with_capacity(prepared.len());
+    for (index, (mut command, wait_terminal, expect, expect_terminal)) in
+        prepared.into_iter().enumerate()
+    {
+        let object = command.as_object_mut().expect("validated scenario object");
+        for (key, marker, selected) in [
+            ("request_id", "$last_request_id", &last_request_id),
+            ("message_id", "$last_event_id", &last_event_id),
+            ("event_id", "$last_event_id", &last_event_id),
+        ] {
+            if object.get(key).and_then(Value::as_str) == Some(marker) {
+                let value = selected.clone().ok_or_else(|| {
+                    AgentError::Protocol(format!("{marker} has no preceding source"))
+                })?;
+                object.insert(key.to_owned(), value);
+            }
+        }
+        if command.get("command").and_then(Value::as_str) == Some("presenter_action") {
+            if let Some(action) = command.get_mut("action").and_then(Value::as_object_mut) {
+                for (key, marker, selected) in [
+                    ("request_id", "$last_request_id", &last_request_id),
+                    ("event_id", "$last_event_id", &last_event_id),
+                ] {
+                    if action.get(key).and_then(Value::as_str) == Some(marker) {
+                        let value = selected.clone().ok_or_else(|| {
+                            AgentError::Protocol(format!("{marker} has no preceding source"))
+                        })?;
+                        action.insert(key.to_owned(), value);
+                    }
+                }
+            }
+        }
+        let id = command_id(&mut command)?;
+        let deadline = Instant::now() + timeout_limit;
+        timeout_at(deadline, client.send(&command))
+            .await
+            .map_err(|_| AgentError::Timeout)??;
+        let response = client.response(id, deadline, None).await?;
+        let sanitized = redacted(response.clone(), false);
+        let mut result = json!({"index":index, "response":sanitized});
+        if response["type"] == "error" {
+            results.push(result);
+            return Ok(json!({"type":"scenario","ok":false,"failed_index":index,"steps":results}));
+        }
+        if let Some(expected) = expect {
+            if !is_subset(&expected, &sanitized) {
+                result["assertion_failed"] = json!("response did not match expected subset");
+                results.push(result);
+                return Ok(
+                    json!({"type":"scenario","ok":false,"failed_index":index,"steps":results}),
+                );
+            }
+        }
+        if response["type"] == "accepted" {
+            last_request_id = response.get("request_id").cloned();
+        }
+        if response["type"] == "published" {
+            last_event_id = response.get("event_id").cloned();
+        }
+        if wait_terminal {
+            if response["type"] != "accepted" || !response["request_id"].is_string() {
+                return Err(AgentError::Protocol(
+                    "terminal wait requires an accepted request".into(),
+                ));
+            }
+            let terminal = client
+                .terminal(&response["request_id"], deadline, None)
+                .await?;
+            let sanitized_terminal = redacted(terminal.clone(), false);
+            if let Some(id) = terminal.get("event_id") {
+                last_event_id = Some(id.clone());
+            }
+            let matched = match expect_terminal {
+                Some(expected) => is_subset(&expected, &sanitized_terminal),
+                None => terminal["state"] == "finished" && terminal["outcome"] == "success",
+            };
+            result["terminal"] = sanitized_terminal;
+            if !matched {
+                result["assertion_failed"] = json!("terminal state did not match expectation");
+                results.push(result);
+                return Ok(
+                    json!({"type":"scenario","ok":false,"failed_index":index,"steps":results}),
+                );
+            }
+        }
+        results.push(result);
+    }
+    Ok(json!({"type":"scenario","ok":true,"steps":results}))
 }
 
 fn command_id(command: &mut Value) -> Result<Uuid, AgentError> {
@@ -353,9 +523,9 @@ impl Client {
         &mut self,
         request_id: &Value,
         deadline: Instant,
-        opts: &Options,
+        opts: Option<&Options>,
     ) -> Result<Value, AgentError> {
-        self.read_until(deadline, Some(opts), |frame| {
+        self.read_until(deadline, opts, |frame| {
             frame["type"] == "request_status"
                 && frame["request_id"] == *request_id
                 && matches!(frame["state"].as_str(), Some("finished" | "cancelled"))
@@ -414,7 +584,7 @@ impl Client {
                 ));
             }
             let terminal = self
-                .terminal(&response["request_id"], deadline, opts)
+                .terminal(&response["request_id"], deadline, Some(opts))
                 .await?;
             emit(&terminal, opts.include_private)?;
             if let Some(expected) = expect_terminal {
@@ -442,20 +612,30 @@ pub async fn run(args: impl IntoIterator<Item = String>) -> Result<(), AgentErro
         "inspect" => {
             if !(1..=2).contains(&opts.positional.len()) {
                 return Err(AgentError::Usage(
-                    "inspect <capabilities|lifecycle|timeline|character|requests> [character]"
+                    "inspect <capabilities|lifecycle|timeline|character|requests|request> [character|uuid]"
                         .into(),
                 ));
             }
             let mut command = json!({"command":"debug_inspect", "scope":opts.positional[0]});
-            if let Some(character) = opts.positional.get(1) {
-                command["character"] = json!(character);
+            match (opts.positional[0].as_str(), opts.positional.get(1)) {
+                ("character", Some(character)) => command["character"] = json!(character),
+                ("request", Some(request_id)) => command["request_id"] = json!(request_id),
+                ("request", None) => {
+                    return Err(AgentError::Usage("inspect request <uuid>".into()));
+                }
+                (_, Some(_)) => {
+                    return Err(AgentError::Usage(
+                        "scope does not accept a second argument".into(),
+                    ));
+                }
+                _ => {}
             }
             vec![command]
         }
         "presenter" => {
             if !(1..=2).contains(&opts.positional.len()) {
                 return Err(AgentError::Usage(
-                    "presenter <chat|ai_runtime|connections> [character]".into(),
+                    "presenter <chat|ai_runtime|connections|speech|releases> [character]".into(),
                 ));
             }
             let mut command = json!({"command":"presenter_inspect", "surface":opts.positional[0]});

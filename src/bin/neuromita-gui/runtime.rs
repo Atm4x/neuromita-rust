@@ -2,27 +2,18 @@ use std::{num::NonZeroUsize, path::PathBuf, sync::Arc, thread, time::Duration};
 
 use neuromita::{
     ai_runtime::{
-        install_admission::{InstallAction, InstallActionReview},
-        install_coordinator::InstallEvent,
-        install_review::{InstallPlanReview, InstallPreviewError},
-        native_download_operation::{NativeDownloadEvent, NativeDownloadSelection},
-        native_https::NativeTransferPhase,
+        native_download_operation::NativeDownloadSelection,
         native_model::NativeBackend,
         native_revisions::NativeRevisionOverview,
-        native_service::AiHubNativeService,
         native_trust::NativeAuthorizedRelease,
         native_workflow::NativeWorkflowSnapshot,
-        runtime_status::{RuntimePhase, RuntimeSnapshot},
-        speech::Transcript,
+        runtime_status::RuntimeSnapshot,
         speech_catalog::{SpeechInventory, SpeechModelCatalog},
     },
     app::{ApplicationConfig, ApplicationLifecycle, RuntimeLimits},
     audio::{
-        controller::{SpeechCaptureConfig, SpeechSessionSnapshot},
-        device::{AudioPlayback, FfplayOutput},
-        input_catalog::AudioInputDevice,
+        controller::SpeechSessionSnapshot, input_catalog::AudioInputDevice,
         monitor::MonitorSnapshot,
-        session::{SpeechConversation, SpeechFuture, SpeechSessionError},
     },
     character::CharacterId,
     generation::PresetRecord,
@@ -32,19 +23,14 @@ use neuromita::{
     },
     onboarding::GuideChange,
     presentation::{
-        ConversationChange, ConversationChangePreview, ConversationSnapshot, GuiPresenter,
-        PresetSlot, native_download::NativeDownloadPresenter,
+        ChatSelection, ConversationChange, ConversationChangePreview, ConversationSnapshot,
+        GuiPresenter, NativeHubApi, PresetSlot, native_download::NativeDownloadPresenter,
     },
-    remote_voice::{FishAudioClient, RemoteVoiceConfig, RemoteVoicePreset, RemoteVoiceStore},
+    remote_voice::{RemoteVoiceCatalogAction, RemoteVoiceConfig, RemoteVoicePreset},
     request::{CancelResult, RequestId},
-    settings::{
-        AsrPreferences, PresetId, PresetSelection, SettingsApi, TtsBackend, TtsPreferences, Volume,
-    },
-    telegram_sidecar::TelethonSession,
-    telegram_voice::{
-        DynamicTelegramVoice, FfmpegTelegramDecoder, TelegramConfig, TelegramError,
-        TelegramVoiceService,
-    },
+    settings::{AsrPreferences, PresetId, PresetSelection, TtsPreferences, Volume},
+    telegram_admin::TelegramAdmin,
+    telegram_voice::DynamicTelegramVoice,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -169,8 +155,9 @@ pub enum Command {
     SetToolDepth(u8),
     SetMemoryDedupEnabled(bool),
     SetMemoryDedupThreshold(u16),
-    Select(ChatOrigin),
+    Select(ChatOrigin, CharacterId),
     Send(ChatOrigin, String),
+    DraftChanged(ChatOrigin, String),
     AttachFile(ChatOrigin, String, String),
     Cancel(ChatOrigin, RequestId),
     Retry(ChatOrigin, RequestId),
@@ -195,16 +182,6 @@ pub struct GraphPreviewReport {
     pub relations: Vec<neuromita::memory::ProvenancedRelation>,
 }
 
-impl GraphPreviewReport {
-    fn from_plan(plan: &neuromita::knowledge::maintenance::GraphMaintenancePreview) -> Self {
-        let relations = plan.inspected_relations();
-        Self {
-            count: relations.len(),
-            relations,
-        }
-    }
-}
-
 pub enum RemoteVoiceAction {
     Add,
     Delete,
@@ -220,12 +197,7 @@ pub enum Update {
     RemoteVoiceState(String, bool),
     SpeechSessionStatus(SpeechSessionSnapshot),
     MicrophoneTestStatus(MonitorSnapshot),
-    RecognizedText {
-        origin: ChatOrigin,
-        text: String,
-        auto_send_after: Option<Duration>,
-        merge_with_draft: bool,
-    },
+    SpeechDraft(neuromita::presentation::SpeechDraftSnapshot),
     Hardware(neuromita::presentation::hardware::HardwareView),
     CharacterCatalog(Vec<neuromita::character::CharacterDefinition>),
     SpeechInventory(Box<SpeechInventory>, Vec<AudioInputDevice>),
@@ -266,6 +238,7 @@ pub enum Update {
     GraphApplyResult(uuid::Uuid, Result<(), String>),
     Confirmation(ChatOrigin, Option<(ConversationChange, usize)>),
     Diagnostics(ChatOrigin, String),
+    Selection(ChatSelection),
     ConversationError(ChatOrigin, String),
     Connections(std::sync::Arc<neuromita::server::ServerSnapshot>),
     Administration(Box<super::settings::AdministrationSnapshot>),
@@ -365,72 +338,11 @@ fn find_binary(directory: &std::path::Path, variable: &str, filename: &str) -> O
     .find(|path| path.is_absolute() && path.is_file())
 }
 
-struct DesktopTranscriptSink {
-    send: mpsc::UnboundedSender<(ChatOrigin, Transcript)>,
-    origin: ChatOrigin,
-}
-
-fn speech_conversation(
-    send: &mpsc::UnboundedSender<(ChatOrigin, Transcript)>,
-    origin: ChatOrigin,
-) -> Arc<dyn SpeechConversation> {
-    Arc::new(DesktopTranscriptSink {
-        send: send.clone(),
-        origin,
-    })
-}
-
-impl SpeechConversation for DesktopTranscriptSink {
-    fn reply<'a>(
-        &'a self,
-        ticket: &'a neuromita::audio::ticket::SpeechTicket,
-        transcript: &'a Transcript,
-    ) -> SpeechFuture<'a, Option<neuromita::voice::AudioArtifact>> {
-        Box::pin(async move {
-            if let Some(result) = ticket.admit(|| self.send.send((self.origin, transcript.clone())))
-            {
-                result.map_err(|_| SpeechSessionError::DispatchClosed)?;
-            }
-            Ok(None)
-        })
-    }
-}
-
-fn dispatch_policy(preferences: &AsrPreferences) -> Option<Duration> {
-    preferences.instant_send.then(|| {
-        if preferences.delayed_send {
-            Duration::from_millis(u64::from(preferences.send_delay_ms))
-        } else {
-            Duration::ZERO
-        }
-    })
-}
-
 async fn enable_speech_session(
     app: &ApplicationLifecycle,
     directory: &std::path::Path,
-    conversation: Arc<dyn SpeechConversation>,
+    origin: ChatOrigin,
 ) -> Result<(), String> {
-    let administration = app.presenter();
-    let runtime = administration.ai_runtime.refresh_status().await;
-    if runtime.service(neuromita::ai_runtime::AiService::Asr).phase != RuntimePhase::ModelReady {
-        return Err("ASR модель не инициализирована; выберите и активируйте её в AI Engine".into());
-    }
-    let settings = administration
-        .settings
-        .snapshot()
-        .map_err(|e| e.to_string())?;
-    let preferences = &settings.values.speech.asr;
-    let devices = administration
-        .audio_input
-        .devices()
-        .await
-        .map_err(|error| error.to_string())?;
-    if !devices.iter().any(|device| {
-        device.id == preferences.device_id && device.backend == preferences.audio_backend
-    }) {
-        return Err("Выбранное устройство ввода не найдено или не соответствует backend".into());
-    }
     let ffmpeg = find_binary(
         directory,
         "NEUROMITA_FFMPEG",
@@ -451,17 +363,24 @@ async fn enable_speech_session(
         },
     )
     .unwrap_or_default();
-    let config = SpeechCaptureConfig::from_preferences(preferences, ffmpeg, ffplay)
-        .map_err(|e| e.to_string())?;
-    app.start_speech_capture_routed(config, conversation)
+    app.presenter()
+        .selection
+        .start_capture_from_settings(
+            ChatSelection {
+                character: origin.character,
+                revision: origin.selection_revision,
+            },
+            ffmpeg,
+            ffplay,
+        )
         .await
-        .map_err(|e| e.to_string())
 }
 
 async fn start(
     directory: &std::path::Path,
     model: Option<&str>,
     telegram_voice: Arc<DynamicTelegramVoice>,
+    telegram_admin: Arc<TelegramAdmin>,
 ) -> Result<ApplicationLifecycle, String> {
     let provider: Arc<dyn GenerationProvider> =
         Arc::new(GeminiProvider::new().map_err(|e| e.to_string())?);
@@ -515,132 +434,11 @@ async fn start(
             .expect("valid Unity loopback endpoint"),
     ));
     config.voice = telegram_voice;
+    config.telegram_admin = Some(telegram_admin);
     config.remote_voice_store = Some(directory.join("remote_voice.rust.json"));
     ApplicationLifecycle::start(config)
         .await
         .map_err(|e| e.to_string())
-}
-
-fn summarize_ai_hub_review(review: &InstallPlanReview) -> String {
-    let mut lines = vec![
-        format!(
-            "Python: {} · SDK и источник проверены",
-            review.identity.python_version
-        ),
-        format!("Backend: {}", review.backend_options.join(", ")),
-        format!(
-            "Пакетов: {} · требований: {}",
-            review.packages.len(),
-            review.requirements.len()
-        ),
-        format!(
-            "Файлов моделей: обязательных {}, дополнительных {}",
-            review.required_assets.len(),
-            review.optional_assets.len()
-        ),
-        format!(
-            "Действий с отдельным подтверждением: {} · hooks: {}",
-            review.actions.len(),
-            review.asset_hooks.len()
-        ),
-        format!(
-            "Build-stage: {} (без автоматического исполнения)",
-            review.build_stages.len()
-        ),
-        format!("Отпечаток плана: {}", &review.fingerprint[..16]),
-        "План проверен, но установка ещё не разрешена и не запускалась.".to_owned(),
-    ];
-    if !review.required_backends.is_empty() {
-        lines.insert(
-            2,
-            format!(
-                "Дополнительные backend: {}",
-                review.required_backends.join(", ")
-            ),
-        );
-    }
-    lines.join("\n")
-}
-
-async fn open_telegram_session(
-    directory: &std::path::Path,
-    api_id: &str,
-    api_hash: &str,
-    phone: &str,
-) -> Result<(Arc<TelethonSession>, bool), String> {
-    let id = api_id
-        .parse::<u32>()
-        .map_err(|_| "Некорректный API ID".to_owned())?;
-    let python = std::env::var("NEUROMITA_PYTHON").unwrap_or_else(|_| {
-        if cfg!(windows) {
-            "python".into()
-        } else {
-            "python3".into()
-        }
-    });
-    let script = std::env::var_os("NEUROMITA_TELEGRAM_SIDECAR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let beside_executable = std::env::current_exe().ok().and_then(|exe| {
-                exe.parent()
-                    .map(|parent| parent.join("tools/telegram_sidecar.py"))
-            });
-            beside_executable
-                .filter(|candidate| candidate.is_file())
-                .unwrap_or_else(|| {
-                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/telegram_sidecar.py")
-                })
-        });
-    if !script.is_file() {
-        return Err(format!("Telegram sidecar не найден: {}", script.display()));
-    }
-    let session = TelethonSession::spawn(std::path::Path::new(&python), &script)
-        .map_err(|e| e.to_string())?;
-    let authorized = session
-        .connect(id, api_hash, phone, &directory.join("telegram-user"))
-        .await
-        .map_err(|e| e.to_string())?;
-    if !authorized {
-        session.request_code().await.map_err(|e| e.to_string())?;
-    }
-    Ok((session, authorized))
-}
-
-async fn activate_telegram_voice(
-    administration: &GuiPresenter,
-    router: &Arc<DynamicTelegramVoice>,
-    session: Arc<TelethonSession>,
-) -> Result<(), String> {
-    let snapshot = administration
-        .settings
-        .snapshot()
-        .map_err(|e| e.to_string())?;
-    let prefs = &snapshot.values.speech.tts;
-    if !prefs.enabled || prefs.backend != TtsBackend::Telegram {
-        router.clear().await;
-        return Ok(());
-    }
-    let ffmpeg = std::env::var("NEUROMITA_FFMPEG").unwrap_or_else(|_| {
-        if cfg!(windows) {
-            "ffmpeg.exe".into()
-        } else {
-            "ffmpeg".into()
-        }
-    });
-    let service = TelegramVoiceService::new(
-        session,
-        Arc::new(FfmpegTelegramDecoder::new(ffmpeg)),
-        TelegramConfig {
-            peer: prefs.telegram_service.clone(),
-            wait: Duration::from_secs(u64::from(prefs.telegram_wait_seconds)),
-            interval: Duration::from_secs(u64::from(prefs.telegram_interval_seconds)),
-            poll: Duration::from_millis(330),
-            max_media_bytes: 32 * 1024 * 1024,
-        },
-    )
-    .map_err(|e| e.to_string())?;
-    router.install(Arc::new(service)).await;
-    Ok(())
 }
 
 async fn run(
@@ -653,7 +451,18 @@ async fn run(
     publish(Update::Connecting);
     let catalog = SpeechModelCatalog::for_desktop(directory.clone());
     let telegram_voice = Arc::new(DynamicTelegramVoice::default());
-    let app = match start(&directory, initial_model.as_deref(), telegram_voice.clone()).await {
+    let telegram_admin = Arc::new(TelegramAdmin::new(
+        directory.clone(),
+        telegram_voice.clone(),
+    ));
+    let app = match start(
+        &directory,
+        initial_model.as_deref(),
+        telegram_voice.clone(),
+        telegram_admin.clone(),
+    )
+    .await
+    {
         Ok(app) => app,
         Err(error) => {
             publish(Update::Error(error));
@@ -664,7 +473,7 @@ async fn run(
     };
     publish(Update::Connected(app.server().address().to_string()));
     publish(Update::GraphCapability(
-        neuromita::api::GraphMaintenanceApi::reindex_available().unwrap_or(false),
+        app.presenter().graph.reindex_available().unwrap_or(false),
     ));
     let devices = match app.presenter().audio_input.devices().await {
         Ok(devices) => devices,
@@ -684,17 +493,7 @@ async fn run(
     publish(Update::CharacterCatalog(
         app.presenter().characters.catalog(),
     ));
-    if let Err(error) = observe(
-        &app,
-        &directory,
-        &catalog,
-        &mut receive,
-        &stop,
-        &publish,
-        &telegram_voice,
-    )
-    .await
-    {
+    if let Err(error) = observe(&app, &directory, &catalog, &mut receive, &stop, &publish).await {
         publish(Update::Error(error));
     }
     if let Err(error) = app.shutdown().await {
@@ -736,7 +535,7 @@ pub fn native_download_configured() -> bool {
     neuromita::ai_runtime::native_service::native_download_configured()
 }
 
-async fn publish_native_release_catalog(native: &AiHubNativeService, publish: &impl Fn(Update)) {
+async fn publish_native_release_catalog(native: &NativeHubApi, publish: &impl Fn(Update)) {
     let overview = match native.snapshot().await {
         Ok(snapshot) => snapshot.inventory,
         Err(error) => {
@@ -760,7 +559,7 @@ async fn publish_native_release_catalog(native: &AiHubNativeService, publish: &i
     }
 }
 
-async fn publish_native(native: &AiHubNativeService, publish: &impl Fn(Update)) {
+async fn publish_native(native: &NativeHubApi, publish: &impl Fn(Update)) {
     match native.snapshot().await {
         Ok(snapshot) => publish(Update::NativeModels(Box::new(snapshot))),
         Err(error) => publish(Update::NativeError(format!(
@@ -779,6 +578,17 @@ fn native_backend(value: &str) -> Option<NativeBackend> {
     }
 }
 
+fn remote_message(phase: &str) -> &'static str {
+    match phase {
+        "previewing" => "Синтез и воспроизведение…",
+        "completed" => "Голос воспроизведён",
+        "cancelled" => "Проверка отменена",
+        "saved" => "Облачный профиль сохранён",
+        "failed" => "Проверка не удалась",
+        _ => "",
+    }
+}
+
 async fn observe(
     app: &ApplicationLifecycle,
     directory: &std::path::Path,
@@ -786,76 +596,37 @@ async fn observe(
     receive: &mut mpsc::Receiver<Command>,
     stop: &CancellationToken,
     publish: &impl Fn(Update),
-    telegram_voice: &Arc<DynamicTelegramVoice>,
 ) -> Result<(), String> {
     let administration = app.presenter();
-    let remote_store = RemoteVoiceStore {
-        path: directory.join("remote_voice.rust.json"),
-    };
-    let mut remote_config = remote_store.load().map_err(|error| error.to_string())?;
-    publish(Update::RemoteVoices(remote_config.clone()));
-    let (preview_send, mut preview_results) =
-        mpsc::unbounded_channel::<(u64, Result<(), String>)>();
-    let mut preview_cancel: Option<CancellationToken> = None;
-    let mut preview_generation = 0_u64;
+    let remote_admin = administration
+        .remote_voice
+        .as_ref()
+        .ok_or("Remote Voice administration was not initialized")?;
+    let mut remote_updates = remote_admin.observe();
+    let mut remote_revision = remote_admin.snapshot().revision;
+    publish(Update::RemoteVoices(remote_admin.config()));
+    let telegram_admin = administration
+        .telegram
+        .as_ref()
+        .ok_or("Telegram Presenter is not configured")?;
+    let mut telegram_updates = telegram_admin.observe();
+    let mut telegram_watch_closed = false;
     let mut releases = administration.releases.observe();
     let presenter = &administration.conversation;
     let mut connections = administration.connections.observe();
     let mut memories = MemoryWatch::start(administration, CharacterId::Crazy)?;
     let (recall_updates, mut recall_results) = mpsc::unbounded_channel();
-    let mut graph_pending: Option<(
-        uuid::Uuid,
-        CharacterId,
-        neuromita::knowledge::maintenance::GraphMaintenancePreview,
-    )> = None;
     let mut pending: Option<(ChatOrigin, ConversationChangePreview)> = None;
-    let mut failed_guide_change: Option<GuideChange> = None;
-    let mut telegram_session: Option<Arc<TelethonSession>> = None;
-    // API credentials are intentionally never persisted as plain-text app
-    // settings. Explicit environment credentials permit opt-in startup
-    // rehydration of the protected Telethon session.
-    let telegram_auto_connect = administration.settings.snapshot().ok().is_some_and(|s| {
-        let tts = &s.values.speech.tts;
-        tts.enabled && tts.backend == TtsBackend::Telegram && tts.telegram_auto_connect
+    let telegram_status = telegram_admin.snapshot();
+    publish(Update::TelegramAuth {
+        phase: i32::from(telegram_status.phase),
+        status: format!("Telegram: {}", telegram_status.status),
     });
-    if telegram_auto_connect {
-        let credentials = (
-            std::env::var("NEUROMITA_TG_API_ID"),
-            std::env::var("NEUROMITA_TG_API_HASH"),
-            std::env::var("NEUROMITA_TG_PHONE"),
-        );
-        match credentials {
-            (Ok(id), Ok(hash), Ok(phone)) => {
-                match open_telegram_session(directory, &id, &hash, &phone).await {
-                    Ok((session, authorized)) => {
-                        if authorized {
-                            match activate_telegram_voice(administration, telegram_voice, session.clone()).await {
-                                Ok(()) => publish(Update::TelegramAuth {
-                                    phase: 3,
-                                    status: "Telegram: сессия восстановлена".into(),
-                                }),
-                                Err(error) => publish(Update::TelegramAuth { phase: 0, status: error }),
-                            }
-                        } else {
-                            publish(Update::TelegramAuth {
-                                phase: 1,
-                                status: "Telegram: ожидается код входа".into(),
-                            });
-                        }
-                        telegram_session = Some(session);
-                    }
-                    Err(error) => publish(Update::TelegramAuth { phase: 0, status: error }),
-                }
-            }
-            _ => publish(Update::TelegramAuth {
-                phase: 0,
-                status: "Telegram: автоподключение требует NEUROMITA_TG_API_ID, NEUROMITA_TG_API_HASH и NEUROMITA_TG_PHONE".into(),
-            }),
-        }
-    }
-    let mut character = CharacterId::Crazy;
-    let mut selection_revision = 0;
-    let mut speech_owner: Option<ChatOrigin> = None;
+    let current = administration.selection.snapshot();
+    let mut character = current.character;
+    let mut selection_revision = current.revision;
+    let mut selected = administration.selection.observe();
+    publish(Update::Selection(current));
     let mut debug_character = CharacterId::Crazy;
     let mut requests = presenter.observe_requests();
     let mut settings = presenter.observe_settings().map_err(|e| e.to_string())?;
@@ -864,21 +635,24 @@ async fn observe(
     let mut runtime_status = administration.ai_runtime.observe();
     let mut speech_status = administration.speech.observe();
     let mut microphone_test = administration.audio_input.observe_test();
-    let install_owner = app
-        .ai_hub_install()
-        .expect("desktop configured Core AI Hub installer");
-    let mut install_updates = install_owner
-        .take_events()
-        .expect("only one desktop consumes Core AI Hub events");
-    let (native_download_events, mut native_download_updates) =
-        mpsc::unbounded_channel::<NativeDownloadEvent>();
-    let mut active_native_download: Option<uuid::Uuid> = None;
-    let (transcripts, mut transcript_updates) = mpsc::unbounded_channel();
+    let install_owner = administration
+        .ai_install
+        .as_ref()
+        .ok_or("desktop has no AI Hub install Presenter")?;
+    let mut install_updates = install_owner.observe();
+    publish_ai_install(&install_owner.status(), publish);
+    let mut draft_updates = administration.speech_chat.observe();
+    publish(Update::SpeechDraft(
+        draft_updates.borrow_and_update().clone(),
+    ));
     let mut liveness = tokio::time::interval(Duration::from_secs(5));
     liveness.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let native_owner = app
-        .ai_hub_native()
-        .expect("desktop configured Core native owner");
+    let native_owner = administration
+        .native_hub
+        .as_ref()
+        .ok_or("desktop has no NativeHub Presenter")?;
+    let mut native_download_updates = native_owner.observe_download();
+    publish_native_download(&native_download_updates.borrow().clone(), publish);
     let initial_native = native_owner.refresh().await;
     if initial_native.is_err() {
         publish(Update::NativeError(
@@ -901,16 +675,7 @@ async fn observe(
                     super::settings::AdministrationSnapshot {
                         settings,
                         presets: administration.presets.snapshot(),
-                        prompt_sets: administration
-                            .prompts
-                            .as_ref()
-                            .map(|catalog| {
-                                CharacterId::ALL
-                                    .into_iter()
-                                    .flat_map(|id| catalog.list(id).unwrap_or_default())
-                                    .collect()
-                            })
-                            .unwrap_or_default(),
+                        prompt_sets: administration.prompt_folder.inventory().sets,
                     },
                 ))),
                 Err(error) => publish(Update::AdminError(error.to_string())),
@@ -941,11 +706,29 @@ async fn observe(
         tokio::select! {
             biased;
             _ = stop.cancelled() => {
-                telegram_voice.clear().await;
-                if let Some(session) = telegram_session.take() {
-                    let _ = tokio::time::timeout(Duration::from_secs(5), session.disconnect()).await;
-                }
                 return Ok(());
+            },
+            changed = telegram_updates.changed(), if !telegram_watch_closed => {
+                if changed.is_ok() {
+                    let status = telegram_updates.borrow_and_update().clone();
+                    publish(Update::TelegramAuth {
+                        phase: i32::from(status.phase),
+                        status: format!("Telegram: {}", status.status),
+                    });
+                } else {
+                    telegram_watch_closed = true;
+                }
+            },
+            changed = selected.changed() => {
+                changed.map_err(|_| "Chat selection observer closed")?;
+                let value = *selected.borrow_and_update();
+                character = value.character;
+                selection_revision = value.revision;
+                pending = None;
+                publish(Update::Selection(value));
+                publish(Update::Confirmation(ChatOrigin {
+                    character, selection_revision,
+                }, None));
             },
             command = receive.recv() => match command {
                 Some(command @ Command::SaveCharacterProfile(character, ..)) |
@@ -962,71 +745,21 @@ async fn observe(
                     }
                 },
                 Some(Command::ChangeGuide { request_id, change }) => {
-                    if failed_guide_change.is_some() {
-                        publish(Update::GuideFailed {
-                            request_id,
-                            error: "A previous Guide change is not persisted; retry it first".into(),
-                        });
-                        continue;
-                    }
-                    match change.apply() {
-                        Err(error) => publish(Update::GuideRejected {
-                            request_id,
-                            error: error.to_string(),
-                        }),
-                        Ok(()) => match SettingsApi::flush().await {
-                            Ok(()) => match change.matches_current() {
-                                Ok(true) => publish(Update::GuidePersisted { request_id, change }),
-                                Ok(false) => publish(Update::GuideRejected {
-                                    request_id,
-                                    error: "Guide was concurrently changed; reopen to reconcile".into(),
-                                }),
-                                Err(error) => publish(Update::GuideRejected {
-                                    request_id,
-                                    error: error.to_string(),
-                                }),
-                            },
-                            Err(error) => {
-                                failed_guide_change = Some(change);
-                                publish(Update::GuideFailed {
-                                    request_id,
-                                    error: error.to_string(),
-                                });
-                            }
-                        },
+                    match administration.guide_persistence.change(change.clone()).await {
+                        Ok(()) => publish(Update::GuidePersisted { request_id, change }),
+                        Err(neuromita::presentation::GuideSaveError::Failed(error)) =>
+                            publish(Update::GuideFailed { request_id, error }),
+                        Err(neuromita::presentation::GuideSaveError::Rejected(error)) =>
+                            publish(Update::GuideRejected { request_id, error }),
                     }
                 },
                 Some(Command::RetryGuideChange { request_id }) => {
-                    let Some(change) = failed_guide_change.clone() else {
-                        publish(Update::GuideRejected {
-                            request_id,
-                            error: "No failed Guide change to retry".into(),
-                        });
-                        continue;
-                    };
-                    let result = match SettingsApi::retry_save() {
-                        Ok(()) => SettingsApi::flush().await,
-                        Err(error) => Err(error),
-                    };
-                    match result {
-                        Ok(()) => {
-                            failed_guide_change = None;
-                            match change.matches_current() {
-                                Ok(true) => publish(Update::GuidePersisted { request_id, change }),
-                                Ok(false) => publish(Update::GuideRejected {
-                                    request_id,
-                                    error: "Guide changed concurrently; restart to reconcile".into(),
-                                }),
-                                Err(error) => publish(Update::GuideRejected {
-                                    request_id,
-                                    error: error.to_string(),
-                                }),
-                            }
-                        }
-                        Err(error) => publish(Update::GuideFailed {
-                            request_id,
-                            error: error.to_string(),
-                        }),
+                    match administration.guide_persistence.retry().await {
+                        Ok(change) => publish(Update::GuidePersisted { request_id, change }),
+                        Err(neuromita::presentation::GuideSaveError::Failed(error)) =>
+                            publish(Update::GuideFailed { request_id, error }),
+                        Err(neuromita::presentation::GuideSaveError::Rejected(error)) =>
+                            publish(Update::GuideRejected { request_id, error }),
                     }
                 },
                 Some(command @ (Command::DeletePreset(_) | Command::MovePreset(..) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::AssignAllPresets(..) | Command::SelectPromptSet(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_) | Command::SectionVisibility(..) | Command::HidePrivate(_) | Command::StructuredDisplay(_) | Command::SetToolOption(..) | Command::SetToolDepth(_) | Command::SetMemoryDedupEnabled(_) | Command::SetMemoryDedupThreshold(_) | Command::SaveAsr(..) | Command::SaveCharacterVoice(..) | Command::SelectAsrRecognizer(_))) => {
@@ -1046,160 +779,68 @@ async fn observe(
                 Some(Command::SaveTts(value)) => {
                     match super::settings::execute(administration, Command::SaveTts(value)) {
                         Ok(()) => {
-                            if let Some(session) = &telegram_session {
-                                if let Err(error) = activate_telegram_voice(administration, telegram_voice, session.clone()).await {
-                                    publish(Update::AdminError(error));
-                                }
+                            if let Err(error) = telegram_admin.refresh_voice().await {
+                                publish(Update::AdminError(error));
                             }
+                            let status = telegram_admin.snapshot();
+                            publish(Update::TelegramAuth { phase: i32::from(status.phase), status: format!("Telegram: {}", status.status) });
                             publish(Update::AdminSaved);
                         }
                         Err(error) => publish(Update::AdminError(error)),
                     }
                 },
                 Some(Command::TelegramConnect { api_id, api_hash, phone }) => {
-                    // Invalidate an old provider before changing account/session.
-                    telegram_voice.clear().await;
-                    if let Some(old) = telegram_session.take() {
-                        let _ = tokio::time::timeout(Duration::from_secs(5), old.disconnect()).await;
+                    if let Err(error) = telegram_admin.connect(&api_id, &api_hash, &phone).await {
+                        publish(Update::AdminError(error));
                     }
-                    let result = open_telegram_session(directory, &api_id, &api_hash, &phone).await;
-                    match result {
-                        Ok((session, authorized)) => {
-                            let (phase, status) = if authorized {
-                                match activate_telegram_voice(administration, telegram_voice, session.clone()).await {
-                                    Ok(()) => (3, "Telegram: подключён".to_owned()),
-                                    Err(error) => (0, error),
-                                }
-                            } else {
-                                (1, "Telegram: ожидается код".to_owned())
-                            };
-                            telegram_session = Some(session);
-                            publish(Update::TelegramAuth { phase, status });
-                        }
-                        Err(error) => publish(Update::TelegramAuth { phase: 0, status: error }),
-                    }
+                    let status = telegram_admin.snapshot();
+                    publish(Update::TelegramAuth { phase: i32::from(status.phase), status: format!("Telegram: {}", status.status) });
                 },
                 Some(Command::TelegramCode(code)) => {
-                    if let Some(session) = &telegram_session {
-                        match session.sign_in_code(&code).await {
-                            Ok(true) => publish(Update::TelegramAuth { phase: 2, status: "Telegram: требуется пароль 2FA".into() }),
-                            Ok(false) => match activate_telegram_voice(administration, telegram_voice, session.clone()).await {
-                                Ok(()) => publish(Update::TelegramAuth { phase: 3, status: "Telegram: подключён".into() }),
-                                Err(error) => publish(Update::TelegramAuth { phase: 1, status: error }),
-                            },
-                            Err(TelegramError::ExpiredCode) => {
-                                match session.request_code().await {
-                                    Ok(()) => publish(Update::TelegramAuth {
-                                        phase: 1,
-                                        status: "Telegram: код истёк, запрошен новый".into(),
-                                    }),
-                                    Err(error) => publish(Update::TelegramAuth {
-                                        phase: 0,
-                                        status: error.to_string(),
-                                    }),
-                                }
-                            },
-                            Err(error) => publish(Update::TelegramAuth { phase: 1, status: error.to_string() }),
-                        }
-                    } else {
-                        publish(Update::TelegramAuth { phase: 0, status: "Telegram: нет активной сессии".into() });
+                    if let Err(error) = telegram_admin.submit_code(&code).await {
+                        publish(Update::AdminError(error));
                     }
+                    let status = telegram_admin.snapshot();
+                    publish(Update::TelegramAuth { phase: i32::from(status.phase), status: format!("Telegram: {}", status.status) });
                 },
                 Some(Command::TelegramPassword(password)) => {
-                    if let Some(session) = &telegram_session {
-                        match session.sign_in_password(&password).await {
-                            Ok(()) => match activate_telegram_voice(administration, telegram_voice, session.clone()).await {
-                                Ok(()) => publish(Update::TelegramAuth { phase: 3, status: "Telegram: подключён".into() }),
-                                Err(error) => publish(Update::TelegramAuth { phase: 2, status: error }),
-                            },
-                            Err(error) => publish(Update::TelegramAuth { phase: 2, status: error.to_string() }),
-                        }
+                    if let Err(error) = telegram_admin.submit_password(&password).await {
+                        publish(Update::AdminError(error));
                     }
+                    let status = telegram_admin.snapshot();
+                    publish(Update::TelegramAuth { phase: i32::from(status.phase), status: format!("Telegram: {}", status.status) });
                 },
                 Some(Command::TelegramDisconnect) => {
-                    telegram_voice.clear().await;
-                    if let Some(session) = telegram_session.take() {
-                        let _ = tokio::time::timeout(Duration::from_secs(5), session.disconnect()).await;
-                    }
-                    publish(Update::TelegramAuth { phase: 0, status: "Telegram: отключён".into() });
+                    let status = telegram_admin.disconnect().await;
+                    publish(Update::TelegramAuth { phase: i32::from(status.phase), status: format!("Telegram: {}", status.status) });
                 },
                 Some(Command::RemoteVoice(action)) => {
-                    match action {
-                        RemoteVoiceAction::Preview(text, character, draft_preset) => {
-                            if preview_cancel.is_some() {
-                                publish(Update::RemoteVoiceState("Проверка уже выполняется".into(), true));
-                            } else {
-                                let prepare = (|| -> Result<_, String> {
-                                    let next = remote_config
-                                        .prepared_preview(draft_preset, character)
-                                        .map_err(|e| e.to_string())?;
-                                    let preset = next.active().map_err(|e| e.to_string())?.clone();
-                                    let player = find_binary(directory, "NEUROMITA_FFPLAY",
-                                        if cfg!(windows) { "ffplay.exe" } else { "ffplay" })
-                                        .ok_or_else(|| "FFplay не найден: укажите NEUROMITA_FFPLAY или установите AIData/bin/ffplay".to_owned())?;
-                                    let client = FishAudioClient::new().map_err(|e| e.to_string())?;
-                                    // Save before preview: failure must NOT replay the older
-                                    // stored voice and report it as the just-edited one.
-                                    remote_store.save(&next).map_err(|e| e.to_string())?;
-                                    remote_config = next;
-                                    publish(Update::RemoteVoices(remote_config.clone()));
-                                    Ok((preset, player, client))
-                                })();
-                                match prepare {
-                                    Err(error) => publish(Update::RemoteVoiceState(error, false)),
-                                    Ok((preset, player, client)) => {
-                                        preview_generation += 1;
-                                        let generation = preview_generation;
-                                        let cancel = stop.child_token();
-                                        preview_cancel = Some(cancel.clone());
-                                        let finish = preview_send.clone();
-                                        tokio::spawn(async move {
-                                            let result = async {
-                                                let audio = client.synthesize(&preset, &text, character, &cancel)
-                                                    .await.map_err(|e| e.to_string())?;
-                                                FfplayOutput { binary: player }.play(audio, cancel.clone())
-                                                    .await.map_err(|e| e.to_string())?;
-                                                if cancel.is_cancelled() { return Err("Проверка отменена".into()); }
-                                                Ok(())
-                                            }.await;
-                                            let _ = finish.send((generation, result));
-                                        });
-                                        publish(Update::RemoteVoiceState("Синтез и воспроизведение…".into(), true));
-                                    }
-                                }
-                            }
-                        },
-                        RemoteVoiceAction::Cancel => {
-                            if let Some(token) = preview_cancel.take() {
-                                token.cancel();
-                                preview_generation += 1;
-                                publish(Update::RemoteVoiceState("Проверка отменена".into(), false));
-                            }
-                        },
+                    let result = match action {
+                        RemoteVoiceAction::Preview(text, character, preset) => {
+                            remote_admin.preview(text, character, preset, Some(remote_revision))
+                                .map_err(|error| error.to_string())
+                        }
+                        RemoteVoiceAction::Cancel => Ok(remote_admin.cancel()),
                         action => {
-                            let mut next = remote_config.clone();
-                            let result = match action {
-                                RemoteVoiceAction::Add => next.add(),
-                                RemoteVoiceAction::Delete => next.delete_active(),
-                                RemoteVoiceAction::SelectWithSave(id, preset) => {
-                                    next.update(preset).and_then(|_| next.select(&id))
-                                },
-                                RemoteVoiceAction::Save(preset) => next.update(preset),
+                            let change = match action {
+                                RemoteVoiceAction::Add => RemoteVoiceCatalogAction::Add,
+                                RemoteVoiceAction::Delete => RemoteVoiceCatalogAction::Delete,
+                                RemoteVoiceAction::SelectWithSave(id, preset) =>
+                                    RemoteVoiceCatalogAction::SelectWithSave(id, preset),
+                                RemoteVoiceAction::Save(preset) => RemoteVoiceCatalogAction::Save(preset),
                                 RemoteVoiceAction::Preview(..) | RemoteVoiceAction::Cancel => unreachable!(),
-                            }.and_then(|_| remote_store.save(&next));
-                            match result {
-                                Ok(()) => {
-                                    if let Some(token) = preview_cancel.take() {
-                                        token.cancel();
-                                        preview_generation += 1;
-                                        publish(Update::RemoteVoiceState("Проверка прервана изменением профиля".into(), false));
-                                    }
-                                    remote_config = next;
-                                    publish(Update::RemoteVoices(remote_config.clone()));
-                                    publish(Update::RemoteVoiceState("Облачный профиль сохранён".into(), false));
-                                },
-                                Err(error) => publish(Update::RemoteVoiceState(error.to_string(), false)),
-                            }
+                            };
+                            remote_admin.change(change, Some(remote_revision)).map_err(|e| e.to_string())
+                        }
+                    };
+                    match result {
+                        Ok(state) => {
+                            remote_revision = state.revision;
+                            publish(Update::RemoteVoices(remote_admin.config()));
+                            publish(Update::RemoteVoiceState(remote_message(&state.phase).into(), state.busy));
+                        }
+                        Err(error) => {
+                            publish(Update::RemoteVoiceState(error, remote_admin.snapshot().busy));
                         }
                     }
                 },
@@ -1209,16 +850,13 @@ async fn observe(
                 },
                 Some(Command::SpeechSessionEnabled(enabled)) => {
                     let result = if enabled {
-                        enable_speech_session(app, directory, speech_conversation(&transcripts, ChatOrigin {
+                        enable_speech_session(app, directory, ChatOrigin {
                             character, selection_revision,
-                        })).await
+                        }).await
                     } else {
-                        app.stop_speech_capture().await;
+                        administration.selection.stop_capture().await;
                         Ok(())
                     };
-                    if result.is_ok() {
-                        speech_owner = enabled.then_some(ChatOrigin { character, selection_revision });
-                    }
                     if let Err(error) = result { publish(Update::AdminError(error)); }
                     publish(Update::SpeechSessionStatus(administration.speech.snapshot()));
                 },
@@ -1232,41 +870,17 @@ async fn observe(
                         continue;
                     }
                     let result = if enabled {
-                        match enable_speech_session(
-                            app,
-                            directory,
-                            speech_conversation(&transcripts, origin),
-                        ).await {
-                            Ok(()) => {
-                                let mode = administration.settings.asr.preferences.get().input_mode;
-                                if matches!(mode.as_str(), "radio" | "push_to_talk") {
-                                    match app.press_speech_button(true).await {
-                                        Ok(()) => Ok(()),
-                                        Err(error) => {
-                                            app.stop_speech_capture().await;
-                                            Err(error.to_string())
-                                        }
-                                    }
-                                } else {
-                                    Ok(())
-                                }
-                            }
-                            Err(error) => Err(error),
-                        }
+                        enable_speech_session(app, directory, origin).await
                     } else {
-                        let _ = app.press_speech_button(false).await;
-                        app.stop_speech_capture().await;
+                        administration.selection.stop_capture().await;
                         Ok(())
                     };
-                    if result.is_ok() {
-                        speech_owner = enabled.then_some(origin);
-                    }
                     if let Err(error) = result { publish(Update::ChatError(origin, error)); }
                     publish(Update::SpeechSessionStatus(administration.speech.snapshot()));
                 },
                 Some(Command::SpeechPushToTalk(pressed)) => {
-                    if let Err(error) = app.press_speech_button(pressed).await && pressed {
-                        publish(Update::AdminError(error.to_string()));
+                    if let Err(error) = administration.selection.press(pressed).await && pressed {
+                        publish(Update::AdminError(error));
                     }
                 },
                 Some(Command::MicrophoneTest(enabled, backend, device)) => {
@@ -1321,66 +935,28 @@ async fn observe(
                     refresh_views = false;
                 },
                 Some(Command::InstallNativePackage { model_id, manifest_sha256, backend }) => {
-                    if active_native_download.is_some() {
-                        publish(Update::NativeDownloadStatus {
-                            summary: "Установка уже выполняется; сначала завершите или отмените её".into(),
-                            percent: -1, active: true,
-                        });
-                    } else if let Some(backend) = native_backend(&backend) {
-                        match native_owner.start_download(
-                            NativeDownloadSelection { model_id, manifest_sha256, backend },
-                            native_download_events.clone(),
-                        ).await {
-                            Ok(operation) => {
-                                active_native_download = Some(operation);
-                                publish(Update::NativeDownloadStatus {
-                                    summary: "Проверка подписи пройдена. Подключение к доверенному HTTPS-источнику…".into(),
-                                    percent: -1, active: true,
-                                });
-                            },
-                            Err(error) => publish(Update::NativeDownloadStatus {
-                                summary: format!("Установка отклонена: {error}"),
-                                percent: -1, active: false,
-                            }),
-                        }
-                    } else {
-                        publish(Update::NativeDownloadStatus {
-                            summary: "Неизвестный native backend".into(), percent: -1, active: false,
-                        });
+                    let result = match native_backend(&backend) {
+                        Some(backend) => native_owner.start_download(
+                            NativeDownloadSelection { model_id, manifest_sha256, backend }
+                        ).await,
+                        None => Err("Неизвестный native backend".into()),
+                    };
+                    if let Err(error) = result {
+                        publish(Update::NativeError(error));
                     }
+                    publish_native_download(&native_owner.download_snapshot(), publish);
                     refresh_views = false;
                 },
                 Some(Command::CancelNativePackageInstall) => {
-                    if native_owner.cancel_download().await {
-                        publish(Update::NativeDownloadStatus {
-                            summary: "Отмена запрошена. Начатая атомарная публикация может завершиться целиком".into(),
-                            percent: -1, active: true,
-                        });
-                    }
+                    native_owner.cancel_download().await;
+                    publish_native_download(&native_owner.download_snapshot(), publish);
                     refresh_views = false;
                 },
                 Some(Command::RefreshPromptCatalog) => {},
                 Some(Command::DebugSelect(id)) => { debug_character = id; },
                 Some(Command::OpenPromptFolder(character)) => {
-                    if let Some(catalog) = &administration.prompts {
-                        let result = (|| -> Result<(), String> {
-                            let settings = administration.settings.snapshot().map_err(|e| e.to_string())?;
-                            let selected = settings.values.characters.for_character(character).prompt_set.as_deref();
-                            let character_root = catalog.root().join(character.to_string());
-                            let folder = match selected {
-                                Some(name) => {
-                                    let name = catalog.resolve_set(character, Some(name)).map_err(|e| e.to_string())?;
-                                    character_root.join(name)
-                                }
-                                None => character_root,
-                            };
-                            std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
-                            let folder = folder.canonicalize().map_err(|e| e.to_string())?;
-                            let command = if cfg!(windows) { "explorer.exe" } else { "xdg-open" };
-                            std::process::Command::new(command).arg(folder).spawn().map_err(|e| e.to_string())?;
-                            Ok(())
-                        })();
-                        if let Err(error) = result { publish(Update::AdminError(error)); }
+                    if let Err(error) = administration.prompt_folder.open(character) {
+                        publish(Update::AdminError(error));
                     }
                 },
                 Some(Command::RefreshHardware) => publish(hardware_snapshot().await),
@@ -1389,34 +965,11 @@ async fn observe(
                     refresh_views = false;
                 },
                 Some(Command::ConfirmAiHubInstall { category, id, token }) => {
-                    match install_owner.confirm(category.clone(), id.clone(), token).await {
-                        Ok((operation, action)) => {
-                            let (operation_summary, preview_summary) = match &action {
-                                InstallAction::Overlay => (
-                                    "Публикация проверенного plugin overlay",
-                                    "Установка plugin overlay выполняется. Worker не запускается.",
-                                ),
-                                InstallAction::Wheel { .. } => (
-                                    "Установка одного проверенного wheel-stage",
-                                    "Устанавливается один wheel-stage. Модель и worker не активируются.",
-                                ),
-                            };
-                            publish(Update::AiHubInstallOperation {
-                                operation_id: operation.to_string(),
-                                category: category.clone(), id: id.clone(),
-                                stage: "installing".into(), summary: operation_summary.into(),
-                            });
-                            publish(Update::AiHubInstallPreview {
-                                category, id, token,
-                                summary: preview_summary.into(), error: String::new(),
-                                stage: "installing".into(), can_install: false,
-                                operation_id: operation.to_string(),
-                            });
-                        },
-                        Err(error) => publish(Update::AiHubInstallPreview {
+                    if let Err(error) = install_owner.confirm(category.clone(), id.clone(), token).await {
+                        publish(Update::AiHubInstallPreview {
                             category, id, token, summary: String::new(), error: error.into(),
                             stage: "failed".into(), can_install: false, operation_id: String::new(),
-                        }),
+                        });
                     }
                     refresh_views = false;
                 },
@@ -1435,55 +988,25 @@ async fn observe(
                 Some(Command::RefreshReleases) => { if let Err(error) = administration.releases.refresh() { publish(Update::ReleaseError(error.to_string())); } },
                 None => return Ok(()),
                 Some(Command::MemorySelect(id)) => {
-                    graph_pending = None;
+                    administration.graph.reset().await;
                     memories = MemoryWatch::start(administration, id)?;
                 },
                 Some(Command::GraphPreview(request_id, selected, memory_id, mode)) => {
-                    graph_pending = None;
-                    let result = if mode == neuromita::knowledge::maintenance::GraphMaintenanceMode::Reindex
-                        && !neuromita::api::GraphMaintenanceApi::reindex_available().unwrap_or(false)
-                    {
-                        Err("Graph Reindex backend is unavailable".to_owned())
-                    } else {
-                        neuromita::api::GraphMaintenanceApi::preview(
-                            selected,
-                            &[memory_id],
-                            std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_millis()
-                                .try_into()
-                                .unwrap_or(u64::MAX),
-                            mode,
-                        ).await.map_err(|error| error.to_string())
-                    };
+                    let result = administration.graph.preview(request_id, selected, memory_id, mode).await;
                     match result {
-                        Ok(plan) => {
-                            let report = GraphPreviewReport::from_plan(&plan);
-                            graph_pending = Some((request_id, selected, plan));
-                            publish(Update::GraphPreviewResult(request_id, Ok(report)));
-                        }
+                        Ok(review) => publish(Update::GraphPreviewResult(request_id, Ok(GraphPreviewReport {
+                            count: review.relation_count,
+                            relations: review.relations,
+                        }))),
                         Err(error) => publish(Update::GraphPreviewResult(request_id, Err(error))),
                     }
                 },
                 Some(Command::GraphApply(request_id, selected)) => {
-                    let result = match graph_pending.take() {
-                        Some((id, owner, plan)) if id == request_id && owner == selected => {
-                            neuromita::api::GraphMaintenanceApi::apply_confirmed(
-                                selected, plan, true, stop,
-                            ).await.map(|_| ()).map_err(|error| error.to_string())
-                        }
-                        other => {
-                            graph_pending = other;
-                            Err("Graph preview is missing or belongs to another selection".to_owned())
-                        }
-                    };
-                    publish(Update::GraphApplyResult(request_id, result));
+                    publish(Update::GraphApplyResult(request_id,
+                        administration.graph.apply(request_id, selected).await));
                 },
                 Some(Command::GraphAbort(request_id)) => {
-                    if graph_pending.as_ref().is_some_and(|(id, _, _)| *id == request_id) {
-                        graph_pending = None;
-                    }
+                    administration.graph.abort(request_id).await;
                 },
                 Some(Command::MemoryEdit(edit_id, expected, commands)) => {
                     match administration.characters.edit_memories(expected.character(), expected, commands).await {
@@ -1493,14 +1016,11 @@ async fn observe(
                 Some(Command::MemoryRecall(request_id, character, memory_id, query)) => {
                     let sender = recall_updates.clone();
                     let cancelled = stop.clone();
+                    let characters = administration.characters.clone();
                     tokio::spawn(async move {
                         let result = tokio::select! {
                             _ = cancelled.cancelled() => return,
-                            result = neuromita::api::HistoricalRecallApi::inspect(
-                                character,
-                                neuromita::knowledge::forgotten_recall::RecallSelector::Ids(vec![memory_id]),
-                                &query,
-                            ) => result.map_err(|error| error.to_string()),
+                            result = characters.recall_forgotten(character, memory_id, &query) => result,
                         };
                         let _ = sender.send(Update::MemoryRecallResult(request_id, result));
                     });
@@ -1553,28 +1073,22 @@ async fn observe(
                         character.index() as i32,
                         selection_revision,
                     ) {
-                        let model = administration.chat.snapshot();
-                        let trace = model.requests.iter().rev().find(|r| r.metadata.character_id == origin.character).and_then(|r| administration.chat.trace(r.metadata.id));
-                        let text = match trace {
-                            Some(trace) => match trace.section_json(neuromita::request::DiagnosticSection::All) {
-                                Ok(text) => text,
-                                Err(error) => format!("Cannot export request diagnostics: {error}"),
-                            },
-                            None => "No retained request trace".into(),
+                        let text = match administration.chat.latest_diagnostics(origin.character) {
+                            Ok(Some((_, text))) => text,
+                            Ok(None) => "No retained request trace".into(),
+                            Err(error) => format!("Cannot export request diagnostics: {error}"),
                         };
                         publish(Update::Diagnostics(origin, text));
                     }
                 },
-                Some(Command::Select(origin)) => {
-                    if speech_owner.is_some_and(|owner| owner != origin) {
-                        app.stop_speech_capture().await;
-                        speech_owner = None;
-                        publish(Update::SpeechSessionStatus(administration.speech.snapshot()));
+                Some(Command::Select(origin, new_character)) => {
+                    let expected = ChatSelection {
+                        character: origin.character,
+                        revision: origin.selection_revision,
+                    };
+                    if let Err(error) = administration.selection.select(expected, new_character).await {
+                        publish(Update::AdminError(error));
                     }
-                    character = origin.character;
-                    selection_revision = origin.selection_revision;
-                    pending = None;
-                    publish(Update::Confirmation(origin, None));
                 },
                 Some(Command::Refresh) => {},
                 Some(Command::LoadOlder(origin, ticket, at, expected, offset)) => {
@@ -1590,6 +1104,15 @@ async fn observe(
                         .await.map_err(|error| error.to_string());
                     publish(Update::OlderPage(origin, ticket, page));
                 },
+                Some(Command::DraftChanged(origin, text)) => {
+                    if let Err(error) = administration.speech_chat.set_draft(ChatSelection {
+                        character: origin.character,
+                        revision: origin.selection_revision,
+                    }, text).await {
+                        publish(Update::ChatError(origin, error));
+                    }
+                    refresh_views = false;
+                },
                 Some(Command::Send(origin, text)) => {
                     if !chat_fence::accepts(
                         origin.character.index() as i32,
@@ -1599,9 +1122,12 @@ async fn observe(
                     ) {
                         publish(Update::ChatError(origin, "Chat selection changed before send".into()));
                     } else {
-                        match presenter.reply(origin.character, text.clone()) {
+                        match administration.speech_chat.send(ChatSelection {
+                            character: origin.character,
+                            revision: origin.selection_revision,
+                        }, text.clone()).await {
                             Ok(_) => publish(Update::Sent(origin, text)),
-                            Err(error) => publish(Update::ChatError(origin, error.to_string())),
+                            Err(error) => publish(Update::ChatError(origin, error)),
                         }
                     }
                 },
@@ -1615,22 +1141,14 @@ async fn observe(
                         publish(Update::ChatError(origin, "Chat selection changed before attachment".into()));
                         continue;
                     }
-                    let result = (|| -> Result<(), String> {
-                        use neuromita::timeline::{
-                            file_attachments::{compose_local_file_message, import_local_file},
-                            storage::assets::TimelineAssetStore,
-                        };
-                        let selection = app.timeline_selection();
-                        let assets = TimelineAssetStore::new(directory.join("TimelineAssets"), 8 * 1024 * 1024)
-                            .map_err(|error| error.to_string())?;
-                        let part = import_local_file(&assets, std::path::Path::new(&source))
-                            .map_err(|error| error.to_string())?;
-                        let message = compose_local_file_message(origin.character, text.clone(), part)
-                            .map_err(|error| error.to_string())?;
-                        app.publish_attached_conversation_message(selection, message, &assets)
-                            .map_err(|error| error.to_string())?;
-                        Ok(())
-                    })();
+                    let result = administration.conversation.current_fence().and_then(|fence| {
+                        administration.conversation.attach_file(
+                            origin.character,
+                            text.clone(),
+                            std::path::Path::new(&source),
+                            fence,
+                        )
+                    }).map(|_| ());
                     match result {
                         Ok(()) => publish(Update::FileAttached(origin, text, source)),
                         Err(error) => publish(Update::ChatError(origin, error)),
@@ -1679,108 +1197,23 @@ async fn observe(
             result = recall_results.recv() => {
                 if let Some(result) = result { publish(result); }
             },
-            installed = install_updates.recv() => {
-                match installed {
-                    Some(InstallEvent::Finished { operation, category, id, token, action, result }) => {
-                        install_owner.join_finished(operation).await;
-                        let (summary, error, stage): (String, String, String) = match result {
-                            Ok(_) => match action {
-                                InstallAction::Overlay => ("Plugin overlay установлен и проверен. Worker не запущен, model assets не установлены.".into(), String::new(), "installed".into()),
-                                InstallAction::Wheel { .. } => ("Один wheel-stage установлен и проверен. Это не готовность backend, модели или worker.".into(), String::new(), "wheel-installed".into()),
-                            },
-                            Err(InstallPreviewError::ReviewChanged) => (String::new(), "Исходный план изменился после подтверждения — установка остановлена.".into(), "failed".into()),
-                            Err(InstallPreviewError::Cancelled) => ("Установка отменена.".into(), String::new(), "cancelled".into()),
-                            Err(InstallPreviewError::UnsupportedInstall) => (String::new(), "Этот план требует дополнительного подтверждения backend или файлов модели.".into(), "failed".into()),
-                            Err(_) => (String::new(), "Core не смог завершить установку. Подробности доступны в диагностике установщика.".into(), "failed".into()),
-                        };
-                        publish(Update::AiHubInstallOperation {
-                            operation_id: operation.to_string(),
-                            category: category.clone(), id: id.clone(),
-                            stage: stage.clone(),
-                            summary: if error.is_empty() { summary.clone() } else { error.clone() },
-                        });
-                        publish(Update::AiHubInstallPreview { category, id, token,
-                            summary, error, stage, can_install: false, operation_id: operation.to_string() });
-                    },
-                    Some(InstallEvent::Preview { category, id, token, result, admitted }) => {
-                        if !install_owner.is_current_preview(&category, &id, token).await {
-                            continue;
-                        }
-                        let (summary, error, can_install, stage) = match result {
-                            Ok(InstallActionReview { review, action }) => {
-                                let mut summary = summarize_ai_hub_review(&review);
-                                let review_stage = match action {
-                                    Some(InstallAction::Overlay) if admitted => "review",
-                                    Some(InstallAction::Wheel { stage_id, backend }) => {
-                                        summary.push_str(&format!(
-                                            "\nДоступен проверенный wheel-stage: {stage_id} · {backend}. Установится только этот пакет, не модель.",
-                                        ));
-                                        if admitted { "wheel-review" } else { "review" }
-                                    },
-                                    _ => {
-                                        summary.push_str("\nИсполнение недоступно: нет единственного проверенного и локально доступного wheel-stage либо необходимы другие установочные этапы.");
-                                        "review"
-                                    },
-                                };
-                                (summary, String::new(), admitted, review_stage.to_owned())
-                            },
-                            Err(InstallPreviewError::InvalidSelection) => (String::new(),
-                                "Модель недоступна или неоднозначна в актуальном каталоге".into(), false, "failed".into()),
-                            Err(InstallPreviewError::Sdk(_)) => (String::new(),
-                                "Для проверки необходимы установленные в UserData проверенный SDK и код плагина.".into(), false, "failed".into()),
-                            Err(InstallPreviewError::PythonVersion | InstallPreviewError::Python(_)) => (String::new(),
-                                "Managed CPython 3.12.x ещё не подготовлен либо не прошёл проверку версии.".into(), false, "failed".into()),
-                            Err(InstallPreviewError::Plan(_)) => (String::new(),
-                                "Установочный скрипт не предоставил допустимый план. Установка не запускалась.".into(), false, "failed".into()),
-                            Err(InstallPreviewError::InvalidPlan(_)) => (String::new(),
-                                "Полученный план не прошёл проверку зависимостей, backend или путей.".into(), false, "failed".into()),
-                            Err(InstallPreviewError::ReviewChanged) => (String::new(),
-                                "План или исходник изменился во время проверки.".into(), false, "failed".into()),
-                            Err(InstallPreviewError::Cancelled) => ("Проверка отменена.".into(),
-                                String::new(), false, "cancelled".into()),
-                            Err(InstallPreviewError::UnsupportedInstall) => (String::new(),
-                                "Для этого плана пока не поддерживается установка.".into(), false, "failed".into()),
-                            Err(InstallPreviewError::WheelPin | InstallPreviewError::WheelExecution) => (String::new(),
-                                "Проверенный wheel-stage недоступен или не смог завершиться; установка модели не запускалась.".into(), false, "failed".into()),
-                        };
-                        publish(Update::AiHubInstallPreview { category, id, token, summary, error,
-                            stage, can_install, operation_id: String::new() });
-                    },
-                    None => {},
-                }
-            },
-            preview = preview_results.recv() => {
-                if let Some((generation, result)) = preview
-                    && generation == preview_generation
-                {
-                    preview_cancel = None;
-                    publish(Update::RemoteVoiceState(
-                        result.map(|_| "Голос воспроизведён".to_owned()).unwrap_or_else(|e| e), false
-                    ));
-                }
+            changed = install_updates.changed() => {
+                changed.map_err(|_| "AI Hub install observer closed")?;
+                publish_ai_install(&install_updates.borrow_and_update().clone(), publish);
                 refresh_views = false;
             },
-            transcript = transcript_updates.recv() => {
-                if let Some((origin, transcript)) = transcript {
-                    if !chat_fence::accepts(
-                        origin.character.index() as i32,
-                        origin.selection_revision,
-                        character.index() as i32,
-                        selection_revision,
-                    ) {
-                        continue;
-                    }
-                    let text = transcript.text.trim();
-                    if !text.is_empty() {
-                        let preferences = administration.settings.asr.preferences.get();
-                        publish(Update::RecognizedText {
-                            origin,
-                            text: text.to_owned(),
-                            auto_send_after: dispatch_policy(&preferences),
-                            merge_with_draft: preferences.merge_chat,
-                        });
-                    }
-                }
+            changed = remote_updates.changed() => {
+                changed.map_err(|_| "Remote Voice observer closed")?;
+                let state = remote_updates.borrow_and_update().clone();
+                remote_revision = state.revision;
+                publish(Update::RemoteVoices(remote_admin.config()));
+                publish(Update::RemoteVoiceState(remote_message(&state.phase).into(), state.busy));
+                refresh_views = false;
+            },
+            changed = draft_updates.changed() => {
+                changed.map_err(|_| "Speech draft Presenter observation closed")?;
+                publish(Update::SpeechDraft(draft_updates.borrow_and_update().clone()));
+                refresh_views = false;
             },
             update = memories.updates.recv(), if !memories.closed => { match update { Some(update) => publish(update), None => memories.closed = true } },
             result = speech_status.changed() => {
@@ -1814,66 +1247,13 @@ async fn observe(
             } => {
                 if result.is_err() { runtime_status = None; }
             },
-            event = native_download_updates.recv() => {
-                if let Some(event) = event {
-                    let matching = active_native_download == Some(event.id());
-                    if matching {
-                        match event {
-                            NativeDownloadEvent::Progress { progress, .. } => {
-                                let view = NativeDownloadPresenter::project(progress);
-                                let summary = match view.phase {
-                                    NativeTransferPhase::Manifest => "Загрузка подписанного manifest…".to_owned(),
-                                    NativeTransferPhase::Downloading => format!(
-                                        "Загружено {} / {} МиБ. Пакет пока не установлен",
-                                        view.transferred_bytes / (1024 * 1024),
-                                        view.planned_bytes.unwrap_or(0) / (1024 * 1024),
-                                    ),
-                                    NativeTransferPhase::Publishing => "Повторная проверка и атомарная публикация…".to_owned(),
-                                };
-                                publish(Update::NativeDownloadStatus {
-                                    summary,
-                                    percent: view.percent.map_or(-1, i32::from),
-                                    active: true,
-                                });
-                            },
-                            NativeDownloadEvent::Finished { result, .. } => {
-                                let journal = if let Some(operation) = active_native_download.take() {
-                                    native_owner.finish_download(operation).await
-                                } else {
-                                    Err("Отсутствует активная установка для завершения".into())
-                                };
-                                if let Err(error) = journal {
-                                    publish(Update::NativeError(error.clone()));
-                                    publish(Update::NativeDownloadStatus {
-                                        summary: format!("Проверка журнала установки не завершена: {error}"),
-                                        percent: -1,
-                                        active: false,
-                                    });
-                                    continue;
-                                }
-                                match result {
-                                    Ok(installed) => {
-                                        if let Err(error) = native_owner.refresh().await {
-                                            publish(Update::NativeError(error));
-                                        }
-                                        publish_native(native_owner, publish).await;
-                                        publish_native_release_catalog(native_owner, publish).await;
-                                        publish(Update::NativeDownloadStatus {
-                                            summary: format!("Пакет {} опубликован (повторное использование: {})",
-                                                installed.model_id, installed.reused_package),
-                                            percent: 100,
-                                            active: false,
-                                        });
-                                    },
-                                    Err(error) => publish(Update::NativeDownloadStatus {
-                                        summary: format!("Установка не выполнена: {error}"),
-                                        percent: -1,
-                                        active: false,
-                                    }),
-                                }
-                            },
-                        }
-                    }
+            changed = native_download_updates.changed() => {
+                changed.map_err(|_| "Native download observer closed")?;
+                let status = native_download_updates.borrow_and_update().clone();
+                publish_native_download(&status, publish);
+                if status.phase == "installed" {
+                    publish_native(native_owner, publish).await;
+                    publish_native_release_catalog(native_owner, publish).await;
                 }
                 refresh_views = false;
             },
@@ -1890,41 +1270,51 @@ async fn observe(
     }
 }
 
-async fn character_debug_snapshot(api: &GuiPresenter, character: CharacterId) -> Update {
-    let result = async {
-        let post_dsl = if let Some(catalog) = api.prompts.as_ref() {
-            let settings = api.settings.snapshot().map_err(|error| error.to_string())?;
-            let selected = settings
-                .values
-                .characters
-                .for_character(character)
-                .prompt_set
-                .as_deref();
-            if selected.is_none()
-                && catalog
-                    .list(character)
-                    .map_err(|error| error.to_string())?
-                    .is_empty()
-            {
-                // Match request admission: without an explicit selection and
-                // without any packs, use the built-in character debug fields.
-                None
-            } else {
-                let name = catalog
-                    .resolve_set(character, selected)
-                    .map_err(|error| error.to_string())?;
-                catalog
-                    .load_post_rules(character, &name)
-                    .map_err(|error| error.to_string())?
-            }
-        } else {
-            None
-        };
-        api.characters
-            .debug_display(character, post_dsl.as_ref())
-            .await
-            .map_err(|error| error.to_string())
+fn publish_ai_install(
+    status: &neuromita::ai_runtime::install_coordinator::InstallStatus,
+    publish: &impl Fn(Update),
+) {
+    let view = neuromita::presentation::AiHubInstallPresenter::project(status);
+    if !view.operation_id.is_empty() {
+        publish(Update::AiHubInstallOperation {
+            operation_id: view.operation_id.clone(),
+            category: view.category.clone(),
+            id: view.id.clone(),
+            stage: view.stage.clone(),
+            summary: view.operation_summary,
+        });
     }
+    publish(Update::AiHubInstallPreview {
+        category: view.category,
+        id: view.id,
+        token: view.token,
+        summary: view.summary,
+        error: view.error,
+        stage: view.stage,
+        can_install: view.can_install,
+        operation_id: view.operation_id,
+    });
+}
+
+fn publish_native_download(
+    state: &neuromita::ai_runtime::native_service::NativeDownloadStatus,
+    publish: &impl Fn(Update),
+) {
+    let view = NativeDownloadPresenter::status(state);
+    publish(Update::NativeDownloadStatus {
+        summary: view.summary,
+        percent: view.percent,
+        active: view.active,
+    });
+}
+
+async fn character_debug_snapshot(api: &GuiPresenter, character: CharacterId) -> Update {
+    let result = neuromita::presentation::project_character_debug(
+        &api.characters,
+        api.settings.as_ref(),
+        api.prompts.as_deref(),
+        character,
+    )
     .await;
     match result {
         Ok(fields) => Update::CharacterDebug {
@@ -1987,63 +1377,4 @@ async fn hardware_snapshot() -> Update {
                 },
             );
     Update::Hardware(neuromita::presentation::hardware::HardwarePresenter::present(inventory))
-}
-
-#[cfg(test)]
-mod speech_dispatch_tests {
-    use super::*;
-
-    #[test]
-    fn manual_speech_does_not_trigger_reply() {
-        let mut settings = AsrPreferences::default();
-        assert_eq!(dispatch_policy(&settings), None);
-        settings.instant_send = true;
-        settings.delayed_send = false;
-        assert_eq!(dispatch_policy(&settings), Some(Duration::ZERO));
-        settings.delayed_send = true;
-        settings.send_delay_ms = 2400;
-        assert_eq!(
-            dispatch_policy(&settings),
-            Some(Duration::from_millis(2400))
-        );
-    }
-
-    #[tokio::test]
-    async fn speech_sink_only_delivers_transcripts() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let captured = ChatOrigin {
-            character: CharacterId::Crazy,
-            selection_revision: 4,
-        };
-        let sink = speech_conversation(&tx, captured);
-        let stream = neuromita::audio::ticket::SpeechStream::new(CancellationToken::new());
-        let ticket = stream.ticket();
-        let transcript = Transcript {
-            text: "spoken words".into(),
-            language: None,
-        };
-        sink.reply(&ticket, &transcript).await.unwrap();
-        sink.reply(&ticket, &transcript).await.unwrap();
-        let (origin, transcript) = rx.recv().await.unwrap();
-        assert_eq!(transcript.text, "spoken words");
-        assert_eq!(origin, captured);
-        assert!(rx.try_recv().is_err(), "duplicate ticket must not requeue");
-
-        let stale = stream.ticket();
-        stream.invalidate();
-        sink.reply(&stale, &transcript).await.unwrap();
-        assert!(rx.try_recv().is_err(), "reset ticket must not enqueue");
-
-        let fresh = stream.ticket();
-        sink.reply(&fresh, &transcript).await.unwrap();
-        let (fresh_origin, fresh_transcript) = rx.recv().await.unwrap();
-        assert_eq!(fresh_origin, captured);
-        assert_eq!(fresh_transcript.text, "spoken words");
-        assert!(!chat_fence::accepts(
-            origin.character.index() as i32,
-            origin.selection_revision,
-            CharacterId::Crazy.index() as i32,
-            6,
-        ));
-    }
 }

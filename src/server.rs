@@ -19,16 +19,20 @@ use uuid::Uuid;
 
 use crate::{
     character::CharacterId,
+    generation::PresetId,
     identity::EventId,
     lifecycle::Lifecycle,
-    presentation::{PresenterProbe, PresenterSurface},
+    presentation::{
+        PresenterAction, PresenterActionResult, PresenterProbe, PresenterRead, PresenterSurface,
+        PresenterWrite,
+    },
     request::{
         DiagnosticLookupError, DiagnosticScope, DiagnosticSection, InitiateRequest,
         ProcessingStage, ReactRequest, ReplyRequest, RequestHandle, RequestId, RequestOutcome,
         RequestSnapshot, RequestSource, RequestState, SubmitError,
     },
     runtime::{self, ApiBindings},
-    settings::{SettingsError, VoiceSettings, Volume},
+    settings::{PresetSettings, SettingsError, VoiceSettings, Volume},
     timeline::conversation::{ConversationAudience, ConversationMessage, ConversationSpeaker},
 };
 
@@ -220,15 +224,37 @@ macro_rules! commands {
 
 commands! {
     Ping {}, Methods {}, ServerStatus {},
+    PresenterAction {
+        action: PresenterAction,
+    },
+    PresenterAdminRead { query: PresenterRead },
+    PresenterAdminWrite { change: PresenterWrite },
+    PresenterConversation {
+        character: CharacterId,
+        #[serde(default)]
+        include_content: bool,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
     PresenterInspect {
         surface: PresenterSurface,
         #[serde(default)]
         character: Option<CharacterId>,
     },
+    GameLinkInspect {
+        #[serde(default)]
+        session_id: Option<Uuid>,
+        #[serde(default)]
+        request_id: Option<Uuid>,
+    },
     DebugInspect {
         scope: DebugScope,
         #[serde(default)]
         character: Option<CharacterId>,
+        #[serde(default)]
+        event_id: Option<Uuid>,
+        #[serde(default)]
+        request_id: Option<Uuid>,
     },
     PublishMessage {
         event_id: Uuid,
@@ -282,6 +308,11 @@ commands! {
     SetVolume {
         value: Volume,
     },
+    SetActivePreset {
+        preset_id: u32,
+        #[serde(default)]
+        expected_revision: Option<u64>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -292,6 +323,9 @@ enum DebugScope {
     Timeline,
     Character,
     Requests,
+    Request,
+    Presets,
+    Onboarding,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -574,7 +608,8 @@ async fn client(
                 }
                 continue;
             }
-            let track = matches!(envelope.command, Command::PublishMessage { .. } | Command::Reply { .. } | Command::React { .. } | Command::Initiate { .. });
+            let track = matches!(envelope.command, Command::PublishMessage { .. } | Command::Reply { .. } | Command::React { .. } | Command::Initiate { .. })
+                || matches!(&envelope.command, Command::PresenterAction { action } if action.generation());
             let eviction = if track && receipts.len() >= config.receipt_capacity.get() {
                 match receipts.iter().position(|receipt| match &receipt.result {
                     ReceiptResult::Published(_) => true,
@@ -600,6 +635,78 @@ async fn client(
                         "limits":{"max_clients":config.max_clients, "outbound_capacity":config.outbound_capacity,
                             "max_command_bytes":config.max_command_bytes, "receipt_capacity":config.receipt_capacity}}), &stop).await?;
                 }
+                Command::PresenterAction { action } => {
+                    let result = match &presenter {
+                        Some(presenter) => presenter.execute(action).await,
+                        None => Err("application presenter is not attached".into()),
+                    };
+                    match result {
+                        Ok(PresenterActionResult::Request(handle)) => {
+                            if let Some(index) = eviction { receipts.remove(index); }
+                            send(&outbound, json!({"type":"accepted","command_id":envelope.command_id,
+                                "request_id":handle.id().0,"replayed":false,"source":"gui_presenter"}), &stop).await?;
+                            receipts.push_back(Receipt { command_id: envelope.command_id, fingerprint,
+                                result: ReceiptResult::Generation(handle.clone()) });
+                            let outbound = outbound.clone();
+                            let stop = stop.clone();
+                            observers.spawn(async move {
+                                let mut observer = handle.observe();
+                                loop {
+                                    let snapshot = tokio::select! {
+                                        biased;
+                                        _ = stop.cancelled() => break,
+                                        snapshot = observer.next() => match snapshot { Ok(Some(snapshot)) => snapshot, _ => break }
+                                    };
+                                    if send(&outbound, status(&snapshot), &stop).await.is_err() { break; }
+                                }
+                            });
+                        }
+                        Ok(PresenterActionResult::Snapshot(result)) => {
+                            send(&outbound, json!({"type":"presenter_action","command_id":envelope.command_id,
+                                "result":result}), &stop).await?;
+                        }
+                        Err(message) => {
+                            send(&outbound, error_response(Some(envelope.command_id),
+                                ErrorCode::InvalidValue, message), &stop).await?;
+                        }
+                    }
+                }
+                Command::PresenterAdminRead { query } => {
+                    let result = match &presenter {
+                        Some(presenter) => presenter.admin_read(query).await,
+                        None => Err("application presenter is not attached".into()),
+                    };
+                    let response = match result {
+                        Ok(snapshot) => json!({"type":"presenter_admin_read", "command_id":envelope.command_id,
+                            "snapshot":snapshot}),
+                        Err(error) => error_response(Some(envelope.command_id),ErrorCode::InvalidValue,error),
+                    };
+                    send(&outbound, response, &stop).await?;
+                }
+                Command::PresenterAdminWrite { change } => {
+                    let result = match &presenter {
+                        Some(presenter) => presenter.admin_write(change).await,
+                        None => Err("application presenter is not attached".into()),
+                    };
+                    let response = match result {
+                        Ok(snapshot) => json!({"type":"presenter_admin_write", "command_id":envelope.command_id,
+                            "result":snapshot}),
+                        Err(error) => error_response(Some(envelope.command_id),ErrorCode::InvalidValue,error),
+                    };
+                    send(&outbound, response, &stop).await?;
+                }
+                Command::PresenterConversation { character, include_content, limit } => {
+                    let result = match &presenter {
+                        Some(presenter) => presenter.conversation_snapshot(character, limit.unwrap_or(40), include_content).await,
+                        None => Err("application presenter is not attached".into()),
+                    };
+                    let response = match result {
+                        Ok(snapshot) => json!({"type":"presenter_conversation", "command_id":envelope.command_id,
+                            "snapshot":snapshot}),
+                        Err(error) => error_response(Some(envelope.command_id),ErrorCode::InvalidValue,error),
+                    };
+                    send(&outbound, response, &stop).await?;
+                }
                 Command::PresenterInspect { surface, character } => {
                     let response = match &presenter {
                         Some(presenter) => match presenter.inspect(surface, character, &server) {
@@ -613,15 +720,46 @@ async fn client(
                     };
                     send(&outbound, response, &stop).await?;
                 }
-                Command::DebugInspect { scope, character } => {
+                Command::GameLinkInspect { session_id, request_id } => {
+                    if request_id.is_some() && session_id.is_none() {
+                        send(&outbound, error_response(Some(envelope.command_id),
+                            ErrorCode::InvalidValue, "request_id requires session_id"), &stop).await?;
+                        continue;
+                    }
+                    let snapshot = match &api.game_link {
+                        Some(game) => game.inspection(session_id, request_id),
+                        None => json!({"enabled":false,"source":"game_link_protocol_session_owner",
+                            "evidence_level":"core_gamelink_tcp_only", "full_stack_e2e_verified":false}),
+                    };
+                    send(&outbound, json!({"type":"game_link_inspect", "command_id":envelope.command_id,
+                        "snapshot":snapshot}), &stop).await?;
+                }
+                Command::DebugInspect { scope, character, event_id, request_id } => {
+                    let invalid_fields = match scope {
+                        DebugScope::Character => request_id.is_some()
+                            || (event_id.is_some() && character.is_none()),
+                        DebugScope::Request => request_id.is_none()
+                            || character.is_some() || event_id.is_some(),
+                        _ => character.is_some() || event_id.is_some() || request_id.is_some(),
+                    };
+                    if invalid_fields {
+                        send(&outbound, error_response(Some(envelope.command_id),
+                            ErrorCode::InvalidValue, "parameters do not match inspection scope"), &stop).await?;
+                        continue;
+                    }
                     let snapshot = match scope {
                         DebugScope::Capabilities => Ok(json!({
                             "protocol": "local_control_jsonl_v1",
-                            "capabilities": ["lifecycle", "timeline", "character", "requests"],
-                            "presenter_surfaces": ["chat", "ai_runtime", "connections"],
+                            "capabilities": ["lifecycle", "timeline", "character", "requests", "presets", "onboarding"],
+                            "presenter_surfaces": ["chat", "ai_runtime", "connections", "speech", "releases", "audio_input", "voice", "guide", "presets", "ai_hub_install"],
+                            "presenter_action": true,
+                            "presenter_conversation": true,
+                            "character_event_lookup": true,
+                            "request_id_lookup": true,
+                            "game_link_session_delivery_lookup": true,
                             "presenter_requires_core_lifecycle": true,
                             "server_authorized_deep_writes": false,
-                            "mutating_commands": ["publish_message", "reply", "react", "initiate", "cancel", "set_volume"],
+                            "mutating_commands": ["publish_message", "reply", "react", "initiate", "cancel", "set_volume", "set_active_preset"],
                             "acceptance_issue": 442,
                             "evidence_level": "core_ipc_only",
                             "full_stack_e2e_verified": false,
@@ -636,6 +774,7 @@ async fn client(
                             };
                             Ok(json!({
                                 "core_phase": phase,
+                                "core_instance_id": api.core_instance_id,
                                 "local_control_running": state.running,
                                 "connected_clients": state.connected_clients,
                                 "accepted_connections": state.accepted_connections,
@@ -666,14 +805,22 @@ async fn client(
                                         match at {
                                             Err(error) => Err(error),
                                             Ok(at) => match tokio::time::timeout(std::time::Duration::from_secs(3), handle.get_context(at)).await {
-                                                Ok(Ok(view)) => Ok(json!({
-                                                    "character": character,
-                                                    "branch_id": at.branch_id,
-                                                    "head_sequence": at.through,
-                                                    "visible_messages": view.view.count(),
-                                                    "visible_world_events": view.view.world_events().len(),
-                                                    "privacy": "counts only; no message content or hidden facts",
-                                                })),
+                                                Ok(Ok(view)) => {
+                                                    let messages = view.view.messages();
+                                                    let world = view.view.world_events();
+                                                    let visible = event_id.map(|id| messages.iter().any(|m| m.event_id.0 == id)
+                                                        || world.iter().any(|m| m.event_id.0 == id));
+                                                    Ok(json!({
+                                                        "character": character,
+                                                        "branch_id": at.branch_id,
+                                                        "head_sequence": at.through,
+                                                        "visible_messages": messages.len(),
+                                                        "visible_world_events": world.len(),
+                                                        "queried_event_id": event_id,
+                                                        "event_visible": visible,
+                                                        "privacy": "observer-only visibility projection; no payload or hidden-fact inventory",
+                                                    }))
+                                                },
                                                 Ok(Err(_)) => Err("character context unavailable"),
                                                 Err(_) => Err("character context timed out"),
                                             },
@@ -682,6 +829,32 @@ async fn client(
                                 },
                             }
                         }
+                        DebugScope::Onboarding => api.settings.snapshot_all()
+                            .map(|snapshot| json!({
+                                "settings_revision":snapshot.revision,
+                                "persisted_revision":snapshot.persisted_revision,
+                                "guide_level":snapshot.values.onboarding.guide_level,
+                                "guide_completed":snapshot.values.onboarding.guide_completed,
+                                "guide_page":snapshot.values.onboarding.guide_page,
+                                "eula_accepted":snapshot.values.onboarding.eula_accepted,
+                                "privacy":"read-only settings section; no filesystem or GUI evidence",
+                            })).map_err(|_| "settings unavailable"),
+                        DebugScope::Presets => api.settings.snapshot_all()
+                            .map(|snapshot| {
+                                let entries = api.presets.list().into_iter().map(|(id, record)| {
+                                    json!({"id":id.0, "name":record.name})
+                                }).collect::<Vec<_>>();
+                                json!({
+                                    "active_preset_id":snapshot.values.presets.active.0,
+                                    "settings_revision":snapshot.revision,
+                                    "presets": entries,
+                                    "runtime_bootstrap_preset_id":0,
+                                    "privacy":"no credentials, endpoints or provider configuration",
+                                })
+                            }).map_err(|_| "settings unavailable"),
+                        DebugScope::Request => presenter.as_ref()
+                            .map(|probe| probe.request_inspect(request_id.expect("validated request ID")))
+                            .ok_or("presenter projection unavailable"),
                         DebugScope::Requests => Ok(json!({
                             "ownership": "connection_local_receipts_only",
                             "tracked": receipts.iter().map(|receipt| match &receipt.result {
@@ -812,6 +985,23 @@ async fn client(
                     let response = match api.settings.snapshot_all() {
                         Ok(snapshot) => json!({"type":"settings","command_id":envelope.command_id,"revision":snapshot.revision,"settings":snapshot.values}),
                         Err(error) => error_response(Some(envelope.command_id), settings_code(&error), error),
+                    };
+                    send(&outbound, response, &stop).await?;
+                }
+                Command::SetActivePreset { preset_id, expected_revision } => {
+                    let id = PresetId(preset_id);
+                    let response = if !api.presets.contains_id(id) {
+                        error_response(Some(envelope.command_id), ErrorCode::InvalidValue, "preset ID not found in catalog")
+                    } else {
+                        let changed = match expected_revision {
+                            Some(expected) => api.settings.replace::<PresetSettings>(expected, PresetSettings { active: id }),
+                            None => api.settings.edit::<PresetSettings>(|preset| preset.active = id),
+                        };
+                        match changed {
+                            Ok(snapshot) => json!({"type":"preset_selected","command_id":envelope.command_id,
+                                "active_preset_id":snapshot.value.active.0,"revision":snapshot.revision}),
+                            Err(error) => error_response(Some(envelope.command_id), settings_code(&error), error),
+                        }
                     };
                     send(&outbound, response, &stop).await?;
                 }

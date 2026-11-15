@@ -91,6 +91,7 @@ impl<T: Clone + PartialEq> PropertyObserver<T> {
     }
 }
 
+#[derive(Clone)]
 pub struct VoiceSettingsPresenter {
     pub volume: BoundProperty<Volume>,
     pub in_launcher: BoundProperty<bool>,
@@ -127,6 +128,7 @@ impl TtsSettingsPresenter {
     }
 }
 
+#[derive(Clone)]
 pub struct PresetsSettingsPresenter {
     pub active: BoundProperty<PresetId>,
 }
@@ -314,6 +316,7 @@ impl CharactersSettingsPresenter {
     }
 }
 
+#[derive(Clone)]
 pub struct OnboardingSettingsPresenter {
     pub guide_level: BoundProperty<GuideLevel>,
     pub guide_page: BoundProperty<u8>,
@@ -328,6 +331,11 @@ pub struct InterfaceSettingsPresenter {
 }
 
 impl InterfaceSettingsPresenter {
+    pub fn set_font_size(&self, size: u16) -> Result<(), SettingsError> {
+        self.owner
+            .edit::<InterfaceSettings>(|settings| settings.font_size = size)
+            .map(|_| ())
+    }
     pub fn set_visible(&self, area: SettingsArea, visible: bool) -> Result<(), SettingsError> {
         self.owner
             .edit::<InterfaceSettings>(|settings| settings.visibility.set_visible(area, visible))

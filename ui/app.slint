@@ -176,6 +176,7 @@ export component AppWindow inherits Window {
     callback onboarding-accept();
     callback onboarding-reject();
     callback chat-send(string);
+    callback chat-draft-changed(string);
     callback chat-attach(string, string);
     callback chat-cancel(string);
     callback chat-retry(string);
@@ -271,6 +272,7 @@ export component AppWindow inherits Window {
                 draft <=> root.chat-draft; attachment-path <=> root.chat-attachment-path;
                 model-input <=> root.chat-model-input; follow-tail <=> root.chat-follow-tail;
                 send(text) => { root.chat-send(text); }
+                draft-changed(text) => { root.chat-draft-changed(text); }
                 attach(text, path) => { root.chat-attach(text, path); }
                 cancel(id) => { root.chat-cancel(id); }
                 retry(id) => { root.chat-retry(id); }

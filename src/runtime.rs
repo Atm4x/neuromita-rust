@@ -17,6 +17,7 @@ pub enum ApplicationStatus {
 }
 
 pub(crate) struct ApiBindings {
+    pub(crate) core_instance_id: Uuid,
     pub(crate) chat: Arc<ChatApiState>,
     pub(crate) timeline: Arc<Mutex<crate::timeline::SessionTimeline>>,
     pub(crate) characters: CharacterRegistry,
@@ -25,6 +26,7 @@ pub(crate) struct ApiBindings {
     pub(crate) settings: Arc<SettingsOwner>,
     pub(crate) presets: Arc<PresetCatalog>,
     pub(crate) games: Arc<GamePolicy>,
+    pub(crate) game_link: Option<crate::game_link::GameLinkHandle>,
     pub(crate) reminders: Arc<crate::reminders::RemindersHandle>,
 }
 

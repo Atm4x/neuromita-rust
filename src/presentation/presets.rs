@@ -72,6 +72,7 @@ pub trait PresetsApi: Send + Sync {
     fn require(&self, id: PresetId) -> Result<(), PresetCatalogError>;
 }
 
+#[derive(Clone)]
 pub struct PresetsPresenter {
     catalog: Arc<PresetCatalog>,
 }
@@ -552,6 +553,16 @@ impl PresetsPresenter {
         self.catalog.update_connection(id, edit)
     }
 
+    pub fn update_connection_checked(
+        &self,
+        id: PresetId,
+        expected_revision: u64,
+        edit: crate::generation::PresetConnectionEdit,
+    ) -> Result<(), PresetCatalogError> {
+        self.catalog
+            .update_connection_checked(id, Some(expected_revision), edit)
+    }
+
     pub fn update(&self, id: PresetId, record: PresetRecord) -> Result<(), PresetCatalogError> {
         self.catalog.update(id, record)
     }
@@ -596,6 +607,51 @@ impl PresetsApi for PresetsPresenter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn presenter_update_connection_revision_fence_is_atomic() {
+        let presenter = PresetsPresenter::new(Arc::new(PresetCatalog::new(Default::default())));
+        let (id, _) = presenter.create_unconfigured().unwrap();
+        let revision = presenter.snapshot().revision;
+        presenter
+            .update_connection_checked(
+                id,
+                revision,
+                crate::generation::PresetConnectionEdit {
+                    key: None,
+                    name: "First".into(),
+                    connection: None,
+                },
+            )
+            .unwrap();
+        let changed = presenter.snapshot();
+        assert_eq!(changed.revision, revision + 1);
+        assert_eq!(
+            changed.records.iter().find(|v| v.id == id).unwrap().name,
+            "First"
+        );
+        let rejected = presenter.update_connection_checked(
+            id,
+            revision,
+            crate::generation::PresetConnectionEdit {
+                key: None,
+                name: "Stale".into(),
+                connection: None,
+            },
+        );
+        assert!(rejected.is_err());
+        assert_eq!(presenter.snapshot().revision, changed.revision);
+        assert_eq!(
+            presenter
+                .snapshot()
+                .records
+                .iter()
+                .find(|v| v.id == id)
+                .unwrap()
+                .name,
+            "First"
+        );
+    }
 
     #[test]
     fn presenter_snapshot_preserves_catalog_values() {

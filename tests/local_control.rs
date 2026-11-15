@@ -1,4 +1,13 @@
-use std::{future::Future, net::SocketAddr, num::NonZeroUsize, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    net::SocketAddr,
+    num::NonZeroUsize,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use neuromita::{
     api::ChatApi,
@@ -13,7 +22,10 @@ use neuromita::{
     request::UserInput,
     request::{RequestHandle, RequestId, RequestOutcome, RequestSource, RequestState},
     server::{ServerConfig, ServerHandle, ServerLifecycle, ServerSnapshot},
-    settings::{SettingsApi, VoiceSettings, Volume},
+    settings::{
+        MemorySettingsRepository, PersistenceState, SettingsApi, SettingsError, SettingsRepository,
+        StoredSettings, VoiceSettings, Volume,
+    },
     voice::{AudioArtifact, AudioFormat, VoiceFuture, VoiceOptions, VoiceProvider},
 };
 use serde_json::{Value, json};
@@ -86,6 +98,42 @@ impl VoiceProvider for FixtureVoice {
     }
 }
 
+struct FailOnDemandSettingsRepository {
+    inner: MemorySettingsRepository,
+    armed: AtomicBool,
+    failures: AtomicUsize,
+}
+
+impl FailOnDemandSettingsRepository {
+    fn new() -> Self {
+        Self {
+            inner: MemorySettingsRepository::new(),
+            armed: AtomicBool::new(false),
+            failures: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl SettingsRepository for FailOnDemandSettingsRepository {
+    fn migrate(&self) -> Result<(), SettingsError> {
+        self.inner.migrate()
+    }
+
+    fn load(&self) -> Result<StoredSettings, SettingsError> {
+        self.inner.load()
+    }
+
+    fn save(&self, settings: &StoredSettings) -> Result<(), SettingsError> {
+        if self.armed.swap(false, Ordering::SeqCst) {
+            self.failures.fetch_add(1, Ordering::SeqCst);
+            return Err(SettingsError::Storage(
+                "injected settings write failure".into(),
+            ));
+        }
+        self.inner.save(settings)
+    }
+}
+
 struct Fixture {
     app: ApplicationLifecycle,
     calls: mpsc::UnboundedReceiver<GenerationCall>,
@@ -105,6 +153,52 @@ impl Fixture {
         queue: usize,
         configure: impl FnOnce(&mut ServerConfig),
         enabled: bool,
+    ) -> Self {
+        Self::with_voice_and_hub(queue, configure, enabled, None).await
+    }
+
+    async fn with_ai_hub(root: std::path::PathBuf) -> Self {
+        Self::with_voice_and_hub(8, |_| {}, false, Some(root)).await
+    }
+
+    async fn with_remote_voice() -> Self {
+        Self::with_voice_hub_telegram(8, |_| {}, false, None, false, true, None, None).await
+    }
+
+    async fn with_telegram() -> Self {
+        Self::with_voice_hub_telegram(8, |_| {}, false, None, true, false, None, None).await
+    }
+
+    async fn with_prompt_catalog(root: std::path::PathBuf) -> Self {
+        Self::with_voice_hub_telegram(8, |_| {}, false, None, false, false, None, Some(root)).await
+    }
+
+    async fn with_settings_repository(repository: Arc<dyn SettingsRepository>) -> Self {
+        Self::with_voice_hub_telegram(8, |_| {}, false, None, false, false, Some(repository), None)
+            .await
+    }
+
+    async fn with_voice_and_hub(
+        queue: usize,
+        configure: impl FnOnce(&mut ServerConfig),
+        enabled: bool,
+        hub_root: Option<std::path::PathBuf>,
+    ) -> Self {
+        Self::with_voice_hub_telegram(
+            queue, configure, enabled, hub_root, false, false, None, None,
+        )
+        .await
+    }
+
+    async fn with_voice_hub_telegram(
+        queue: usize,
+        configure: impl FnOnce(&mut ServerConfig),
+        enabled: bool,
+        hub_root: Option<std::path::PathBuf>,
+        telegram: bool,
+        remote_voice: bool,
+        settings_repository: Option<Arc<dyn SettingsRepository>>,
+        prompt_root: Option<std::path::PathBuf>,
     ) -> Self {
         let serial = APPLICATION.lock().await;
         let preset = GenerationPreset::new(ProviderTemplate::Gemini(
@@ -130,8 +224,32 @@ impl Fixture {
             "127.0.0.1:0".parse().unwrap(),
         );
         configure(&mut config.server);
+        if let Some(root) = prompt_root {
+            config = config.with_prompt_catalog(neuromita::prompts::PromptCatalog::new(root));
+        }
+        if let Some(repository) = settings_repository {
+            config.settings.repository = repository;
+        }
+        if let Some(root) = hub_root {
+            config.ai_hub_install_root = Some(root);
+        }
         if enabled {
             config.voice = Arc::new(FixtureVoice);
+        }
+        if telegram {
+            let voice = Arc::new(neuromita::telegram_voice::DynamicTelegramVoice::default());
+            config.telegram_admin = Some(Arc::new(neuromita::telegram_admin::TelegramAdmin::new(
+                std::env::temp_dir().join(format!("nm-telegram-ipc-{}", Uuid::new_v4())),
+                voice.clone(),
+            )));
+            config.voice = voice;
+        }
+        if remote_voice {
+            config.remote_voice_store = Some(
+                std::env::temp_dir()
+                    .join(format!("nm-remote-voice-ipc-{}", Uuid::new_v4()))
+                    .join("remote_voice.rust.json"),
+            );
         }
         config.game_link = Some(GameLinkConfig::new("127.0.0.1:0".parse().unwrap()));
         let app = bounded(ApplicationLifecycle::start(config)).await.unwrap();
@@ -372,7 +490,12 @@ async fn discovery_matches_executable_commands_and_all_control_replies_are_corre
         "ping",
         "methods",
         "server_status",
+        "presenter_action",
+        "presenter_admin_read",
+        "presenter_admin_write",
+        "presenter_conversation",
         "presenter_inspect",
+        "game_link_inspect",
         "debug_inspect",
         "publish_message",
         "reply",
@@ -384,6 +507,7 @@ async fn discovery_matches_executable_commands_and_all_control_replies_are_corre
         "diagnostics_errors",
         "settings",
         "set_volume",
+        "set_active_preset",
     ];
     assert_eq!(catalog["methods"], json!(expected));
     for name in expected {
@@ -435,11 +559,18 @@ async fn discovery_matches_executable_commands_and_all_control_replies_are_corre
                 cmd["character"] = json!("Crazy");
             }
             "debug_inspect" => cmd["scope"] = json!("capabilities"),
+            "presenter_action" => cmd["action"] = json!({"action":"voice_set_volume","volume":42}),
+            "presenter_admin_read" => cmd["query"] = json!({"query":"settings","area":"voice"}),
+            "presenter_admin_write" => {
+                cmd["change"] = json!({"change":"settings","field":"voice_volume","value":42})
+            }
+            "presenter_conversation" => cmd["character"] = json!("Crazy"),
             "presenter_inspect" => {
                 cmd["surface"] = json!("chat");
                 cmd["character"] = json!("Crazy");
             }
             "set_volume" => cmd["value"] = json!(42),
+            "set_active_preset" => cmd["preset_id"] = json!(0),
             _ => {}
         }
         client.send(cmd.clone()).await;
@@ -449,6 +580,7 @@ async fn discovery_matches_executable_commands_and_all_control_replies_are_corre
             "reply" | "react" | "initiate" => "accepted",
             "publish_message" => "published",
             "set_volume" => "settings_applied",
+            "set_active_preset" => "preset_selected",
             other => other,
         };
         assert_eq!(response["type"], response_type, "{name}: {response}");
@@ -1463,6 +1595,34 @@ async fn game_link_captures_world_context_at_admission_and_restores_revision() {
 }
 
 #[tokio::test]
+async fn lifecycle_probe_identifies_distinct_real_core_instances() {
+    let first = Fixture::start(|_| {}).await;
+    let mut first_client = first.connect().await;
+    let query = command("debug_inspect");
+    let mut command = query.clone();
+    command["scope"] = json!("lifecycle");
+    first_client.send(command.clone()).await;
+    let before = first_client
+        .until(|frame| frame["command_id"] == command["command_id"])
+        .await;
+    let first_id = uuid(&before["snapshot"]["core_instance_id"]);
+    assert_eq!(before["snapshot"]["core_phase"], "running");
+    drop(first_client);
+    first.shutdown().await;
+
+    let second = Fixture::start(|_| {}).await;
+    let mut second_client = second.connect().await;
+    second_client.send(command.clone()).await;
+    let after = second_client
+        .until(|frame| frame["command_id"] == command["command_id"])
+        .await;
+    let second_id = uuid(&after["snapshot"]["core_instance_id"]);
+    assert_ne!(first_id, second_id);
+    assert_eq!(after["snapshot"]["core_phase"], "running");
+    second.shutdown().await;
+}
+
+#[tokio::test]
 async fn game_link_audio_chunks_delivery_ack_and_ptt_survive_resume() {
     let mut fixture = Fixture::with_voice(8, |_| {}, true).await;
     let address = fixture.app.game_link().unwrap().address();
@@ -1496,6 +1656,54 @@ async fn game_link_audio_chunks_delivery_ack_and_ptt_survive_resume() {
     let ack_id = Uuid::new_v4();
     game.send(json!({"command_id":ack_id,"command":"acknowledge_result","request_id":request,"event_id":event,"applied":true})).await;
     assert_eq!(game.until("result_acknowledged").await["applied"], true);
+    let mut inspector = fixture.connect().await;
+    let mut inspect = command("game_link_inspect");
+    inspect["session_id"] = json!(session);
+    inspect["request_id"] = json!(request);
+    inspector.send(inspect.clone()).await;
+    let result = inspector
+        .until(|frame| frame["command_id"] == inspect["command_id"])
+        .await;
+    assert_eq!(result["type"], "game_link_inspect");
+    assert_eq!(
+        result["snapshot"]["source"],
+        "game_link_protocol_session_owner"
+    );
+    assert_eq!(result["snapshot"]["session"]["observed"], true);
+    assert_eq!(result["snapshot"]["session"]["delivery_acks"], 1);
+    assert_eq!(result["snapshot"]["session"]["resume_count"], 0);
+    assert_eq!(result["snapshot"]["request"]["request_id"], json!(request));
+    assert_eq!(result["snapshot"]["request"]["phase"], "finished");
+    assert_eq!(result["snapshot"]["request"]["event_id"], json!(event));
+    assert_eq!(
+        result["snapshot"]["request"]["delivery_ack"]["applied"],
+        true
+    );
+    assert_eq!(result["snapshot"]["request"]["playback_phase"], "completed");
+    assert_eq!(result["snapshot"]["full_stack_e2e_verified"], false);
+    assert!(!result.to_string().contains("audio output"));
+    assert!(!result.to_string().contains("RIFF-fixture-wave"));
+    assert!(!result.to_string().contains(token.to_string().as_str()));
+
+    let mut no_session = command("game_link_inspect");
+    no_session["request_id"] = json!(request);
+    inspector.send(no_session.clone()).await;
+    let invalid = inspector
+        .until(|frame| frame["command_id"] == no_session["command_id"])
+        .await;
+    assert_eq!(invalid["type"], "error");
+    assert_eq!(invalid["code"], "invalid_value");
+
+    let mut cross = command("game_link_inspect");
+    cross["session_id"] = json!(Uuid::new_v4());
+    cross["request_id"] = json!(request);
+    inspector.send(cross.clone()).await;
+    let hidden = inspector
+        .until(|frame| frame["command_id"] == cross["command_id"])
+        .await;
+    assert_eq!(hidden["snapshot"]["session"]["observed"], false);
+    assert_eq!(hidden["snapshot"]["request"]["observed"], false);
+
     drop(game);
     let mut resumed = GameClient::connect(address).await;
     resumed.send(json!({"command_id":Uuid::new_v4(),"command":"resume","session_id":session,"session_token":token})).await;
@@ -1504,6 +1712,17 @@ async fn game_link_audio_chunks_delivery_ack_and_ptt_survive_resume() {
     assert_eq!(state["ptt"]["capture_id"], capture.to_string());
     assert_eq!(state["deliveries"][0]["ack"]["applied"], true);
     assert_eq!(state["playback"][0]["report"]["phase"], "completed");
+    inspector.send(inspect.clone()).await;
+    let after_resume = inspector
+        .until(|frame| frame["command_id"] == inspect["command_id"])
+        .await;
+    assert_eq!(
+        after_resume["snapshot"]["request"]["delivery_ack"]["applied"],
+        true
+    );
+    assert_eq!(after_resume["snapshot"]["session"]["connected"], true);
+    assert_eq!(after_resume["snapshot"]["session"]["resume_count"], 1);
+    assert_eq!(after_resume["snapshot"]["session"]["delivery_acks"], 1);
     fixture.shutdown().await;
 }
 
@@ -1960,6 +2179,96 @@ async fn tcp_replay_treats_audience_sets_as_unordered_without_losing_conflict_de
 }
 
 #[tokio::test]
+async fn typed_observer_visibility_and_request_probes_are_privacy_safe() {
+    let mut fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+    let event_id = Uuid::new_v4();
+    let mut publish = command("publish_message");
+    publish["event_id"] = json!(event_id);
+    publish["occurred_at_unix_ms"] = json!(1234);
+    publish["speaker"] = json!("player");
+    publish["content"] = json!("private payload for witnesses");
+    publish["targets"] = json!(["player"]);
+    publish["participants"] = json!(["player"]);
+    publish["seen_by"] = json!(["Crazy", "Kind"]);
+    client.send(publish.clone()).await;
+    let sent = client
+        .until(|frame| frame["command_id"] == publish["command_id"])
+        .await;
+    assert_eq!(sent["type"], "published", "{sent}");
+
+    for (observer, expected) in [("Crazy", true), ("Kind", true), ("Cappie", false)] {
+        let mut cmd = command("debug_inspect");
+        cmd["scope"] = json!("character");
+        cmd["character"] = json!(observer);
+        cmd["event_id"] = json!(event_id);
+        client.send(cmd.clone()).await;
+        let response = client
+            .until(|frame| frame["command_id"] == cmd["command_id"])
+            .await;
+        assert_eq!(response["type"], "debug_inspect", "{response}");
+        assert_eq!(response["snapshot"]["character"], observer);
+        assert_eq!(response["snapshot"]["event_visible"], expected);
+        assert_eq!(response["snapshot"]["queried_event_id"], json!(event_id));
+        assert_eq!(response["snapshot"]["head_sequence"], 1);
+        assert!(!response.to_string().contains("private payload"));
+    }
+    for bad in [
+        json!({"scope":"character","event_id":event_id}),
+        json!({"scope":"timeline","event_id":event_id}),
+        json!({"scope":"request","character":"Crazy","request_id":Uuid::new_v4()}),
+        json!({"scope":"request"}),
+    ] {
+        let mut cmd = command("debug_inspect");
+        for (key, value) in bad.as_object().unwrap() {
+            cmd[key] = value.clone();
+        }
+        client.send(cmd.clone()).await;
+        let response = client
+            .until(|frame| frame["command_id"] == cmd["command_id"])
+            .await;
+        assert_eq!(response["type"], "error", "{response}");
+        assert_eq!(response["code"], "invalid_value");
+    }
+
+    let command_id = Uuid::new_v4();
+    client
+        .send(json!({"command_id":command_id,"command":"initiate","character":"Crazy"}))
+        .await;
+    let accepted = client.accepted(command_id).await;
+    let request_id = uuid(&accepted["request_id"]);
+    let provider = fixture.call().await;
+    provider.finish("private model response");
+    let terminal = client.terminal(request_id).await;
+    assert_eq!(terminal["outcome"], "success");
+
+    let mut observed = None;
+    for _ in 0..60 {
+        let mut cmd = command("debug_inspect");
+        cmd["scope"] = json!("request");
+        cmd["request_id"] = json!(request_id);
+        client.send(cmd.clone()).await;
+        let response = client
+            .until(|frame| frame["command_id"] == cmd["command_id"])
+            .await;
+        assert_eq!(response["type"], "debug_inspect", "{response}");
+        let snapshot = &response["snapshot"];
+        assert_eq!(snapshot["request_id"], json!(request_id));
+        assert!(!response.to_string().contains("private model response"));
+        if snapshot["observed"] == true && snapshot["request"]["terminal"] == true {
+            observed = Some(response);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let response = observed.expect("terminal request should appear in existing ChatPresenter view");
+    assert_eq!(response["snapshot"]["request"]["state"], "finished");
+    assert_eq!(response["snapshot"]["request"]["outcome"], "success");
+    assert!(response["snapshot"]["request"]["event_id"].is_string());
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
 async fn debug_inspection_is_canonical_read_only_and_correlated() {
     let fixture = Fixture::start(|_| {}).await;
     let mut client = fixture.connect().await;
@@ -2060,6 +2369,204 @@ async fn agent_ipc_client_waits_for_real_core_terminal_success() {
 }
 
 #[tokio::test]
+async fn local_control_presets_inspect_and_select_use_real_catalog_and_revision() {
+    let fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+    let mut inspect = command("debug_inspect");
+    inspect["scope"] = json!("presets");
+    client.send(inspect.clone()).await;
+    let first = client
+        .until(|r| r["command_id"] == inspect["command_id"])
+        .await;
+    assert_eq!(first["type"], "debug_inspect");
+    assert_eq!(first["snapshot"]["active_preset_id"], 0);
+    assert_eq!(first["snapshot"]["runtime_bootstrap_preset_id"], 0);
+    assert!(first["snapshot"].get("credentials").is_none());
+    let revision = first["snapshot"]["settings_revision"].as_u64().unwrap();
+
+    let mut invalid = command("set_active_preset");
+    invalid["preset_id"] = json!(99999);
+    client.send(invalid.clone()).await;
+    let rejected = client
+        .until(|r| r["command_id"] == invalid["command_id"])
+        .await;
+    assert_eq!(rejected["code"], "invalid_value");
+
+    let mut conflict = command("set_active_preset");
+    conflict["preset_id"] = json!(0);
+    conflict["expected_revision"] = json!(revision + 100);
+    client.send(conflict.clone()).await;
+    let rejected = client
+        .until(|r| r["command_id"] == conflict["command_id"])
+        .await;
+    assert_eq!(rejected["code"], "settings_conflict");
+
+    let mut select = command("set_active_preset");
+    select["preset_id"] = json!(0);
+    select["expected_revision"] = json!(revision);
+    client.send(select.clone()).await;
+    let selected = client
+        .until(|r| r["command_id"] == select["command_id"])
+        .await;
+    assert_eq!(selected["type"], "preset_selected");
+    assert_eq!(selected["active_preset_id"], 0);
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn presenter_admin_preset_revision_and_native_service_boundary() {
+    let fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+    let mut presets = command("presenter_inspect");
+    presets["surface"] = json!("presets");
+    client.send(presets.clone()).await;
+    let snapshot = client
+        .until(|r| r["command_id"] == presets["command_id"])
+        .await;
+    assert_eq!(snapshot["type"], "presenter_inspect", "{snapshot}");
+    assert_eq!(snapshot["snapshot"]["source"], "presets_presenter");
+    assert!(snapshot["snapshot"]["revision"].is_u64());
+    assert!(snapshot["snapshot"].to_string().find("api_key").is_none());
+
+    let mut native = command("presenter_admin_read");
+    native["query"] = json!({"query":"native_models","refresh":false});
+    client.send(native.clone()).await;
+    let response = client
+        .until(|r| r["command_id"] == native["command_id"])
+        .await;
+    assert_eq!(response["type"], "error");
+    assert_eq!(response["code"], "invalid_value");
+
+    let mut refresh = command("presenter_action");
+    refresh["action"] = json!({"action":"native_refresh"});
+    client.send(refresh.clone()).await;
+    let response = client
+        .until(|r| r["command_id"] == refresh["command_id"])
+        .await;
+    assert_eq!(response["type"], "error");
+    assert_eq!(response["code"], "invalid_value");
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn mcp_ai_hub_preview_confirm_observes_real_owner_and_rejects_stale_plan() {
+    let root = std::env::temp_dir().join(format!("nm-ipc-ai-hub-{}", Uuid::new_v4()));
+    let fixture = Fixture::with_ai_hub(root.clone()).await;
+    let mut client = fixture.connect().await;
+
+    let mut inspect = command("presenter_inspect");
+    inspect["surface"] = json!("ai_hub_install");
+    client.send(inspect.clone()).await;
+    let initial = client
+        .until(|r| r["command_id"] == inspect["command_id"])
+        .await;
+    assert_eq!(initial["type"], "presenter_inspect", "{initial}");
+    assert_eq!(initial["snapshot"]["status"]["stage"], "idle");
+    let revision = initial["snapshot"]["status"]["revision"].as_u64().unwrap();
+
+    let mut preview = command("presenter_action");
+    preview["action"] = json!({"action":"ai_hub_preview_install", "category":"tts",
+        "id":"unknown-model", "token":910});
+    client.send(preview.clone()).await;
+    let response = client
+        .until(|r| r["command_id"] == preview["command_id"])
+        .await;
+    assert_eq!(response["type"], "presenter_action", "{response}");
+    assert_eq!(response["result"]["result"]["status"]["stage"], "failed");
+    assert_eq!(
+        response["result"]["result"]["status"]["error_code"],
+        "invalid_selection"
+    );
+
+    let mut wait = command("presenter_admin_read");
+    wait["query"] = json!({"query":"wait", "target":"ai_hub_install",
+        "after_revision":revision,"timeout_ms":1000});
+    client.send(wait.clone()).await;
+    let observed = client
+        .until(|r| r["command_id"] == wait["command_id"])
+        .await;
+    assert_eq!(observed["type"], "presenter_admin_read", "{observed}");
+    assert_eq!(observed["snapshot"]["changed"], true, "{observed}");
+    assert_eq!(observed["snapshot"]["status"]["can_install"], false);
+
+    let mut confirm = command("presenter_action");
+    confirm["action"] = json!({"action":"ai_hub_confirm_install", "category":"tts",
+        "id":"unknown-model", "token":910});
+    client.send(confirm.clone()).await;
+    let denied = client
+        .until(|r| r["command_id"] == confirm["command_id"])
+        .await;
+    assert_eq!(denied["type"], "error", "{denied}");
+    assert_eq!(denied["code"], "invalid_value");
+
+    fixture.shutdown().await;
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn agent_scenario_retains_cancel_and_replay_ownership_in_one_connection() {
+    use neuromita::agent_ipc::{AgentError, run_local_control_scenario};
+    let fixture = Fixture::start(|_| {}).await;
+    let address = fixture.app.server().address();
+    let command_id = Uuid::new_v4();
+    let steps = vec![
+        json!({"command":"initiate", "character":"Crazy", "command_id":command_id}),
+        json!({"command":"cancel", "request_id":"$last_request_id"}),
+        json!({"command":"initiate", "character":"Crazy", "command_id":command_id}),
+    ];
+    let denied =
+        run_local_control_scenario(address, Duration::from_secs(5), false, steps.clone()).await;
+    assert!(matches!(denied, Err(AgentError::WriteDenied(_))));
+    let result = bounded(run_local_control_scenario(
+        address,
+        Duration::from_secs(4),
+        true,
+        steps,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(result["ok"], true, "{result}");
+    let records = result["steps"].as_array().unwrap();
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[1]["response"]["type"], "cancel");
+    assert_eq!(records[2]["response"]["replayed"], true);
+    assert_eq!(
+        records[0]["response"]["request_id"],
+        records[2]["response"]["request_id"]
+    );
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn agent_scenario_waits_for_terminal_and_follows_event_id() {
+    use neuromita::agent_ipc::run_local_control_scenario;
+    let mut fixture = Fixture::start(|_| {}).await;
+    let address = fixture.app.server().address();
+    let task = tokio::spawn(run_local_control_scenario(
+        address,
+        Duration::from_secs(4),
+        true,
+        vec![
+            json!({"command":"debug_inspect","scope":"presets"}),
+            json!({"command":"set_active_preset","preset_id":0}),
+            json!({"command":"initiate","character":"Crazy","wait_terminal":true,
+            "expect_terminal":{"state":"finished","outcome":"success"}}),
+            json!({"command":"debug_inspect","scope":"character","character":"Crazy",
+            "event_id":"$last_event_id"}),
+        ],
+    ));
+    fixture.call().await.finish("accepted conversation event");
+    let result = bounded(task).await.unwrap().unwrap();
+    assert_eq!(result["ok"], true, "{result}");
+    let records = result["steps"].as_array().unwrap();
+    assert_eq!(records.len(), 4);
+    assert_eq!(records[2]["terminal"]["outcome"], "success");
+    assert_eq!(records[3]["response"]["snapshot"]["event_visible"], true);
+    assert_eq!(records[2]["terminal"]["text"], "[redacted]");
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
 async fn optional_http_gateway_rejects_untrusted_clients_and_probes_real_core() {
     let mut fixture = Fixture::start(|_| {}).await;
     let core = fixture.app.server().address();
@@ -2116,7 +2623,11 @@ async fn optional_http_gateway_rejects_untrusted_clients_and_probes_real_core() 
 async fn mcp_stdio_probes_the_same_running_core() {
     let fixture = Fixture::start(|_| {}).await;
     let mut process = tokio::process::Command::new(env!("CARGO_BIN_EXE_neuromita-agent-mcp"))
-        .args(["--core", &fixture.app.server().address().to_string()])
+        .args([
+            "--core",
+            &fixture.app.server().address().to_string(),
+            "--core-debug",
+        ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .kill_on_drop(true)
@@ -2148,6 +2659,28 @@ async fn mcp_stdio_probes_the_same_running_core() {
             json!({"name":"inspect_core",
             "arguments":{"scope":"timeline"}}),
         ),
+        (
+            Some(5),
+            "tools/call",
+            json!({"name":"inspect_presets", "arguments":{}}),
+        ),
+        (
+            Some(6),
+            "tools/call",
+            json!({"name":"run_scenario", "arguments":{"steps":[
+                {"command":"ping"},{"command":"debug_inspect","scope":"presets"}
+            ]}}),
+        ),
+        (
+            Some(7),
+            "tools/call",
+            json!({"name":"inspect_onboarding", "arguments":{}}),
+        ),
+        (
+            Some(8),
+            "tools/call",
+            json!({"name":"inspect_gamelink", "arguments":{}}),
+        ),
     ] {
         let mut message = json!({"jsonrpc":"2.0","method":method,"params":params});
         if let Some(id) = id {
@@ -2163,13 +2696,43 @@ async fn mcp_stdio_probes_the_same_running_core() {
             let result = &response["result"];
             match id {
                 1 => assert_eq!(result["serverInfo"]["name"], "neuromita"),
-                2 => assert_eq!(result["tools"].as_array().unwrap().len(), 2),
+                2 => {
+                    let tools = result["tools"].as_array().unwrap();
+                    assert!(
+                        tools
+                            .iter()
+                            .any(|tool| tool["name"] == "presenter_character_preset")
+                    );
+                    assert!(
+                        tools
+                            .iter()
+                            .any(|tool| tool["name"] == "presenter_character_prompt")
+                    );
+                    let mut names = std::collections::HashSet::new();
+                    assert!(
+                        tools
+                            .iter()
+                            .all(|tool| names.insert(tool["name"].as_str().unwrap()))
+                    );
+                }
                 3 => {
                     let frame = &result["structuredContent"];
                     assert_eq!(frame["type"], "presenter_inspect");
                     assert_eq!(frame["snapshot"]["character"], "Crazy");
                 }
                 4 => assert_eq!(result["structuredContent"]["type"], "debug_inspect"),
+                5 => assert_eq!(
+                    result["structuredContent"]["snapshot"]["active_preset_id"],
+                    0
+                ),
+                6 => assert_eq!(result["structuredContent"]["ok"], true),
+                7 => {
+                    assert!(result["structuredContent"]["snapshot"]["guide_completed"].is_boolean())
+                }
+                8 => {
+                    assert_eq!(result["structuredContent"]["snapshot"]["enabled"], true);
+                    assert_eq!(result["structuredContent"]["type"], "game_link_inspect");
+                }
                 _ => unreachable!(),
             }
         }
@@ -2346,5 +2909,1540 @@ async fn presenter_ipc_projects_live_gui_presenters_without_private_payloads() {
     ])
     .await
     .unwrap();
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn mcp_presenter_controls_use_actual_gui_owners_and_snapshot_observations() {
+    let mut fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+
+    for (action, surface, key, value) in [
+        (
+            json!({"action":"voice_set_volume","volume":63}),
+            "voice",
+            "volume",
+            json!(63),
+        ),
+        (
+            json!({"action":"guide_set_level","level":"advanced"}),
+            "guide",
+            "level",
+            json!("advanced"),
+        ),
+        (
+            json!({"action":"guide_set_page","page":2}),
+            "guide",
+            "page",
+            json!(2),
+        ),
+        (
+            json!({"action":"guide_set_completed","completed":true}),
+            "guide",
+            "completed",
+            json!(true),
+        ),
+    ] {
+        let mut operation = command("presenter_action");
+        operation["action"] = action;
+        client.send(operation.clone()).await;
+        let accepted = client
+            .until(|frame| frame["command_id"] == operation["command_id"])
+            .await;
+        assert_eq!(accepted["type"], "presenter_action", "{accepted}");
+        let mut inspect = command("presenter_inspect");
+        inspect["surface"] = json!(surface);
+        client.send(inspect.clone()).await;
+        let snapshot = client
+            .until(|frame| frame["command_id"] == inspect["command_id"])
+            .await;
+        assert_eq!(snapshot["snapshot"][key], value, "{snapshot}");
+    }
+
+    let mut response = command("presenter_conversation");
+    response["character"] = json!("Crazy");
+    response["limit"] = json!(20);
+    client.send(response.clone()).await;
+    let empty = client
+        .until(|frame| frame["command_id"] == response["command_id"])
+        .await;
+    assert_eq!(empty["type"], "presenter_conversation");
+    assert_eq!(empty["snapshot"]["total_visible_messages"], 0);
+
+    let mut operation = command("presenter_action");
+    operation["action"] =
+        json!({"action":"chat_reply","character":"Crazy","text":"presenter hello"});
+    client.send(operation.clone()).await;
+    let accepted = client.accepted(uuid(&operation["command_id"])).await;
+    assert_eq!(accepted["source"], "gui_presenter");
+    let request_id = uuid(&accepted["request_id"]);
+    let generation = fixture.call().await;
+    generation.finish("actual presenter answer");
+    assert_eq!(client.terminal(request_id).await["outcome"], "success");
+
+    let mut conversation = command("presenter_conversation");
+    conversation["character"] = json!("Crazy");
+    conversation["include_content"] = json!(true);
+    client.send(conversation.clone()).await;
+    let history = client
+        .until(|frame| frame["command_id"] == conversation["command_id"])
+        .await;
+    assert_eq!(history["type"], "presenter_conversation", "{history}");
+    assert!(
+        history["snapshot"]["total_visible_messages"]
+            .as_u64()
+            .unwrap()
+            >= 2
+    );
+    assert!(
+        history["snapshot"]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["content"] == "actual presenter answer")
+    );
+    assert!(
+        history["snapshot"]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["content"] == "presenter hello")
+    );
+
+    let mut no_text = command("presenter_conversation");
+    no_text["character"] = json!("Crazy");
+    client.send(no_text.clone()).await;
+    let redacted = client
+        .until(|frame| frame["command_id"] == no_text["command_id"])
+        .await;
+    assert!(!redacted.to_string().contains("actual presenter answer"));
+    assert!(!redacted.to_string().contains("presenter hello"));
+
+    let replay = operation.clone();
+    client.send(replay.clone()).await;
+    let receipt = client.accepted(uuid(&replay["command_id"])).await;
+    assert_eq!(receipt["replayed"], true);
+    assert_eq!(receipt["request_id"], accepted["request_id"]);
+    assert!(fixture.calls.try_recv().is_err());
+
+    let mut invalid = command("presenter_action");
+    invalid["action"] =
+        json!({"action":"audio_start_test","backend":"pulse","identity":"mic","secret":"injected"});
+    client.send(invalid).await;
+    assert_eq!(
+        client.error("unknown field").await["code"],
+        "invalid_command"
+    );
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn presenter_admin_reads_settings_memory_and_history_with_versioned_mutations() {
+    let fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+    let mut settings = command("presenter_admin_read");
+    settings["query"] = json!({"query":"settings","area":"voice"});
+    client.send(settings.clone()).await;
+    let read = client
+        .until(|v| v["command_id"] == settings["command_id"])
+        .await;
+    assert_eq!(read["type"], "presenter_admin_read");
+    assert_eq!(read["snapshot"]["values"]["volume"], 80);
+
+    let mut write = command("presenter_admin_write");
+    write["change"] = json!({"change":"settings","field":"voice_volume","value":55});
+    client.send(write.clone()).await;
+    assert_eq!(
+        client
+            .until(|v| v["command_id"] == write["command_id"])
+            .await["type"],
+        "presenter_admin_write"
+    );
+    assert_eq!(
+        fixture.app.presenter().settings.voice.volume.get().get(),
+        55
+    );
+
+    let mut visibility = command("presenter_admin_write");
+    visibility["change"] = json!({"change":"settings","field":"section_visibility",
+        "value":{"area":"api","visible":false}});
+    client.send(visibility.clone()).await;
+    let accepted = client
+        .until(|r| r["command_id"] == visibility["command_id"])
+        .await;
+    assert_eq!(accepted["type"], "presenter_admin_write", "{accepted}");
+    let mut interface = command("presenter_admin_read");
+    interface["query"] = json!({"query":"settings","area":"interface"});
+    client.send(interface.clone()).await;
+    let current = client
+        .until(|r| r["command_id"] == interface["command_id"])
+        .await;
+    assert_eq!(current["snapshot"]["values"]["visibility"]["api"], false);
+
+    let mut invalid_visibility = command("presenter_admin_write");
+    invalid_visibility["change"] = json!({"change":"settings","field":"section_visibility",
+        "value":{"area":"unknown","visible":true}});
+    client.send(invalid_visibility.clone()).await;
+    let rejected = client
+        .until(|r| r["command_id"] == invalid_visibility["command_id"])
+        .await;
+    assert_eq!(rejected["code"], "invalid_value", "{rejected}");
+    assert_eq!(
+        fixture
+            .app
+            .presenter()
+            .settings
+            .snapshot()
+            .unwrap()
+            .values
+            .interface
+            .visibility
+            .is_visible(neuromita::settings::SettingsArea::Api),
+        false
+    );
+
+    let mut wait = command("presenter_admin_read");
+    wait["query"] = json!({"query":"wait","target":"settings",
+        "after_revision":read["snapshot"]["revision"],"timeout_ms":100});
+    client.send(wait.clone()).await;
+    let changed = client
+        .until(|v| v["command_id"] == wait["command_id"])
+        .await;
+    assert_eq!(changed["type"], "presenter_admin_read");
+    assert_eq!(changed["snapshot"]["changed"], true);
+
+    let mut wait_again = command("presenter_admin_read");
+    wait_again["query"] = json!({"query":"wait","target":"settings",
+        "after_revision":changed["snapshot"]["revision"],"timeout_ms":10});
+    client.send(wait_again.clone()).await;
+    let timed = client
+        .until(|v| v["command_id"] == wait_again["command_id"])
+        .await;
+    assert_eq!(timed["snapshot"]["timed_out"], true);
+
+    let mut get = command("presenter_admin_read");
+    get["query"] = json!({"query":"memories","character":"Crazy","include_content":false});
+    client.send(get.clone()).await;
+    let empty = client.until(|v| v["command_id"] == get["command_id"]).await;
+    assert_eq!(empty["type"], "presenter_admin_read", "{empty}");
+    let initial = empty["snapshot"]["version"].as_str().unwrap().to_string();
+    assert_eq!(initial.len(), 64);
+    assert_eq!(empty["snapshot"]["records"].as_array().unwrap().len(), 0);
+
+    let mut add = command("presenter_admin_write");
+    add["change"] = json!({"change":"memory","character":"Crazy","expected_version":initial,
+        "commands":[{"command":"add","priority":"high","content":"admin private memory"}]});
+    client.send(add.clone()).await;
+    let applied = client.until(|v| v["command_id"] == add["command_id"]).await;
+    assert_eq!(applied["type"], "presenter_admin_write", "{applied}");
+    assert_eq!(applied["result"]["applied"], 1);
+    assert_ne!(applied["result"]["version"], initial);
+    client.send(get.clone()).await;
+    let redacted = client.until(|v| v["command_id"] == get["command_id"]).await;
+    assert_eq!(redacted["snapshot"]["records"].as_array().unwrap().len(), 1);
+    assert!(!redacted.to_string().contains("admin private memory"));
+
+    let mut stale = command("presenter_admin_write");
+    stale["change"] = json!({"change":"memory","character":"Crazy","expected_version":initial,
+        "commands":[{"command":"add","priority":"normal","content":"should not exist"}]});
+    client.send(stale.clone()).await;
+    let conflict = client
+        .until(|v| v["command_id"] == stale["command_id"])
+        .await;
+    assert_eq!(conflict["type"], "error");
+    assert!(conflict["error"].as_str().unwrap().contains("stale memory"));
+    assert_eq!(
+        fixture
+            .app
+            .presenter()
+            .characters
+            .memories(CharacterId::Crazy)
+            .await
+            .unwrap()
+            .records()
+            .len(),
+        1
+    );
+    assert_eq!(
+        fixture
+            .app
+            .presenter()
+            .characters
+            .memories(CharacterId::Kind)
+            .await
+            .unwrap()
+            .records()
+            .len(),
+        0
+    );
+
+    let mut history = command("presenter_admin_read");
+    history["query"] = json!({"query":"history","character":"Crazy"});
+    client.send(history.clone()).await;
+    let before = client
+        .until(|v| v["command_id"] == history["command_id"])
+        .await;
+    assert_eq!(before["type"], "presenter_admin_read", "{before}");
+    let version = before["snapshot"]["version"].clone();
+
+    let mut preview = command("presenter_admin_read");
+    preview["query"] = json!({"query":"conversation_preview","character":"Crazy","change":{"action":"reset_context"}});
+    client.send(preview.clone()).await;
+    let pre = client
+        .until(|v| v["command_id"] == preview["command_id"])
+        .await;
+    assert_eq!(pre["type"], "presenter_admin_read", "{pre}");
+    assert_eq!(pre["snapshot"]["version"], version);
+
+    let mut edit = command("presenter_admin_write");
+    edit["change"] = json!({"change":"conversation","character":"Crazy","version":version,"edit":{"action":"reset_context"}});
+    client.send(edit.clone()).await;
+    let committed = client
+        .until(|v| v["command_id"] == edit["command_id"])
+        .await;
+    assert_eq!(committed["type"], "presenter_admin_write", "{committed}");
+
+    client.send(edit.clone()).await;
+    let conflict = client
+        .until(|v| v["command_id"] == edit["command_id"])
+        .await;
+    assert_eq!(conflict["type"], "error");
+    assert!(
+        conflict["error"]
+            .as_str()
+            .unwrap()
+            .contains("stale conversation")
+    );
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn presenter_speech_settings_share_gui_owner_and_preserve_selection_fields() {
+    let fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+    let command_action = |action: Value| {
+        let mut operation = command("presenter_action");
+        operation["action"] = action;
+        operation
+    };
+
+    let voice =
+        command_action(json!({"action":"speech_save_character_voice", "voice_id":"voice-default"}));
+    client.send(voice.clone()).await;
+    let receipt = client
+        .until(|r| r["command_id"] == voice["command_id"])
+        .await;
+    assert_eq!(receipt["type"], "presenter_action", "{receipt}");
+    assert_eq!(
+        fixture
+            .app
+            .presenter()
+            .settings
+            .tts
+            .preferences
+            .get()
+            .default_voice_id,
+        "voice-default"
+    );
+
+    let tts = fixture.app.presenter().settings.tts.preferences.get();
+    let mut values = serde_json::to_value(tts).unwrap();
+    values["enabled"] = json!(true);
+    values["local_lazy_init"] = json!(false);
+    values["default_voice_id"] = json!("try-to-overwrite");
+    let save = command_action(json!({"action":"speech_save_tts","preferences":values}));
+    client.send(save.clone()).await;
+    let receipt = client
+        .until(|r| r["command_id"] == save["command_id"])
+        .await;
+    assert_eq!(receipt["type"], "presenter_action", "{receipt}");
+    assert_eq!(
+        fixture
+            .app
+            .presenter()
+            .settings
+            .tts
+            .preferences
+            .get()
+            .default_voice_id,
+        "voice-default"
+    );
+    assert!(
+        fixture
+            .app
+            .presenter()
+            .settings
+            .tts
+            .preferences
+            .get()
+            .enabled
+    );
+
+    let choose = command_action(json!({"action":"speech_select_model","service":"asr",
+        "model":{"model_id":"demo_asr","implementation":"python"}}));
+    client.send(choose.clone()).await;
+    let receipt = client
+        .until(|r| r["command_id"] == choose["command_id"])
+        .await;
+    assert_eq!(receipt["type"], "presenter_action", "{receipt}");
+    assert_eq!(
+        fixture
+            .app
+            .presenter()
+            .settings
+            .asr
+            .preferences
+            .get()
+            .recognizer_id,
+        "demo_asr"
+    );
+
+    let mut asr =
+        serde_json::to_value(fixture.app.presenter().settings.asr.preferences.get()).unwrap();
+    asr["input_mode"] = json!("push_to_talk");
+    asr["recognizer_id"] = json!("try-to-overwrite");
+    let save =
+        command_action(json!({"action":"speech_save_asr","preferences":asr,"language":"ru"}));
+    client.send(save.clone()).await;
+    let receipt = client
+        .until(|r| r["command_id"] == save["command_id"])
+        .await;
+    assert_eq!(receipt["type"], "presenter_action", "{receipt}");
+    let asr = fixture.app.presenter().settings.asr.preferences.get();
+    assert_eq!(asr.recognizer_id, "demo_asr");
+    assert_eq!(asr.input_mode, "push_to_talk");
+    assert_eq!(
+        asr.model_languages.get("demo_asr").map(String::as_str),
+        Some("ru")
+    );
+
+    let choose = command_action(
+        json!({"action":"speech_select_asr_recognizer","model_id":"new_recognizer"}),
+    );
+    client.send(choose.clone()).await;
+    let receipt = client
+        .until(|r| r["command_id"] == choose["command_id"])
+        .await;
+    assert_eq!(receipt["type"], "presenter_action", "{receipt}");
+    assert_eq!(
+        fixture
+            .app
+            .presenter()
+            .settings
+            .asr
+            .preferences
+            .get()
+            .recognizer_id,
+        "new_recognizer"
+    );
+
+    let invalid =
+        command_action(json!({"action":"speech_select_model","service":"embedding","model":null}));
+    client.send(invalid.clone()).await;
+    let receipt = client
+        .until(|r| r["command_id"] == invalid["command_id"])
+        .await;
+    assert_eq!(receipt["type"], "error", "{receipt}");
+    assert_eq!(receipt["code"], "invalid_value");
+    assert!(!receipt.to_string().contains("voice-default"));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn mcp_speech_inventory_reads_shared_ai_data_and_push_to_talk_uses_real_controller() {
+    let root = std::env::temp_dir().join(format!("nm-ipc-speech-{}", Uuid::new_v4()));
+    let fixture = Fixture::with_ai_hub(root.clone()).await;
+    let mut client = fixture.connect().await;
+    let mut inventory = command("presenter_admin_read");
+    inventory["query"] = json!({"query":"speech_inventory"});
+    client.send(inventory.clone()).await;
+    let response = client
+        .until(|r| r["command_id"] == inventory["command_id"])
+        .await;
+    assert_eq!(response["type"], "presenter_admin_read", "{response}");
+    assert_eq!(response["snapshot"]["source"], "speech_model_catalog");
+    assert!(response["snapshot"]["tts"].is_array());
+    assert!(response["snapshot"]["asr"].is_array());
+    assert_eq!(response["snapshot"]["model_activation_attempted"], false);
+    assert!(
+        !response
+            .to_string()
+            .contains(root.to_string_lossy().as_ref())
+    );
+    let mut press = command("presenter_action");
+    press["action"] = json!({"action":"speech_push_to_talk","pressed":true});
+    client.send(press.clone()).await;
+    let response = client
+        .until(|r| r["command_id"] == press["command_id"])
+        .await;
+    assert_eq!(response["type"], "error", "{response}");
+    assert_eq!(response["code"], "invalid_value");
+    fixture.shutdown().await;
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn mcp_tool_options_and_depth_share_settings_presenter_without_exposing_credentials() {
+    let fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+    for action in [
+        json!({"action":"tool_set_option","option":"calculator","enabled":true}),
+        json!({"action":"tool_set_option","option":"enabled","enabled":true}),
+        json!({"action":"tool_set_depth","depth":4}),
+    ] {
+        let mut cmd = command("presenter_action");
+        cmd["action"] = action;
+        client.send(cmd.clone()).await;
+        let receipt = client.until(|r| r["command_id"] == cmd["command_id"]).await;
+        assert_eq!(receipt["type"], "presenter_action", "{receipt}");
+    }
+    let tools = fixture.app.presenter().settings.tools.state.get();
+    assert!(tools.calculator);
+    assert!(tools.enabled);
+    assert!(!tools.web.search_enabled);
+    assert!(!tools.web.enabled);
+    assert_eq!(tools.max_depth, 4);
+    let mut inspect = command("presenter_admin_read");
+    inspect["query"] = json!({"query":"settings","area":"tools"});
+    client.send(inspect.clone()).await;
+    let report = client
+        .until(|r| r["command_id"] == inspect["command_id"])
+        .await;
+    assert_eq!(report["snapshot"]["values"]["calculator"], true);
+    assert_eq!(report["snapshot"]["values"]["max_depth"], 4);
+    assert_eq!(
+        report["snapshot"]["values"]["credentials_and_endpoints_withheld"],
+        true
+    );
+    assert!(report["snapshot"]["values"].get("web").is_none());
+    let mut requires_config = command("presenter_action");
+    requires_config["action"] =
+        json!({"action":"tool_set_option","option":"web_search","enabled":true});
+    client.send(requires_config.clone()).await;
+    let rejected = client
+        .until(|r| r["command_id"] == requires_config["command_id"])
+        .await;
+    assert_eq!(rejected["code"], "invalid_value");
+    assert!(
+        !fixture
+            .app
+            .presenter()
+            .settings
+            .tools
+            .state
+            .get()
+            .web
+            .search_enabled
+    );
+    let mut invalid = command("presenter_action");
+    invalid["action"] = json!({"action":"tool_set_depth","depth":6});
+    client.send(invalid.clone()).await;
+    let rejected = client
+        .until(|r| r["command_id"] == invalid["command_id"])
+        .await;
+    assert_eq!(rejected["code"], "invalid_value");
+    assert_eq!(
+        fixture.app.presenter().settings.tools.state.get().max_depth,
+        4
+    );
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn mcp_speech_capture_reuses_core_owner_and_rejects_unready_asr() {
+    let fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+    let mut read = command("presenter_admin_read");
+    read["query"] = json!({"query":"speech_transcript","include_content":false});
+    client.send(read.clone()).await;
+    let snapshot = client
+        .until(|r| r["command_id"] == read["command_id"])
+        .await;
+    assert_eq!(snapshot["type"], "presenter_admin_read", "{snapshot}");
+    assert_eq!(snapshot["snapshot"]["revision"], 0);
+    assert_eq!(snapshot["snapshot"]["available"], false);
+    assert!(!snapshot.to_string().contains("transcript_text"));
+
+    let mut start = command("presenter_action");
+    start["action"] = json!({"action":"speech_capture","enabled":true,
+        "character":"Crazy","selection_revision":0});
+    client.send(start.clone()).await;
+    let reject = client
+        .until(|r| r["command_id"] == start["command_id"])
+        .await;
+    assert_eq!(reject["type"], "error", "{reject}");
+    assert_eq!(reject["code"], "invalid_value");
+    assert!(reject["error"].as_str().unwrap().contains("ASR model"));
+
+    let mut invalid = command("presenter_action");
+    invalid["action"] = json!({"action":"speech_capture","enabled":false,"character":"Crazy"});
+    client.send(invalid.clone()).await;
+    let reject = client
+        .until(|r| r["command_id"] == invalid["command_id"])
+        .await;
+    assert_eq!(reject["type"], "error", "{reject}");
+
+    let mut stop = command("presenter_action");
+    stop["action"] = json!({"action":"speech_capture","enabled":false});
+    client.send(stop.clone()).await;
+    let receipt = client
+        .until(|r| r["command_id"] == stop["command_id"])
+        .await;
+    assert_eq!(receipt["type"], "presenter_action", "{receipt}");
+    assert_eq!(receipt["result"]["result"]["enabled"], false);
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn speech_transcript_observation_uses_the_same_ticket_fenced_hub_as_gui() {
+    use neuromita::ai_runtime::speech::Transcript;
+    use neuromita::audio::{ticket::SpeechStream, transcript_bridge::SpeechTranscriptHub};
+    use tokio_util::sync::CancellationToken;
+
+    let bus = std::sync::Arc::new(SpeechTranscriptHub::default());
+    let mut gui = bus.subscribe();
+    let mut observer = bus.observe();
+    let stream = SpeechStream::new(CancellationToken::new());
+    let conversation = bus.destination(CharacterId::Crazy, 12);
+    let ticket = stream.ticket();
+    let transcript = Transcript {
+        text: "spoken text".into(),
+        language: Some("ru".into()),
+    };
+    conversation.reply(&ticket, &transcript).await.unwrap();
+    let event = gui.try_recv().unwrap();
+    assert_eq!(event.revision, 1);
+    assert_eq!(event.character, CharacterId::Crazy);
+    assert_eq!(event.selection_revision, 12);
+    assert_eq!(event.transcript, transcript);
+    assert_eq!(observer.borrow_and_update().as_ref().unwrap().revision, 1);
+    conversation.reply(&ticket, &transcript).await.unwrap();
+    assert!(gui.try_recv().is_err());
+    stream.invalidate();
+    conversation.reply(&ticket, &transcript).await.unwrap();
+    assert!(gui.try_recv().is_err());
+    conversation
+        .reply(&stream.ticket(), &transcript)
+        .await
+        .unwrap();
+    assert_eq!(gui.try_recv().unwrap().revision, 2);
+    assert_eq!(bus.latest().unwrap().revision, 2);
+}
+
+#[tokio::test]
+async fn telegram_gui_and_mcp_use_one_owner_with_sanitized_status_and_wait() {
+    let fixture = Fixture::with_telegram().await;
+    let mut client = fixture.connect().await;
+
+    let mut inspect = command("presenter_inspect");
+    inspect["surface"] = json!("telegram_auth");
+    client.send(inspect.clone()).await;
+    let initial = client
+        .until(|frame| frame["command_id"] == inspect["command_id"])
+        .await;
+    assert_eq!(initial["type"], "presenter_inspect", "{initial}");
+    assert_eq!(initial["snapshot"]["state"]["phase"], 0);
+    assert_eq!(initial["snapshot"]["state"]["revision"], 0);
+    let telegram_state = &initial["snapshot"]["state"];
+    assert!(telegram_state.get("api_hash").is_none());
+    assert!(telegram_state.get("password").is_none());
+    assert!(telegram_state.get("phone").is_none());
+
+    let mut disconnect = command("presenter_action");
+    disconnect["action"] = json!({"action":"telegram_disconnect"});
+    client.send(disconnect.clone()).await;
+    let done = client
+        .until(|frame| frame["command_id"] == disconnect["command_id"])
+        .await;
+    assert_eq!(done["type"], "presenter_action", "{done}");
+    assert_eq!(done["result"]["result"]["status"]["revision"], 1);
+
+    let mut wait = command("presenter_admin_read");
+    wait["query"] =
+        json!({"query":"wait","target":"telegram_auth","after_revision":0,"timeout_ms":1000});
+    client.send(wait.clone()).await;
+    let observed = client
+        .until(|frame| frame["command_id"] == wait["command_id"])
+        .await;
+    assert_eq!(observed["type"], "presenter_admin_read", "{observed}");
+    assert_eq!(observed["snapshot"]["changed"], true);
+    assert_eq!(observed["snapshot"]["status"]["revision"], 1);
+
+    let mut refresh = command("presenter_action");
+    refresh["action"] = json!({"action":"telegram_refresh_voice"});
+    client.send(refresh.clone()).await;
+    let refreshed = client
+        .until(|frame| frame["command_id"] == refresh["command_id"])
+        .await;
+    assert_eq!(refreshed["type"], "presenter_action", "{refreshed}");
+    assert_eq!(
+        refreshed["result"]["result"]["status"]["voice_active"],
+        false
+    );
+
+    let mut secret = command("presenter_action");
+    secret["action"] = json!({"action":"telegram_password","password":"sensitive-2fa-password"});
+    client.send(secret.clone()).await;
+    let denied = client
+        .until(|frame| frame["command_id"] == secret["command_id"])
+        .await;
+    assert_eq!(denied["code"], "invalid_value", "{denied}");
+    assert!(!denied.to_string().contains("sensitive-2fa-password"));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn remote_voice_gui_and_mcp_share_catalog_with_versioned_safe_responses() {
+    let fixture = Fixture::with_remote_voice().await;
+    let mut client = fixture.connect().await;
+    let mut inspect = command("presenter_inspect");
+    inspect["surface"] = json!("remote_voice");
+    client.send(inspect.clone()).await;
+    let initial = client
+        .until(|frame| frame["command_id"] == inspect["command_id"])
+        .await;
+    assert_eq!(initial["type"], "presenter_inspect", "{initial}");
+    assert_eq!(initial["snapshot"]["state"]["revision"], 0);
+    assert_eq!(
+        initial["snapshot"]["state"]["presets"][0]["credential_present"],
+        false
+    );
+
+    let mut add = command("presenter_action");
+    add["action"] = json!({"action":"remote_voice_add","expected_revision":0});
+    client.send(add.clone()).await;
+    let added = client
+        .until(|frame| frame["command_id"] == add["command_id"])
+        .await;
+    assert_eq!(added["type"], "presenter_action", "{added}");
+    assert_eq!(added["result"]["result"]["status"]["revision"], 1);
+    assert_eq!(
+        added["result"]["result"]["status"]["presets"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let id = added["result"]["result"]["status"]["active_id"]
+        .as_str()
+        .unwrap();
+
+    let mut save = command("presenter_action");
+    save["action"] = json!({"action":"remote_voice_save","expected_revision":1,
+        "preset":{"id":id,"name":"Mita voice","speed_percent":130}});
+    client.send(save.clone()).await;
+    let saved = client
+        .until(|frame| frame["command_id"] == save["command_id"])
+        .await;
+    assert_eq!(saved["type"], "presenter_action", "{saved}");
+    assert_eq!(saved["result"]["result"]["status"]["revision"], 2);
+    assert!(!saved.to_string().contains("api_key"));
+
+    let mut stale = command("presenter_action");
+    stale["action"] = json!({"action":"remote_voice_delete","expected_revision":1});
+    client.send(stale.clone()).await;
+    let rejected = client
+        .until(|frame| frame["command_id"] == stale["command_id"])
+        .await;
+    assert_eq!(rejected["code"], "invalid_value", "{rejected}");
+
+    let mut wait = command("presenter_admin_read");
+    wait["query"] =
+        json!({"query":"wait","target":"remote_voice","after_revision":1,"timeout_ms":1000});
+    client.send(wait.clone()).await;
+    let changed = client
+        .until(|frame| frame["command_id"] == wait["command_id"])
+        .await;
+    assert_eq!(changed["snapshot"]["changed"], true, "{changed}");
+    assert_eq!(changed["snapshot"]["status"]["revision"], 2);
+
+    let mut cancel = command("presenter_action");
+    cancel["action"] = json!({"action":"remote_voice_cancel"});
+    client.send(cancel.clone()).await;
+    let cancelled = client
+        .until(|frame| frame["command_id"] == cancel["command_id"])
+        .await;
+    assert_eq!(cancelled["result"]["result"]["status"]["phase"], "saved");
+    assert_eq!(cancelled["result"]["result"]["status"]["revision"], 2);
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn gui_equivalent_knowledge_and_admin_commands_reject_unapproved_actions() {
+    let fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+    let mut recall = command("presenter_admin_read");
+    recall["query"] = json!({"query":"memory_recall","character":"Crazy",
+        "memory_id":Uuid::new_v4(),"query_text":""});
+    client.send(recall.clone()).await;
+    let rejected = client
+        .until(|v| v["command_id"] == recall["command_id"])
+        .await;
+    assert_eq!(rejected["type"], "error");
+
+    let mut preview = command("presenter_admin_read");
+    preview["query"] = json!({"query":"graph_preview","character":"Crazy",
+        "memory_id":Uuid::new_v4(),"mode":"clear"});
+    client.send(preview.clone()).await;
+    let invalid = client
+        .until(|v| v["command_id"] == preview["command_id"])
+        .await;
+    assert_eq!(invalid["type"], "error");
+
+    let mut apply = command("presenter_admin_write");
+    apply["change"] = json!({"change":"graph_apply","character":"Crazy",
+        "request_id":Uuid::new_v4()});
+    client.send(apply.clone()).await;
+    let refused = client
+        .until(|v| v["command_id"] == apply["command_id"])
+        .await;
+    assert_eq!(refused["type"], "error");
+
+    let mut abort = command("presenter_admin_write");
+    abort["change"] = json!({"change":"graph_abort","request_id":Uuid::new_v4()});
+    client.send(abort.clone()).await;
+    let no_plan = client
+        .until(|v| v["command_id"] == abort["command_id"])
+        .await;
+    assert_eq!(no_plan["type"], "presenter_admin_write");
+    assert_eq!(no_plan["result"]["aborted"], false);
+
+    let mut guide = command("presenter_admin_write");
+    guide["change"] = json!({"change":"guide_retry"});
+    client.send(guide.clone()).await;
+    let no_retry = client
+        .until(|v| v["command_id"] == guide["command_id"])
+        .await;
+    assert_eq!(no_retry["type"], "error");
+
+    let mut attach = command("presenter_admin_write");
+    attach["change"] = json!({"change":"attach_file","character":"Crazy",
+        "text":"note","source":"/not/an/approved/file",
+        "version":{"branch_id":Uuid::new_v4(),"through":0,"generation":0}});
+    client.send(attach.clone()).await;
+    let restricted = client
+        .until(|v| v["command_id"] == attach["command_id"])
+        .await;
+    assert_eq!(restricted["type"], "error");
+    assert!(!restricted.to_string().contains("not/an/approved/file"));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn mcp_hardware_refresh_uses_real_hardware_presenter_without_raw_errors() {
+    let fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+    let mut refresh = command("presenter_action");
+    refresh["action"] = json!({"action":"hardware_refresh"});
+    client.send(refresh.clone()).await;
+    let outcome = client
+        .until(|r| r["command_id"] == refresh["command_id"])
+        .await;
+    assert_eq!(outcome["type"], "presenter_action", "{outcome}");
+    assert_eq!(outcome["result"]["result"]["action"], "hardware_refresh");
+    assert_eq!(outcome["result"]["result"]["source"], "hardware_presenter");
+    assert!(outcome["result"]["result"]["devices"].is_array());
+    assert!(outcome["result"]["result"]["error_count"].is_number());
+    assert!(outcome["result"]["result"].get("errors").is_none());
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn presenter_character_assignment_cas_preserves_other_slots_and_validates_catalog() {
+    let fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+    let mut read = command("presenter_admin_read");
+    read["query"] = json!({"query":"character_profile","character":"Crazy"});
+    client.send(read.clone()).await;
+    let before = client
+        .until(|r| r["command_id"] == read["command_id"])
+        .await;
+    assert_eq!(before["type"], "presenter_admin_read", "{before}");
+    let revision = before["snapshot"]["revision"].as_u64().unwrap();
+    assert_eq!(before["snapshot"]["presets"]["reply"], "active");
+    assert_eq!(before["snapshot"]["presets"]["react"], "active");
+    assert_eq!(before["snapshot"]["presets"]["initiate"], "active");
+
+    let mut invalid = command("presenter_admin_write");
+    invalid["change"] = json!({"change":"character_preset_assignment",
+        "character":"Crazy","expected_revision":revision,
+        "slot":"reply","selection":{"specific":999999}});
+    client.send(invalid.clone()).await;
+    let rejected = client
+        .until(|r| r["command_id"] == invalid["command_id"])
+        .await;
+    assert_eq!(rejected["type"], "error", "{rejected}");
+    assert_eq!(rejected["code"], "invalid_value", "{rejected}");
+
+    let mut assign = command("presenter_admin_write");
+    assign["change"] = json!({"change":"character_preset_assignment",
+        "character":"Crazy","expected_revision":revision,
+        "slot":"react","selection":{"specific":0}});
+    client.send(assign.clone()).await;
+    let selected = client
+        .until(|r| r["command_id"] == assign["command_id"])
+        .await;
+    assert_eq!(selected["type"], "presenter_admin_write", "{selected}");
+    assert_eq!(selected["result"]["presets"]["reply"], "active");
+    assert_eq!(
+        selected["result"]["presets"]["react"],
+        json!({"specific":0})
+    );
+    assert_eq!(selected["result"]["presets"]["initiate"], "active");
+    let next_revision = selected["result"]["revision"].as_u64().unwrap();
+    assert!(next_revision > revision);
+
+    client.send(assign.clone()).await;
+    let stale = client
+        .until(|r| r["command_id"] == assign["command_id"])
+        .await;
+    assert_eq!(stale["type"], "error", "{stale}");
+    assert!(stale["error"].as_str().unwrap().contains("stale character"));
+
+    let mut prompt = command("presenter_admin_write");
+    prompt["change"] = json!({"change":"character_prompt_selection",
+        "character":"Crazy","expected_revision":next_revision,
+        "prompt_set":"does-not-exist"});
+    client.send(prompt.clone()).await;
+    let bad_prompt = client
+        .until(|r| r["command_id"] == prompt["command_id"])
+        .await;
+    assert_eq!(bad_prompt["type"], "error", "{bad_prompt}");
+
+    let mut reset = command("presenter_admin_write");
+    reset["change"] = json!({"change":"character_preset_assignment",
+        "character":"Crazy","expected_revision":next_revision,
+        "slot":"all","selection":"active"});
+    client.send(reset.clone()).await;
+    let restored = client
+        .until(|r| r["command_id"] == reset["command_id"])
+        .await;
+    assert_eq!(restored["type"], "presenter_admin_write", "{restored}");
+    assert_eq!(restored["result"]["presets"]["reply"], "active");
+    assert_eq!(restored["result"]["presets"]["react"], "active");
+    assert_eq!(restored["result"]["presets"]["initiate"], "active");
+
+    let mut full = command("presenter_admin_write");
+    full["change"] = json!({"change":"character_profile","character":"Crazy",
+        "expected_revision":restored["result"]["revision"],
+        "profile":{"presets":{"reply":{"specific":999999},"react":"active","initiate":"active"},"prompt_set":null}});
+    client.send(full.clone()).await;
+    let denied = client
+        .until(|r| r["command_id"] == full["command_id"])
+        .await;
+    assert_eq!(denied["type"], "error", "{denied}");
+    client.send(read.clone()).await;
+    let after = client
+        .until(|r| r["command_id"] == read["command_id"])
+        .await;
+    assert_eq!(after["snapshot"]["presets"]["reply"], "active");
+    assert_eq!(after["snapshot"]["presets"]["react"], "active");
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn presenter_settings_retry_rejects_when_no_failed_write_exists() {
+    let fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+
+    let mut before = command("presenter_admin_read");
+    before["query"] = json!({"query":"settings","area":"persistence"});
+    client.send(before.clone()).await;
+    let initial = client
+        .until(|r| r["command_id"] == before["command_id"])
+        .await;
+    assert_eq!(initial["type"], "presenter_admin_read", "{initial}");
+    assert!(
+        !initial["snapshot"]["values"]["persistence"]
+            .as_str()
+            .unwrap()
+            .starts_with("Failed")
+    );
+
+    let mut retry = command("presenter_admin_write");
+    retry["change"] = json!({"change":"settings_retry"});
+    client.send(retry.clone()).await;
+    let rejected = client
+        .until(|r| r["command_id"] == retry["command_id"])
+        .await;
+    assert_eq!(rejected["type"], "error", "{rejected}");
+    assert_eq!(rejected["code"], "invalid_value", "{rejected}");
+    assert!(
+        rejected["error"]
+            .as_str()
+            .unwrap()
+            .contains("no failed settings write")
+    );
+
+    client.send(before.clone()).await;
+    let after = client
+        .until(|r| r["command_id"] == before["command_id"])
+        .await;
+    assert_eq!(after["type"], "presenter_admin_read", "{after}");
+    assert_eq!(
+        after["snapshot"]["revision"],
+        initial["snapshot"]["revision"]
+    );
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn presenter_settings_retry_recovers_real_failed_persistence_via_shared_owner() {
+    let repository = Arc::new(FailOnDemandSettingsRepository::new());
+    let fixture = Fixture::with_settings_repository(repository.clone()).await;
+    let mut client = fixture.connect().await;
+
+    repository.armed.store(true, Ordering::SeqCst);
+    let mut change = command("presenter_admin_write");
+    change["change"] = json!({"change":"settings","field":"voice_volume","value":37});
+    client.send(change.clone()).await;
+    let changed = client
+        .until(|r| r["command_id"] == change["command_id"])
+        .await;
+    assert_eq!(changed["type"], "presenter_admin_write", "{changed}");
+    let failed = bounded(async {
+        loop {
+            let snapshot = fixture.app.presenter().settings.snapshot().unwrap();
+            if let PersistenceState::Failed { error, .. } = &snapshot.persistence {
+                break error.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    assert!(
+        failed
+            .to_string()
+            .contains("injected settings write failure")
+    );
+    assert_eq!(repository.failures.load(Ordering::SeqCst), 1);
+
+    let mut inspect = command("presenter_admin_read");
+    inspect["query"] = json!({"query":"settings","area":"persistence"});
+    client.send(inspect.clone()).await;
+    let before_retry = client
+        .until(|r| r["command_id"] == inspect["command_id"])
+        .await;
+    assert_eq!(
+        before_retry["type"], "presenter_admin_read",
+        "{before_retry}"
+    );
+    assert!(
+        before_retry["snapshot"]["values"]["persistence"]
+            .as_str()
+            .unwrap()
+            .starts_with("Failed")
+    );
+
+    let mut retry = command("presenter_admin_write");
+    retry["change"] = json!({"change":"settings_retry"});
+    client.send(retry.clone()).await;
+    let accepted = client
+        .until(|r| r["command_id"] == retry["command_id"])
+        .await;
+    assert_eq!(accepted["type"], "presenter_admin_write", "{accepted}");
+    assert_eq!(accepted["result"]["source"], "settings_presenter");
+    assert_eq!(accepted["result"]["retry_requested"], true);
+    bounded(SettingsApi::flush()).await.unwrap();
+
+    client.send(inspect.clone()).await;
+    let saved = client
+        .until(|r| r["command_id"] == inspect["command_id"])
+        .await;
+    assert_eq!(saved["type"], "presenter_admin_read", "{saved}");
+    assert!(
+        saved["snapshot"]["values"]["persistence"]
+            .as_str()
+            .unwrap()
+            .starts_with("Saved")
+    );
+    assert_eq!(
+        saved["snapshot"]["values"]["persisted_revision"],
+        saved["snapshot"]["revision"]
+    );
+    assert_eq!(repository.failures.load(Ordering::SeqCst), 1);
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn presenter_chat_diagnostics_are_character_scoped_bounded_and_content_free() {
+    let mut fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+    let mut empty = command("presenter_admin_read");
+    empty["query"] = json!({"query":"chat_diagnostics","character":"Crazy","limit":1});
+    client.send(empty.clone()).await;
+    let no_requests = client
+        .until(|r| r["command_id"] == empty["command_id"])
+        .await;
+    assert_eq!(no_requests["type"], "presenter_admin_read", "{no_requests}");
+    assert_eq!(no_requests["snapshot"]["total_observed"], 0);
+    assert_eq!(no_requests["snapshot"]["returned"], 0);
+    let mut send = command("presenter_action");
+    send["action"] = json!({"action":"chat_reply","character":"Crazy",
+        "text":"PRIVATE_DIAGNOSTICS_INPUT_NEVER_LEAK"});
+    client.send(send.clone()).await;
+    let accepted = client.accepted(uuid(&send["command_id"])).await;
+    let request_id = uuid(&accepted["request_id"]);
+    fixture
+        .call()
+        .await
+        .finish("PRIVATE_DIAGNOSTICS_ANSWER_NEVER_LEAK");
+    assert_eq!(client.terminal(request_id).await["outcome"], "success");
+    let mut inspect = command("presenter_admin_read");
+    inspect["query"] = json!({"query":"chat_diagnostics","character":"Crazy","limit":1});
+    client.send(inspect.clone()).await;
+    let reply = client
+        .until(|r| r["command_id"] == inspect["command_id"])
+        .await;
+    assert_eq!(reply["type"], "presenter_admin_read", "{reply}");
+    assert_eq!(reply["snapshot"]["source"], "chat_presenter_snapshot");
+    assert_eq!(reply["snapshot"]["returned"], 1);
+    assert_eq!(
+        reply["snapshot"]["requests"][0]["request_id"],
+        json!(request_id)
+    );
+    assert_eq!(reply["snapshot"]["requests"][0]["outcome"], "success");
+    assert_eq!(reply["snapshot"]["content_included"], false);
+    let serial = reply.to_string();
+    assert!(!serial.contains("PRIVATE_DIAGNOSTICS_INPUT_NEVER_LEAK"));
+    assert!(!serial.contains("PRIVATE_DIAGNOSTICS_ANSWER_NEVER_LEAK"));
+    assert!(!serial.contains("unused-fixture-key"));
+    inspect["command_id"] = json!(Uuid::new_v4());
+    inspect["query"]["character"] = json!("Kind");
+    client.send(inspect.clone()).await;
+    let isolated = client
+        .until(|r| r["command_id"] == inspect["command_id"])
+        .await;
+    assert_eq!(isolated["type"], "presenter_admin_read", "{isolated}");
+    assert_eq!(isolated["snapshot"]["returned"], 0);
+    assert!(!isolated.to_string().contains(&request_id.to_string()));
+    inspect["command_id"] = json!(Uuid::new_v4());
+    inspect["query"]["character"] = json!("Crazy");
+    inspect["query"]["limit"] = json!(101);
+    client.send(inspect.clone()).await;
+    let invalid = client
+        .until(|r| r["command_id"] == inspect["command_id"])
+        .await;
+    assert_eq!(invalid["type"], "error", "{invalid}");
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn prompt_catalog_refresh_uses_same_live_owner_as_gui() {
+    let root = std::env::temp_dir().join(format!("nm-mcp-prompt-catalog-{}", Uuid::new_v4()));
+    let crazy = root.join("Crazy");
+    let first = crazy.join("Alpha");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::write(
+        first.join("main_template.txt"),
+        "PRIVATE_PROMPT_NEVER_EXPOSED",
+    )
+    .unwrap();
+    let fixture = Fixture::with_prompt_catalog(root.clone()).await;
+    let mut client = fixture.connect().await;
+    let mut scan = command("presenter_admin_read");
+    scan["query"] = json!({"query":"prompt_catalog","limit":1});
+    client.send(scan.clone()).await;
+    let initial = client
+        .until(|r| r["command_id"] == scan["command_id"])
+        .await;
+    assert_eq!(initial["type"], "presenter_admin_read", "{initial}");
+    assert_eq!(initial["snapshot"]["source"], "prompt_folder_presenter");
+    assert_eq!(initial["snapshot"]["configured"], true);
+    assert_eq!(initial["snapshot"]["total"], 1);
+    assert_eq!(initial["snapshot"]["sets"][0]["name"], "Alpha");
+    let second = crazy.join("Beta");
+    std::fs::create_dir_all(&second).unwrap();
+    std::fs::write(second.join("main_template.txt"), "ANOTHER_PRIVATE_PROMPT").unwrap();
+    scan["command_id"] = json!(Uuid::new_v4());
+    client.send(scan.clone()).await;
+    let updated = client
+        .until(|r| r["command_id"] == scan["command_id"])
+        .await;
+    assert_eq!(updated["snapshot"]["total"], 2);
+    assert_eq!(updated["snapshot"]["returned"], 1);
+    assert_eq!(updated["snapshot"]["truncated"], true);
+    assert!(!updated.to_string().contains("PRIVATE_PROMPT_NEVER_EXPOSED"));
+    assert!(
+        !updated
+            .to_string()
+            .contains(root.to_string_lossy().as_ref())
+    );
+    scan["command_id"] = json!(Uuid::new_v4());
+    scan["query"]["limit"] = json!(20);
+    client.send(scan.clone()).await;
+    let all = client
+        .until(|r| r["command_id"] == scan["command_id"])
+        .await;
+    assert_eq!(all["snapshot"]["returned"], 2);
+    assert_eq!(all["snapshot"]["sets"][1]["name"], "Beta");
+    std::fs::remove_dir_all(&first).unwrap();
+    scan["command_id"] = json!(Uuid::new_v4());
+    client.send(scan.clone()).await;
+    let removed = client
+        .until(|r| r["command_id"] == scan["command_id"])
+        .await;
+    assert_eq!(removed["snapshot"]["total"], 1);
+    assert_eq!(removed["snapshot"]["sets"][0]["name"], "Beta");
+    fixture.shutdown().await;
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[tokio::test]
+async fn debug_select_projection_is_shared_and_private_by_default() {
+    let fixture = Fixture::start(|_| {}).await;
+    let expected = neuromita::presentation::project_character_debug(
+        &fixture.app.presenter().characters,
+        fixture.app.presenter().settings.as_ref(),
+        fixture.app.presenter().prompts.as_deref(),
+        CharacterId::Crazy,
+    )
+    .await
+    .unwrap();
+    let mut client = fixture.connect().await;
+    let mut command = command("presenter_admin_read");
+    command["query"] = json!({"query":"character_debug","character":"Crazy"});
+    client.send(command.clone()).await;
+    let sanitized = client
+        .until(|r| r["command_id"] == command["command_id"])
+        .await;
+    assert_eq!(sanitized["type"], "presenter_admin_read", "{sanitized}");
+    assert_eq!(sanitized["snapshot"]["source"], "character_debug_presenter");
+    assert_eq!(sanitized["snapshot"]["field_count"], expected.len());
+    assert_eq!(sanitized["snapshot"]["fields"], json!([]));
+    assert_eq!(sanitized["snapshot"]["content_included"], false);
+    assert!(!sanitized.to_string().contains("unused-fixture-key"));
+    command["command_id"] = json!(Uuid::new_v4());
+    command["query"]["include_content"] = json!(true);
+    client.send(command.clone()).await;
+    let denied = client
+        .until(|r| r["command_id"] == command["command_id"])
+        .await;
+    assert_eq!(denied["type"], "error", "{denied}");
+    assert!(!denied.to_string().contains("unused-fixture-key"));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn conversation_refresh_reads_gui_snapshot_without_creating_another_owner() {
+    let mut fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+    let mut refresh = command("presenter_admin_read");
+    refresh["query"] = json!({"query":"conversation_refresh","character":"Crazy"});
+    let before_gui = fixture
+        .app
+        .presenter()
+        .conversation
+        .snapshot(CharacterId::Crazy)
+        .await
+        .unwrap();
+    client.send(refresh.clone()).await;
+    let before = client
+        .until(|r| r["command_id"] == refresh["command_id"])
+        .await;
+    assert_eq!(before["type"], "presenter_admin_read", "{before}");
+    assert_eq!(before["snapshot"]["source"], "conversation_presenter");
+    assert_eq!(
+        before["snapshot"]["visible_message_count"],
+        before_gui.messages.len()
+    );
+    assert_eq!(
+        before["snapshot"]["settings_revision"],
+        before_gui.settings.revision
+    );
+    assert_eq!(before["snapshot"]["preset_id"], before_gui.preset.0);
+    assert_eq!(
+        before["snapshot"]["chat_revision"],
+        before_gui.requests.revision
+    );
+    assert_eq!(before["snapshot"]["gui_window_rendered"], false);
+    assert_eq!(before["snapshot"]["content_included"], false);
+    let revision = before["snapshot"]["chat_revision"].as_u64().unwrap();
+
+    let mut send = command("presenter_action");
+    send["action"] = json!({"action":"chat_reply","character":"Crazy",
+        "text":"PRIVATE_REFRESH_INPUT_NEVER_LEAK"});
+    client.send(send.clone()).await;
+    let accepted = client.accepted(uuid(&send["command_id"])).await;
+    let request_id = uuid(&accepted["request_id"]);
+    fixture
+        .call()
+        .await
+        .finish("PRIVATE_REFRESH_OUTPUT_NEVER_LEAK");
+    assert_eq!(client.terminal(request_id).await["outcome"], "success");
+    refresh["command_id"] = json!(Uuid::new_v4());
+    client.send(refresh.clone()).await;
+    let after = client
+        .until(|r| r["command_id"] == refresh["command_id"])
+        .await;
+    assert_eq!(after["type"], "presenter_admin_read", "{after}");
+    assert_eq!(after["snapshot"]["refresh_completed"], true);
+    assert!(after["snapshot"]["chat_revision"].as_u64().unwrap() > revision);
+    assert_eq!(after["snapshot"]["character_request_count"], 1);
+    let gui = fixture
+        .app
+        .presenter()
+        .conversation
+        .snapshot(CharacterId::Crazy)
+        .await
+        .unwrap();
+    assert_eq!(
+        after["snapshot"]["visible_message_count"],
+        gui.messages.len()
+    );
+    assert_eq!(after["snapshot"]["chat_revision"], gui.requests.revision);
+    assert_eq!(after["snapshot"]["version"]["through"], gui.at.through);
+    assert_eq!(
+        after["snapshot"]["version"]["generation"],
+        gui.selection.generation
+    );
+    assert!(
+        !after
+            .to_string()
+            .contains("PRIVATE_REFRESH_INPUT_NEVER_LEAK")
+    );
+    assert!(
+        !after
+            .to_string()
+            .contains("PRIVATE_REFRESH_OUTPUT_NEVER_LEAK")
+    );
+    assert!(!after.to_string().contains("unused-fixture-key"));
+    refresh["command_id"] = json!(Uuid::new_v4());
+    refresh["query"]["character"] = json!("Kind");
+    client.send(refresh.clone()).await;
+    let isolated = client
+        .until(|r| r["command_id"] == refresh["command_id"])
+        .await;
+    assert_eq!(isolated["type"], "presenter_admin_read", "{isolated}");
+    assert_eq!(isolated["snapshot"]["character_request_count"], 0);
+    assert!(!isolated.to_string().contains(&request_id.to_string()));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn chat_selection_presenter_is_single_owner_for_gui_and_local_control() {
+    use neuromita::presentation::ChatSelection;
+
+    let fixture = Fixture::start(|_| {}).await;
+    let owner = fixture.app.presenter().selection.clone();
+    let start = ChatSelection {
+        character: CharacterId::Crazy,
+        revision: 0,
+    };
+    assert_eq!(owner.snapshot(), start);
+    let mut observer = owner.observe();
+    let mut client = fixture.connect().await;
+    let mut inspect = command("presenter_admin_read");
+    inspect["query"] = json!({"query":"chat_selection"});
+    client.send(inspect.clone()).await;
+    let initial = client
+        .until(|r| r["command_id"] == inspect["command_id"])
+        .await;
+    assert_eq!(initial["type"], "presenter_admin_read", "{initial}");
+    assert_eq!(initial["snapshot"]["selection"]["character"], "Crazy");
+    assert_eq!(initial["snapshot"]["selection"]["revision"], 0);
+    assert_eq!(initial["snapshot"]["gui_session_required"], false);
+
+    let selected = bounded(owner.select(start, CharacterId::Kind))
+        .await
+        .unwrap();
+    assert_eq!(selected.character, CharacterId::Kind);
+    assert_eq!(selected.revision, 1);
+    bounded(observer.changed()).await.unwrap();
+    assert_eq!(*observer.borrow_and_update(), selected);
+    assert_eq!(owner.snapshot(), selected);
+    assert!(owner.select(start, CharacterId::Crazy).await.is_err());
+    assert_eq!(owner.snapshot(), selected);
+    assert_eq!(
+        owner.select(selected, CharacterId::Kind).await.unwrap(),
+        selected
+    );
+    assert_eq!(owner.snapshot().revision, 1);
+    assert_eq!(
+        owner
+            .start_capture(start, Default::default(), Default::default())
+            .await
+            .unwrap_err(),
+        "chat selection revision conflict"
+    );
+
+    inspect["command_id"] = json!(Uuid::new_v4());
+    client.send(inspect.clone()).await;
+    let after = client
+        .until(|r| r["command_id"] == inspect["command_id"])
+        .await;
+    assert_eq!(after["snapshot"]["selection"]["character"], "Kind");
+    assert_eq!(after["snapshot"]["selection"]["revision"], 1);
+    assert!(!after.to_string().contains("session_id"));
+
+    let mut unauthorized = command("presenter_admin_write");
+    unauthorized["change"] = json!({
+        "change":"chat_select","expected_character":"Kind", "expected_revision":1,
+        "character":"Crazy", "authorization":"invalid-capability"
+    });
+    client.send(unauthorized.clone()).await;
+    let denied = client
+        .until(|r| r["command_id"] == unauthorized["command_id"])
+        .await;
+    assert_eq!(denied["type"], "error", "{denied}");
+    assert_eq!(owner.snapshot(), selected);
+    assert!(!denied.to_string().contains("invalid-capability"));
+
+    let second = bounded(owner.select(selected, CharacterId::Crazy))
+        .await
+        .unwrap();
+    assert_eq!(second.revision, 2);
+    assert_eq!(second.character, CharacterId::Crazy);
+    bounded(observer.changed()).await.unwrap();
+    assert_eq!(*observer.borrow_and_update(), second);
+    let (left, right) = tokio::join!(
+        owner.select(second, CharacterId::Kind),
+        owner.select(second, CharacterId::Kind),
+    );
+    assert_ne!(
+        left.is_ok(),
+        right.is_ok(),
+        "CAS must serialize concurrent selections"
+    );
+    assert_eq!(owner.snapshot().revision, 3);
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn full_chat_trace_uses_presenter_and_denies_unprivileged_core_reads() {
+    let mut fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+    let mut reply = command("presenter_action");
+    reply["action"] = json!({
+        "action":"chat_reply", "character":"Crazy",
+        "text":"PRIVATE_FULL_TRACE_INPUT"
+    });
+    client.send(reply.clone()).await;
+    let accepted = client.accepted(uuid(&reply["command_id"])).await;
+    let request_id = uuid(&accepted["request_id"]);
+    fixture.call().await.finish("PRIVATE_FULL_TRACE_OUTPUT");
+    assert_eq!(client.terminal(request_id).await["outcome"], "success");
+
+    let published = fixture
+        .app
+        .presenter()
+        .chat
+        .latest_diagnostics(CharacterId::Crazy)
+        .unwrap()
+        .expect("latest retained GUI trace");
+    assert_eq!(published.0.0, request_id);
+    let full: Value = serde_json::from_str(&published.1).unwrap();
+    assert!(
+        full.is_object(),
+        "GUI trace should be complete diagnostic JSON"
+    );
+    assert!(
+        fixture
+            .app
+            .presenter()
+            .chat
+            .latest_diagnostics(CharacterId::Kind)
+            .unwrap()
+            .is_none(),
+        "trace selection must be character-scoped"
+    );
+
+    let mut read = command("presenter_admin_read");
+    read["query"] = json!({
+        "query":"diagnostic_export","character":"Crazy",
+        "authorization":"unauthorized-local-client"
+    });
+    client.send(read.clone()).await;
+    let denied = client
+        .until(|r| r["command_id"] == read["command_id"])
+        .await;
+    assert_eq!(denied["type"], "error", "{denied}");
+    let frame = denied.to_string();
+    assert!(!frame.contains("PRIVATE_FULL_TRACE_INPUT"));
+    assert!(!frame.contains("PRIVATE_FULL_TRACE_OUTPUT"));
+    assert!(!frame.contains("unauthorized-local-client"));
+    assert!(!frame.contains("unused-fixture-key"));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn presenter_speech_draft_is_single_reactive_owner_for_gui_and_mcp() {
+    let mut fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+    let mut observer = fixture.app.presenter().speech_chat.observe();
+    let mut read = command("presenter_admin_read");
+    read["query"] = json!({"query":"speech_draft"});
+    client.send(read.clone()).await;
+    let initial = client
+        .until(|r| r["command_id"] == read["command_id"])
+        .await;
+    assert_eq!(initial["type"], "presenter_admin_read", "{initial}");
+    assert_eq!(initial["snapshot"]["draft_length"], 0);
+    assert!(initial["snapshot"].get("draft").is_none());
+
+    let mut write = command("presenter_admin_write");
+    write["change"] = json!({"change":"speech_draft","expected_character":"Crazy",
+        "expected_revision":0,"text":"PRIVATE_DRAFT_OWNED_BY_PRESENTER"});
+    client.send(write.clone()).await;
+    let saved = client
+        .until(|r| r["command_id"] == write["command_id"])
+        .await;
+    assert_eq!(saved["type"], "presenter_admin_write", "{saved}");
+    assert!(
+        !saved
+            .to_string()
+            .contains("PRIVATE_DRAFT_OWNED_BY_PRESENTER")
+    );
+    bounded(observer.changed()).await.unwrap();
+    let observed = observer.borrow_and_update().clone();
+    assert_eq!(observed.draft, "PRIVATE_DRAFT_OWNED_BY_PRESENTER");
+    assert_eq!(observed.selection.character, CharacterId::Crazy);
+    assert_eq!(observed.selection.revision, 0);
+
+    read["command_id"] = json!(Uuid::new_v4());
+    client.send(read.clone()).await;
+    let redacted = client
+        .until(|r| r["command_id"] == read["command_id"])
+        .await;
+    assert_eq!(
+        redacted["snapshot"]["draft_length"],
+        "PRIVATE_DRAFT_OWNED_BY_PRESENTER".len()
+    );
+    assert!(redacted["snapshot"].get("draft").is_none());
+    read["command_id"] = json!(Uuid::new_v4());
+    read["query"]["include_content"] = json!(true);
+    client.send(read.clone()).await;
+    let included = client
+        .until(|r| r["command_id"] == read["command_id"])
+        .await;
+    assert_eq!(
+        included["snapshot"]["draft"],
+        "PRIVATE_DRAFT_OWNED_BY_PRESENTER"
+    );
+
+    write["command_id"] = json!(Uuid::new_v4());
+    write["change"]["expected_revision"] = json!(10);
+    write["change"]["text"] = json!("stale");
+    client.send(write.clone()).await;
+    let stale = client
+        .until(|r| r["command_id"] == write["command_id"])
+        .await;
+    assert_eq!(stale["type"], "error", "{stale}");
+    assert_eq!(
+        fixture.app.presenter().speech_chat.snapshot().draft,
+        "PRIVATE_DRAFT_OWNED_BY_PRESENTER"
+    );
+
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn conversation_attachment_fence_is_owned_by_presenter() {
+    let fixture = Fixture::start(|_| {}).await;
+    let conversation = &fixture.app.presenter().conversation;
+    let snapshot = conversation.snapshot(CharacterId::Crazy).await.unwrap();
+    let fence = conversation.current_fence().unwrap();
+    assert_eq!(fence.at, snapshot.at);
+    assert_eq!(fence.selection, snapshot.selection);
     fixture.shutdown().await;
 }

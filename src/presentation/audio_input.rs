@@ -7,6 +7,7 @@ use crate::audio::{
 use std::sync::Arc;
 use tokio::sync::watch;
 
+#[derive(Clone)]
 pub struct AudioInputPresenter {
     owner: Arc<AudioInputOwner>,
     updates: watch::Receiver<MonitorSnapshot>,

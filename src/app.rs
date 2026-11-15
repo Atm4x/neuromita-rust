@@ -130,6 +130,7 @@ pub struct ApplicationConfig {
     pub voice: Arc<dyn VoiceProvider>,
     /// Optional dedicated remote voice catalog; enabled only by the desktop host.
     pub remote_voice_store: Option<std::path::PathBuf>,
+    pub telegram_admin: Option<Arc<crate::telegram_admin::TelegramAdmin>>,
     pub ai_runtime: Option<AiApplicationConfig>,
     pub ai_hub_install_root: Option<std::path::PathBuf>,
     pub ai_speech_inventory: Option<crate::ai_runtime::speech_catalog::SpeechInventory>,
@@ -183,6 +184,7 @@ impl ApplicationConfig {
             limits,
             voice: Arc::new(UnavailableVoiceProvider),
             remote_voice_store: None,
+            telegram_admin: None,
             ai_runtime: None,
             ai_hub_install_root: None,
             ai_speech_inventory: None,
@@ -368,6 +370,90 @@ pub enum ApplicationError {
     Server(#[from] std::io::Error),
 }
 
+/// Shared application speech capture administration for GUI and MCP clients.
+/// Neither interface owns a separate ASR worker, controller, or transcript queue.
+#[derive(Clone)]
+pub(crate) struct SharedSpeechCapture {
+    settings: Arc<SettingsPresenter>,
+    runtime: crate::presentation::RuntimeStatePresenter,
+    recognizer: Option<Arc<dyn crate::audio::session::SpeechTranscriber>>,
+    audio_input: Arc<crate::audio::input_owner::AudioInputOwner>,
+    controller: Arc<tokio::sync::Mutex<crate::audio::controller::SpeechSessionController>>,
+    transcripts: Arc<crate::audio::transcript_bridge::SpeechTranscriptHub>,
+    stop: CancellationToken,
+}
+
+impl SharedSpeechCapture {
+    pub(crate) fn transcripts(&self) -> Arc<crate::audio::transcript_bridge::SpeechTranscriptHub> {
+        Arc::clone(&self.transcripts)
+    }
+
+    pub(crate) async fn start(
+        &self,
+        character: CharacterId,
+        selection_revision: u64,
+        ffmpeg: std::path::PathBuf,
+        ffplay: std::path::PathBuf,
+    ) -> Result<(), String> {
+        if self.stop.is_cancelled() {
+            return Err("application is stopping".into());
+        }
+        let runtime = self.runtime.refresh_status().await;
+        if runtime.service(AiService::Asr).phase
+            != crate::ai_runtime::runtime_status::RuntimePhase::ModelReady
+        {
+            return Err("ASR model must be initialized before capture".into());
+        }
+        let recognizer = self
+            .recognizer
+            .as_ref()
+            .ok_or("ASR worker has not been activated")?;
+        let settings = self
+            .settings
+            .snapshot()
+            .map_err(|error| error.to_string())?;
+        let preferences = &settings.values.speech.asr;
+        let devices = crate::presentation::AudioInputPresenter::new(Arc::clone(&self.audio_input))
+            .devices()
+            .await
+            .map_err(|error| error.to_string())?;
+        if !devices.iter().any(|device| {
+            device.id == preferences.device_id && device.backend == preferences.audio_backend
+        }) {
+            return Err("selected recording device is unavailable for configured backend".into());
+        }
+        let config = crate::audio::controller::SpeechCaptureConfig::from_preferences(
+            preferences,
+            ffmpeg,
+            ffplay,
+        )
+        .map_err(|error| error.to_string())?;
+        let handler = crate::audio::session::SpeechInputHandler::new(
+            Arc::clone(recognizer),
+            self.transcripts.destination(character, selection_revision),
+            crate::audio::controller::playback(&config),
+        );
+        self.audio_input
+            .start_capture(handler, self.stop.child_token(), config)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) async fn stop(&self) {
+        let _ = self.controller.lock().await.press(false).await;
+        self.audio_input.stop_capture().await;
+    }
+
+    pub(crate) async fn press(&self, pressed: bool) -> Result<(), String> {
+        self.controller
+            .lock()
+            .await
+            .press(pressed)
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
 pub struct ApplicationLifecycle {
     bindings: Arc<ApiBindings>,
     timeline: Arc<Mutex<SessionTimeline>>,
@@ -378,6 +464,7 @@ pub struct ApplicationLifecycle {
     speech: Option<Arc<dyn crate::audio::session::SpeechTranscriber>>,
     audio_input: Arc<crate::audio::input_owner::AudioInputOwner>,
     speech_controller: Arc<tokio::sync::Mutex<crate::audio::controller::SpeechSessionController>>,
+    speech_capture: SharedSpeechCapture,
     speech_startup_warning: Option<String>,
     ai_recovery: Option<crate::ai_runtime::application::AiRecoveryHandle>,
     recovery_workers: Arc<ServiceWorkerRegistry>,
@@ -761,6 +848,7 @@ struct ApplicationOwner {
     prepared_claims: Vec<WorkerClaim>,
     ai_hub_install: Option<Arc<AiHubInstallCoordinator>>,
     ai_hub_native: Option<Arc<AiHubNativeService>>,
+    telegram_admin: Option<Arc<crate::telegram_admin::TelegramAdmin>>,
     installation: Option<Arc<InstallationOwner>>,
     live_speech: Option<Arc<LiveSpeechRuntime>>,
     speech_watch_task: Option<JoinHandle<()>>,
@@ -785,6 +873,7 @@ impl ApplicationLifecycle {
             limits,
             voice,
             remote_voice_store,
+            telegram_admin,
             ai_runtime,
             ai_hub_install_root,
             ai_speech_inventory,
@@ -873,6 +962,9 @@ impl ApplicationLifecycle {
                         Arc::clone(owner),
                     )
                 });
+        let speech_model_catalog = ai_hub_install_root.as_ref().map(|root| {
+            crate::ai_runtime::speech_catalog::SpeechModelCatalog::for_desktop(root.clone())
+        });
         let ai_hub_native = ai_hub_install_root
             .zip(installation.as_ref())
             .map(|(root, owner)| {
@@ -1191,11 +1283,20 @@ impl ApplicationLifecycle {
             ai_hub_native.clone(),
             Arc::clone(&service_workers),
         ));
-        let voice: Arc<dyn VoiceProvider> = if let Some(path) = remote_voice_store {
+        let remote_voice_admin = remote_voice_store
+            .map(|path| {
+                crate::remote_voice::RemoteVoiceAdmin::new(crate::remote_voice::RemoteVoiceStore {
+                    path,
+                })
+                .map(Arc::new)
+                .map_err(|error| ApplicationError::Task(error.to_string()))
+            })
+            .transpose()?;
+        let voice: Arc<dyn VoiceProvider> = if let Some(admin) = &remote_voice_admin {
             Arc::new(crate::remote_voice::RemoteVoiceRouter {
                 local: voice,
                 settings: Arc::clone(&settings_owner),
-                store: crate::remote_voice::RemoteVoiceStore { path },
+                admin: Arc::clone(admin),
                 client: crate::remote_voice::FishAudioClient::new()
                     .map_err(|error| ApplicationError::Task(error.to_string()))?,
             })
@@ -1314,11 +1415,12 @@ impl ApplicationLifecycle {
             limits.retained_finished.get(),
         );
         let presenter_task = Some(tokio::spawn(runner.run(presenter_stop.clone())));
-        let settings_presenter = SettingsPresenter::new(Arc::clone(&settings_owner));
+        let settings_presenter = Arc::new(SettingsPresenter::new(Arc::clone(&settings_owner)));
         let settings_stop = CancellationToken::new();
         let settings_task = Some(tokio::spawn(settings.run(settings_stop.clone())));
         let server_stop = CancellationToken::new();
         let bindings = Arc::new(ApiBindings {
+            core_instance_id: id,
             chat: api,
             timeline: Arc::clone(&timeline),
             characters,
@@ -1327,6 +1429,7 @@ impl ApplicationLifecycle {
             settings: settings_owner,
             presets: Arc::clone(&presets),
             games: Arc::clone(&games),
+            game_link: game_link.as_ref().map(|(_, handle)| handle.clone()),
             reminders,
         });
         let mut ai_runtime_status = if let Some(live) = &live_speech {
@@ -1399,6 +1502,15 @@ impl ApplicationLifecycle {
         let audio_input = Arc::new(crate::audio::input_owner::AudioInputOwner::new(Arc::clone(
             &speech_controller,
         )));
+        let speech_capture = SharedSpeechCapture {
+            settings: Arc::clone(&settings_presenter),
+            runtime: ai_runtime_status.clone(),
+            recognizer: speech.clone(),
+            audio_input: Arc::clone(&audio_input),
+            controller: Arc::clone(&speech_controller),
+            transcripts: Arc::new(crate::audio::transcript_bridge::SpeechTranscriptHub::default()),
+            stop: owners_stop.child_token(),
+        };
         let speech_watch_task = live_speech.as_ref().map(|live| {
             tokio::spawn(watch_speech_settings(
                 Arc::clone(live),
@@ -1418,7 +1530,7 @@ impl ApplicationLifecycle {
             reminders_stop,
             reminders_task: Some(reminders_task),
             workers_stop,
-            owners_stop,
+            owners_stop: owners_stop.clone(),
             presenter_stop,
             workers,
             owners,
@@ -1434,6 +1546,7 @@ impl ApplicationLifecycle {
             prepared_claims,
             ai_hub_install: ai_hub_install.clone(),
             ai_hub_native: ai_hub_native.clone(),
+            telegram_admin: telegram_admin.clone(),
             installation,
             live_speech,
             speech_watch_task,
@@ -1444,12 +1557,89 @@ impl ApplicationLifecycle {
                 lifecycle.run_with_api(owner.server_stop.clone(), Arc::clone(&bindings)),
             ));
         }
+        let conversation_presenter = ConversationPresenter::new(
+            chat.clone(),
+            CharactersPresenter::new(bindings.characters.clone()),
+            Arc::clone(&timeline),
+            Arc::clone(&bindings.settings),
+            Arc::clone(&presets),
+        )
+        .with_attachment_store(timeline_assets.clone());
+        let presets_presenter = PresetsPresenter::new(Arc::clone(&presets));
+        let graph_presenter =
+            crate::presentation::GraphMaintenancePresenter::new(owner.server_stop.clone());
+        let guide_persistence = crate::presentation::GuidePersistencePresenter::new();
+        let prompt_folder = crate::presentation::PromptFolderPresenter::new(
+            prompts.clone(),
+            Arc::clone(&settings_presenter),
+        );
+        let selection_presenter =
+            std::sync::Arc::new(crate::presentation::ChatSelectionPresenter::new(
+                speech_capture.clone(),
+                Arc::clone(&settings_presenter),
+            ));
+        let speech_chat_presenter = crate::presentation::SpeechChatPresenter::new(
+            chat.clone(),
+            Arc::clone(&selection_presenter),
+            Arc::clone(&settings_presenter),
+            speech_capture.transcripts(),
+            owners_stop.child_token(),
+        );
+        let telegram_presenter = telegram_admin.as_ref().map(|owner| {
+            crate::presentation::TelegramPresenter::new(
+                Arc::clone(owner),
+                Arc::clone(&settings_presenter),
+            )
+        });
+        if let Some(presenter) = telegram_presenter.clone() {
+            let cancelled = owner.owners_stop.child_token();
+            owner.owners.push(tokio::spawn(async move {
+                tokio::select! {
+                    _ = cancelled.cancelled() => {},
+                    result = presenter.auto_connect() => {
+                        if result.is_err() {
+                            tracing::debug!("automatic Telegram authorization unavailable");
+                        }
+                    }
+                }
+            }));
+        }
+        let remote_voice_presenter = remote_voice_admin
+            .as_ref()
+            .map(|owner| crate::presentation::RemoteVoicePresenter::new(Arc::clone(owner)));
+        let ai_install_presenter = ai_hub_install
+            .as_ref()
+            .map(|owner| crate::presentation::AiHubInstallPresenter::new(Arc::clone(owner)));
+        let native_hub_presenter = ai_hub_native
+            .as_ref()
+            .map(|owner| crate::presentation::NativeHubApi::new(Arc::clone(owner)));
         owner.server_task = Some(tokio::spawn(server_lifecycle.run_with_presenter(
             owner.server_stop.clone(),
             Arc::clone(&bindings),
             Some(crate::presentation::PresenterProbe::new(
                 chat.clone(),
+                std::sync::Arc::clone(&selection_presenter),
+                speech_chat_presenter.clone(),
                 ai_runtime_status.clone(),
+                speech_view.clone(),
+                releases.clone(),
+                crate::presentation::AudioInputPresenter::new(Arc::clone(&audio_input)),
+                settings_presenter.voice.clone(),
+                settings_presenter.onboarding.clone(),
+                conversation_presenter.clone(),
+                presets_presenter.clone(),
+                settings_presenter.presets.clone(),
+                Arc::clone(&settings_presenter),
+                CharactersPresenter::new(bindings.characters.clone()),
+                graph_presenter.clone(),
+                guide_persistence.clone(),
+                prompt_folder.clone(),
+                native_hub_presenter.clone(),
+                ai_install_presenter.clone(),
+                speech_model_catalog,
+                speech_capture.clone(),
+                telegram_presenter.clone(),
+                remote_voice_presenter.clone(),
             )),
         )));
         let stop = CancellationToken::new();
@@ -1462,25 +1652,28 @@ impl ApplicationLifecycle {
         });
         Ok(Self {
             presenter: GuiPresenter {
+                ai_install: ai_install_presenter,
+                native_hub: native_hub_presenter,
+                selection: selection_presenter,
                 audio_input: crate::presentation::AudioInputPresenter::new(Arc::clone(
                     &audio_input,
                 )),
                 prompts: prompts.clone(),
                 speech: speech_view,
+                speech_chat: speech_chat_presenter,
                 ai_runtime: ai_runtime_status,
                 releases,
                 connections: ConnectionsPresenter::new(server.clone()),
-                conversation: ConversationPresenter::new(
-                    chat.clone(),
-                    CharactersPresenter::new(bindings.characters.clone()),
-                    Arc::clone(&timeline),
-                    Arc::clone(&bindings.settings),
-                    Arc::clone(&presets),
-                ),
+                conversation: conversation_presenter,
                 chat,
                 settings: settings_presenter,
-                presets: PresetsPresenter::new(Arc::clone(&presets)),
+                presets: presets_presenter,
                 characters: CharactersPresenter::new(bindings.characters.clone()),
+                graph: graph_presenter,
+                guide_persistence,
+                prompt_folder,
+                telegram: telegram_presenter,
+                remote_voice: remote_voice_presenter,
             },
             bindings,
             timeline,
@@ -1490,6 +1683,7 @@ impl ApplicationLifecycle {
             speech,
             audio_input,
             speech_controller,
+            speech_capture,
             speech_startup_warning,
             ai_recovery,
             recovery_workers: Arc::clone(&service_workers),
@@ -1603,8 +1797,14 @@ impl ApplicationLifecycle {
         self.audio_input.start_capture(handler, stop, config).await
     }
 
+    pub fn observe_transcripts(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<crate::audio::transcript_bridge::RoutedTranscript> {
+        self.speech_capture.transcripts.subscribe()
+    }
+
     pub async fn stop_speech_capture(&self) {
-        self.audio_input.stop_capture().await;
+        self.speech_capture.stop().await;
     }
 
     pub async fn press_speech_button(
@@ -1848,6 +2048,9 @@ impl ApplicationLifecycle {
 
     fn request_stop(&self) {
         if !self.stop.is_cancelled() {
+            if let Some(remote) = self.presenter.remote_voice.as_ref() {
+                remote.cancel();
+            }
             self.bindings.chat.close();
             self.bindings.settings.close();
             runtime::begin_stopping(self.id);
@@ -1905,6 +2108,9 @@ impl ApplicationOwner {
             if let Err(error) = owner.await {
                 failure = Some(ApplicationError::Task(error.to_string()));
             }
+        }
+        if let Some(telegram) = self.telegram_admin.take() {
+            telegram.disconnect().await;
         }
         if let Some(task) = self.speech_watch_task.take()
             && let Err(error) = task.await
