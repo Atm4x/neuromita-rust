@@ -24,6 +24,10 @@ impl PromptFolderPresenter {
     pub fn new(catalog: Option<Arc<PromptCatalog>>, settings: Arc<SettingsPresenter>) -> Self {
         Self { catalog, settings }
     }
+    pub fn catalog(&self) -> Option<&PromptCatalog> {
+        self.catalog.as_deref()
+    }
+
     pub fn inventory(&self) -> PromptInventory {
         let Some(catalog) = &self.catalog else {
             return PromptInventory {

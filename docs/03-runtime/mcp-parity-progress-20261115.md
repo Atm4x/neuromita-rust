@@ -1,4 +1,4 @@
-# MCP ↔ GUI parity progress — 2026-11-15 (Cycle 20)
+# MCP ↔ GUI parity progress — 2026-11-15 (Cycle 21)
 
 ## Scope and counting
 
@@ -6,11 +6,11 @@ The denominator is the **68 `Command` variants** in `src/bin/neuromita-gui/runti
 
 | State | Commands | Share |
 |---|---:|---:|
-| Fully covered | **64** | **94.1%** |
-| Partially covered | **4** | **5.9%** |
+| Fully covered | **65** | **95.6%** |
+| Partially covered | **3** | **4.4%** |
 | No coverage | **0** | **0%** |
 
-History of source-based counts: Cycle 15: 50 full / 11 partial / 7 missing; Cycle 16: 59 full / 9 partial / 0 missing; Cycle 17: 62 full / 6 partial; Cycle 18: 63 full / 5 partial; Cycle 19: diagnostics safe subset (still partial); Cycle 20: prompt catalog refresh, 64 full / 4 partial.
+History of source-based counts: Cycle 15: 50 full / 11 partial / 7 missing; Cycle 16: 59 full / 9 partial / 0 missing; Cycle 17: 62 full / 6 partial; Cycle 18: 63 full / 5 partial; Cycle 19: diagnostics safe subset (still partial); Cycle 20: prompt catalog refresh, 64 full / 4 partial; Cycle 21: GUI debug selection projection, 65 full / 3 partial.
 
 ## Cycle 20: RefreshPromptCatalog
 
@@ -24,14 +24,19 @@ A new read-only MCP tool `presenter_prompt_catalog(limit=1..200)` asks the *same
 - `cargo fmt --package neuromita -- --check` and `git diff --check`: PASS.
 - `cargo check --locked --offline --features "gui mcp" --bin neuromita-gui`: **PASS** (four unrelated compiler warnings). This checks compilation, not Slint rendering or Unity E2E.
 
-## Four remaining partial commands
+## Cycle 21: DebugSelect debug projection
+
+The desktop DebugSelect continues to own its per-window selected character, but its debug output now goes through the same stateless `project_character_debug` computation as MCP. The MCP `presenter_character_debug` tool can request exactly the same current character projection without impersonating the GUI window or mutating selection state. By default only the field count is returned; exposing labels and values requires both MCP `--allow-content` and Core-host `NEUROMITA_ENABLE_LOCAL_CHARACTER_DEBUG=1`, since the existing loopback LocalControl port is not OS-user authenticated. The projection reuses the active character settings, PromptCatalog and the existing credential-filtering logic.
+
+Verified: **56/56 LocalControl** and **8/8 MCP** tests on Rust 1.100.0; GUI `cargo check --locked --offline --features "gui mcp" --bin neuromita-gui` **PASS** on memory-limited retry (the first attempt was OOM-killed, not a compiler diagnostic). Full GUI rendering remains untested.
+
+## Three remaining partial commands
 
 | GUI Command | Remaining acceptance condition |
 |---|---|
 | `Diagnostics` | GUI exports raw full diagnostic trace; MCP deliberately provides only bounded redacted state. A full export needs a distinct privileged and auditable access policy, not a silent content downgrade. |
 | `Select` | GUI selection owns per-window character and ASR routing with a `selection_revision` fence. MCP can inspect but cannot impersonate the active GUI session or change its selection safely. Requires explicit session ownership. |
 | `Refresh` | GUI command is currently a no-op *handler* that re-enters the ordinary snapshot loop. MCP can inspect latest history/conversation, but there is no shared refresh receipt/event proving identical UI lifecycle semantics. |
-| `DebugSelect` | GUI independently selects the character in the debug panel. MCP can inspect character state but does not change or reproduce that per-window panel selection/rendered debug projection. |
 
 ## Non-command release gates (not included in the percentage)
 

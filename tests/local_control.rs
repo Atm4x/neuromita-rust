@@ -4089,3 +4089,38 @@ async fn prompt_catalog_refresh_uses_same_live_owner_as_gui() {
     fixture.shutdown().await;
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+#[tokio::test]
+async fn debug_select_projection_is_shared_and_private_by_default() {
+    let fixture = Fixture::start(|_| {}).await;
+    let expected = neuromita::presentation::project_character_debug(
+        &fixture.app.presenter().characters,
+        fixture.app.presenter().settings.as_ref(),
+        fixture.app.presenter().prompts.as_deref(),
+        CharacterId::Crazy,
+    )
+    .await
+    .unwrap();
+    let mut client = fixture.connect().await;
+    let mut command = command("presenter_admin_read");
+    command["query"] = json!({"query":"character_debug","character":"Crazy"});
+    client.send(command.clone()).await;
+    let sanitized = client
+        .until(|r| r["command_id"] == command["command_id"])
+        .await;
+    assert_eq!(sanitized["type"], "presenter_admin_read", "{sanitized}");
+    assert_eq!(sanitized["snapshot"]["source"], "character_debug_presenter");
+    assert_eq!(sanitized["snapshot"]["field_count"], expected.len());
+    assert_eq!(sanitized["snapshot"]["fields"], json!([]));
+    assert_eq!(sanitized["snapshot"]["content_included"], false);
+    assert!(!sanitized.to_string().contains("unused-fixture-key"));
+    command["command_id"] = json!(Uuid::new_v4());
+    command["query"]["include_content"] = json!(true);
+    client.send(command.clone()).await;
+    let denied = client
+        .until(|r| r["command_id"] == command["command_id"])
+        .await;
+    assert_eq!(denied["type"], "error", "{denied}");
+    assert!(!denied.to_string().contains("unused-fixture-key"));
+    fixture.shutdown().await;
+}

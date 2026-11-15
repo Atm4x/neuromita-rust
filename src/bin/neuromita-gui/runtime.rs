@@ -1571,40 +1571,12 @@ async fn observe(
 }
 
 async fn character_debug_snapshot(api: &GuiPresenter, character: CharacterId) -> Update {
-    let result = async {
-        let post_dsl = if let Some(catalog) = api.prompts.as_ref() {
-            let settings = api.settings.snapshot().map_err(|error| error.to_string())?;
-            let selected = settings
-                .values
-                .characters
-                .for_character(character)
-                .prompt_set
-                .as_deref();
-            if selected.is_none()
-                && catalog
-                    .list(character)
-                    .map_err(|error| error.to_string())?
-                    .is_empty()
-            {
-                // Match request admission: without an explicit selection and
-                // without any packs, use the built-in character debug fields.
-                None
-            } else {
-                let name = catalog
-                    .resolve_set(character, selected)
-                    .map_err(|error| error.to_string())?;
-                catalog
-                    .load_post_rules(character, &name)
-                    .map_err(|error| error.to_string())?
-            }
-        } else {
-            None
-        };
-        api.characters
-            .debug_display(character, post_dsl.as_ref())
-            .await
-            .map_err(|error| error.to_string())
-    }
+    let result = neuromita::presentation::project_character_debug(
+        &api.characters,
+        api.settings.as_ref(),
+        api.prompts.as_deref(),
+        character,
+    )
     .await;
     match result {
         Ok(fields) => Update::CharacterDebug {

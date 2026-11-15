@@ -43,6 +43,11 @@ pub(crate) enum PresenterRead {
         #[serde(default = "default_prompt_catalog_limit")]
         limit: usize,
     },
+    CharacterDebug {
+        character: CharacterId,
+        #[serde(default)]
+        include_content: bool,
+    },
     SpeechTranscript {
         #[serde(default)]
         include_content: bool,
@@ -438,6 +443,41 @@ impl PresenterProbe {
                     "note":"bounded Presenter retention only; request errors and content are withheld",
                     "evidence_level":"presenter_snapshot"}),
                 )
+            }
+            PresenterRead::CharacterDebug {
+                character,
+                include_content,
+            } => {
+                if include_content
+                    && std::env::var("NEUROMITA_ENABLE_LOCAL_CHARACTER_DEBUG").as_deref() != Ok("1")
+                {
+                    return Err("character debug content requires Core host opt-in".into());
+                }
+                let fields = super::project_character_debug(
+                    &self.characters,
+                    self.settings.as_ref(),
+                    self.prompt_folder.catalog(),
+                    character,
+                )
+                .await?;
+                let count = fields.len();
+                let output = if include_content {
+                    fields
+                        .into_iter()
+                        .map(|field| json!({"label":field.label,"value":field.value}))
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
+                Ok(json!({
+                    "source":"character_debug_presenter",
+                    "character":character,
+                    "field_count":count,
+                    "fields":output,
+                    "content_included":include_content,
+                    "requires_host_opt_in":"NEUROMITA_ENABLE_LOCAL_CHARACTER_DEBUG",
+                    "evidence_level":"presenter_snapshot",
+                }))
             }
             PresenterRead::PromptCatalog { limit } => {
                 if !(1..=200).contains(&limit) {

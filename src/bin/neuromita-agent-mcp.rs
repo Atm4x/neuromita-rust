@@ -383,6 +383,12 @@ impl ServerHandler for NeuroMita {
                 &["character","version","source","text"],json!({"character":{"type":"string"},
                     "version":{"type":"object"},"source":{"type":"string","maxLength":4096},
                     "text":{"type":"string","maxLength":65536}})),
+            inspection_tool("presenter_character_debug",
+                "Inspect the same character debug field projection as the GUI, without changing the GUI window selection. By default only field count is returned; values require --allow-content and NEUROMITA_ENABLE_LOCAL_CHARACTER_DEBUG=1 on Core host.",
+                &["character"],json!({
+                    "character":{"type":"string"},
+                    "include_content":{"type":"boolean"}
+                })),
             inspection_tool("presenter_prompt_catalog",
                 "Rescan the exact PromptCatalog used by the GUI and return a bounded list of currently installed prompt set metadata. Requires --allow-content; no prompt source text or filesystem paths are returned.",
                 &[], json!({"limit":{"type":"integer","minimum":1,"maximum":200}})),
@@ -484,6 +490,15 @@ impl ServerHandler for NeuroMita {
         {
             return Err(ErrorData::invalid_params(
                 "transcript text requires --allow-content",
+                None,
+            ));
+        }
+        if request.name == "presenter_character_debug"
+            && args.get("include_content") == Some(&Value::Bool(true))
+            && !self.allow_content
+        {
+            return Err(ErrorData::invalid_params(
+                "debug values require --allow-content",
                 None,
             ));
         }
@@ -879,6 +894,19 @@ fn command_for_tool(name: &str, mut args: Map<String, Value>) -> Result<Value, E
             }
             json!({"command":"presenter_admin_read","query":{
                 "query":"chat_diagnostics","character":character,"limit":limit}})
+        }
+        "presenter_character_debug" => {
+            let character = string(&mut args, "character")?;
+            let include_content = args.remove("include_content").unwrap_or(json!(false));
+            if !include_content.is_boolean() {
+                return Err(ErrorData::invalid_params(
+                    "include_content must be boolean",
+                    None,
+                ));
+            }
+            json!({"command":"presenter_admin_read","query":{
+                "query":"character_debug","character":character,
+                "include_content":include_content}})
         }
         "presenter_prompt_catalog" => {
             let limit = args.remove("limit").unwrap_or(json!(100));
@@ -2237,6 +2265,20 @@ mod cycle16_gui_parity_tests {
         )
         .unwrap();
         assert_eq!(file["change"]["change"], "attach_file");
+        let debug = command_for_tool(
+            "presenter_character_debug",
+            args(json!({"character":"Crazy"})),
+        )
+        .unwrap();
+        assert_eq!(debug["query"]["query"], "character_debug");
+        assert_eq!(debug["query"]["include_content"], false);
+        assert!(
+            command_for_tool(
+                "presenter_character_debug",
+                args(json!({"character":"Crazy","include_content":"yes"}))
+            )
+            .is_err()
+        );
         let catalog =
             command_for_tool("presenter_prompt_catalog", args(json!({"limit":15}))).unwrap();
         assert_eq!(catalog["query"]["query"], "prompt_catalog");
