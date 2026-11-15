@@ -342,6 +342,27 @@ impl CharactersPresenter {
         Ok(project_debug_values(id, &vars, program))
     }
 
+    /// Explicit forgotten-memory inspection, shared by all interaction surfaces.
+    /// This does not mutate canonical memory or inject facts into generation.
+    pub async fn recall_forgotten(
+        &self,
+        id: CharacterId,
+        memory_id: crate::memory::MemoryId,
+        query: &str,
+    ) -> Result<Option<String>, String> {
+        if query.trim().is_empty() || query.len() > 4096 {
+            return Err("recall query must contain 1..4096 characters".into());
+        }
+        self.get(id).map_err(|error| error.to_string())?;
+        crate::api::HistoricalRecallApi::inspect(
+            id,
+            crate::knowledge::forgotten_recall::RecallSelector::Ids(vec![memory_id]),
+            query,
+        )
+        .await
+        .map_err(|error| error.to_string())
+    }
+
     pub async fn memories(
         &self,
         id: CharacterId,

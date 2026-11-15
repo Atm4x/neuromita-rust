@@ -281,6 +281,19 @@ impl ConversationPresenter {
         self
     }
 
+    /// Capture the current Timeline anchor and selection atomically for GUI commands.
+    /// Remote clients can instead pass their previously observed version directly.
+    pub fn current_fence(&self) -> Result<TimelineFence, String> {
+        let timeline = self
+            .timeline
+            .lock()
+            .map_err(|_| "Timeline mutex poisoned")?;
+        Ok(TimelineFence {
+            at: timeline.anchor(),
+            selection: timeline.selection(),
+        })
+    }
+
     /// One selected Timeline event with verified binary references, shared by GUI/MCP.
     pub fn attach_file(
         &self,

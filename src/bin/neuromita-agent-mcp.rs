@@ -88,6 +88,18 @@ impl ServerHandler for NeuroMita {
                 json!({"request_id": {"type":"string", "format":"uuid"}}),
             ),
             inspection_tool(
+                "presenter_speech_draft",
+                "Read the application-owned speech/chat draft revision and optional text. Same owner is used by GUI; --allow-content is required for draft text.",
+                &[], json!({"include_content":{"type":"boolean"}})),
+            admin_write_tool(
+                "presenter_speech_draft_write",
+                "Set the shared speech/chat draft with selection CAS. GUI observes changes; requires --allow-write. No draft text is returned.",
+                &["expected_character","expected_revision","text"], json!({
+                    "expected_character":{"type":"string"},
+                    "expected_revision":{"type":"integer","minimum":0},
+                    "text":{"type":"string","maxLength":65536}
+                })),
+            inspection_tool(
                 "presenter_chat_selection",
                 "Read the canonical ChatSelectionPresenter character and revision shared by GUI and MCP. No window state or session ID.",
                 &[],json!({})),
@@ -526,8 +538,10 @@ impl ServerHandler for NeuroMita {
                 None,
             ));
         }
-        if request.name == "presenter_conversation"
-            && args.get("include_content") == Some(&Value::Bool(true))
+        if matches!(
+            request.name.as_ref(),
+            "presenter_conversation" | "presenter_speech_draft"
+        ) && args.get("include_content") == Some(&Value::Bool(true))
             && !self.allow_content
         {
             return Err(ErrorData::invalid_params(
@@ -567,6 +581,7 @@ impl ServerHandler for NeuroMita {
                 | "presenter_guide_retry"
                 | "presenter_settings_retry"
                 | "presenter_select_character"
+                | "presenter_speech_draft_write"
         ) && !self.allow_write
         {
             return Err(ErrorData::invalid_params(
@@ -935,6 +950,34 @@ fn command_for_tool(name: &str, mut args: Map<String, Value>) -> Result<Value, E
         }
         "presenter_chat_selection" => {
             json!({"command":"presenter_admin_read","query":{"query":"chat_selection"}})
+        }
+        "presenter_speech_draft" => {
+            let include_content = args.remove("include_content").unwrap_or(json!(false));
+            if !include_content.is_boolean() {
+                return Err(ErrorData::invalid_params(
+                    "include_content must be boolean",
+                    None,
+                ));
+            }
+            json!({"command":"presenter_admin_read","query":{
+                "query":"speech_draft", "include_content":include_content}})
+        }
+        "presenter_speech_draft_write" => {
+            let expected_character = string(&mut args, "expected_character")?;
+            let expected_revision = args
+                .remove("expected_revision")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| ErrorData::invalid_params("expected_revision must be u64", None))?;
+            let text = string(&mut args, "text")?;
+            if text.len() > 65536 {
+                return Err(ErrorData::invalid_params(
+                    "draft length exceeds 65536",
+                    None,
+                ));
+            }
+            json!({"command":"presenter_admin_write","change":{
+                "change":"speech_draft","expected_character":expected_character,
+                "expected_revision":expected_revision,"text":text}})
         }
         "presenter_select_character" => {
             let character = string(&mut args, "character")?;

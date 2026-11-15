@@ -565,12 +565,14 @@ fn chat_feedback_and_asr_callbacks_are_scoped_to_selection_revision() {
     let old_draft = window.get_chat_draft();
     super::super::sandbox::apply(
         &window,
-        Update::RecognizedText {
-            origin: first,
-            text: "obsolete ASR".into(),
-            auto_send_after: Some(std::time::Duration::ZERO),
-            merge_with_draft: true,
-        },
+        Update::SpeechDraft(neuromita::presentation::SpeechDraftSnapshot {
+            selection: neuromita::presentation::ChatSelection {
+                character: first.character,
+                revision: first.selection_revision,
+            },
+            draft: "obsolete ASR".into(),
+            revision: 1,
+        }),
         &editor,
         &revision,
     );
@@ -620,27 +622,28 @@ fn chat_feedback_and_asr_callbacks_are_scoped_to_selection_revision() {
     assert_eq!(window.get_chat_attachment_path(), "/test/identical.png");
     super::super::sandbox::apply(
         &window,
-        Update::RecognizedText {
-            origin: first,
-            text: "old A ASR".into(),
-            auto_send_after: Some(std::time::Duration::ZERO),
-            merge_with_draft: false,
-        },
+        Update::SpeechDraft(neuromita::presentation::SpeechDraftSnapshot {
+            selection: neuromita::presentation::ChatSelection {
+                character: first.character,
+                revision: first.selection_revision,
+            },
+            draft: "old A ASR".into(),
+            revision: 2,
+        }),
         &editor,
         &revision,
     );
     assert_eq!(window.get_chat_draft(), "identical draft");
     super::super::sandbox::apply(
         &window,
-        Update::RecognizedText {
-            origin: ChatOrigin {
+        Update::SpeechDraft(neuromita::presentation::SpeechDraftSnapshot {
+            selection: neuromita::presentation::ChatSelection {
                 character: CharacterId::Crazy,
-                selection_revision: 2,
+                revision: 2,
             },
-            text: "current ASR".into(),
-            auto_send_after: None,
-            merge_with_draft: true,
-        },
+            draft: "identical draft current ASR".into(),
+            revision: 3,
+        }),
         &editor,
         &revision,
     );

@@ -398,6 +398,16 @@ pub(super) fn bind_chat_actions(
     let send = dispatch.clone();
     let weak = window.as_weak();
     let revision = selection_revision.clone();
+    window.on_chat_draft_changed(move |text| {
+        if let Some(window) = weak.upgrade()
+            && let Some(origin) = current_origin(&window, &revision)
+        {
+            send(Command::DraftChanged(origin, text.into()));
+        }
+    });
+    let send = dispatch.clone();
+    let weak = window.as_weak();
+    let revision = selection_revision.clone();
     window.on_chat_attach(move |text, path| {
         if let Some(window) = weak.upgrade() {
             if let Some(origin) = current_origin(&window, &revision) {
@@ -571,43 +581,16 @@ fn apply_with_catalog(
                 render_chat_selection(window, revision, selected);
             }
         }
-        Update::RecognizedText {
-            origin,
-            text,
-            auto_send_after,
-            merge_with_draft,
-        } => {
-            if !matches_origin(window, origin, revision) {
-                return;
-            }
-            let previous = window.get_chat_draft();
-            let combined = if previous.trim().is_empty() {
-                text
-            } else {
-                format!(
-                    "{}{}{}",
-                    previous,
-                    if merge_with_draft { " " } else { "\n" },
-                    text
-                )
-            };
-            window.set_chat_draft(combined.clone().into());
-            if let Some(delay) = auto_send_after {
-                if delay.is_zero() {
-                    window.invoke_chat_send(combined.into());
-                } else {
-                    let weak = window.as_weak();
-                    let revision = Arc::clone(revision);
-                    slint::Timer::single_shot(delay, move || {
-                        if let Some(window) = weak.upgrade()
-                            && matches_origin(&window, origin, &revision)
-                            && window.get_chat_draft() == combined
-                            && !window.get_chat_sending()
-                        {
-                            window.invoke_chat_send(combined.into());
-                        }
-                    });
-                }
+        Update::SpeechDraft(snapshot) => {
+            if matches_origin(
+                window,
+                ChatOrigin {
+                    character: snapshot.selection.character,
+                    selection_revision: snapshot.selection.revision,
+                },
+                revision,
+            ) {
+                window.set_chat_draft(snapshot.draft.into());
             }
         }
         Update::SpeechSessionStatus(snapshot) => {

@@ -378,6 +378,7 @@ pub(crate) struct SharedSpeechCapture {
     runtime: crate::presentation::RuntimeStatePresenter,
     recognizer: Option<Arc<dyn crate::audio::session::SpeechTranscriber>>,
     audio_input: Arc<crate::audio::input_owner::AudioInputOwner>,
+    controller: Arc<tokio::sync::Mutex<crate::audio::controller::SpeechSessionController>>,
     transcripts: Arc<crate::audio::transcript_bridge::SpeechTranscriptHub>,
     stop: CancellationToken,
 }
@@ -439,7 +440,17 @@ impl SharedSpeechCapture {
     }
 
     pub(crate) async fn stop(&self) {
+        let _ = self.controller.lock().await.press(false).await;
         self.audio_input.stop_capture().await;
+    }
+
+    pub(crate) async fn press(&self, pressed: bool) -> Result<(), String> {
+        self.controller
+            .lock()
+            .await
+            .press(pressed)
+            .await
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -837,6 +848,7 @@ struct ApplicationOwner {
     prepared_claims: Vec<WorkerClaim>,
     ai_hub_install: Option<Arc<AiHubInstallCoordinator>>,
     ai_hub_native: Option<Arc<AiHubNativeService>>,
+    telegram_admin: Option<Arc<crate::telegram_admin::TelegramAdmin>>,
     installation: Option<Arc<InstallationOwner>>,
     live_speech: Option<Arc<LiveSpeechRuntime>>,
     speech_watch_task: Option<JoinHandle<()>>,
@@ -1495,6 +1507,7 @@ impl ApplicationLifecycle {
             runtime: ai_runtime_status.clone(),
             recognizer: speech.clone(),
             audio_input: Arc::clone(&audio_input),
+            controller: Arc::clone(&speech_controller),
             transcripts: Arc::new(crate::audio::transcript_bridge::SpeechTranscriptHub::default()),
             stop: owners_stop.child_token(),
         };
@@ -1517,7 +1530,7 @@ impl ApplicationLifecycle {
             reminders_stop,
             reminders_task: Some(reminders_task),
             workers_stop,
-            owners_stop,
+            owners_stop: owners_stop.clone(),
             presenter_stop,
             workers,
             owners,
@@ -1533,6 +1546,7 @@ impl ApplicationLifecycle {
             prepared_claims,
             ai_hub_install: ai_hub_install.clone(),
             ai_hub_native: ai_hub_native.clone(),
+            telegram_admin: telegram_admin.clone(),
             installation,
             live_speech,
             speech_watch_task,
@@ -1562,12 +1576,48 @@ impl ApplicationLifecycle {
         let selection_presenter = std::sync::Arc::new(
             crate::presentation::ChatSelectionPresenter::new(speech_capture.clone()),
         );
+        let speech_chat_presenter = crate::presentation::SpeechChatPresenter::new(
+            chat.clone(),
+            Arc::clone(&selection_presenter),
+            Arc::clone(&settings_presenter),
+            speech_capture.transcripts(),
+            owners_stop.child_token(),
+        );
+        let telegram_presenter = telegram_admin.as_ref().map(|owner| {
+            crate::presentation::TelegramPresenter::new(
+                Arc::clone(owner),
+                Arc::clone(&settings_presenter),
+            )
+        });
+        if let Some(presenter) = telegram_presenter.clone() {
+            let cancelled = owner.owners_stop.child_token();
+            owner.owners.push(tokio::spawn(async move {
+                tokio::select! {
+                    _ = cancelled.cancelled() => {},
+                    result = presenter.auto_connect() => {
+                        if result.is_err() {
+                            tracing::debug!("automatic Telegram authorization unavailable");
+                        }
+                    }
+                }
+            }));
+        }
+        let remote_voice_presenter = remote_voice_admin
+            .as_ref()
+            .map(|owner| crate::presentation::RemoteVoicePresenter::new(Arc::clone(owner)));
+        let ai_install_presenter = ai_hub_install
+            .as_ref()
+            .map(|owner| crate::presentation::AiHubInstallPresenter::new(Arc::clone(owner)));
+        let native_hub_presenter = ai_hub_native
+            .as_ref()
+            .map(|owner| crate::presentation::NativeHubApi::new(Arc::clone(owner)));
         owner.server_task = Some(tokio::spawn(server_lifecycle.run_with_presenter(
             owner.server_stop.clone(),
             Arc::clone(&bindings),
             Some(crate::presentation::PresenterProbe::new(
                 chat.clone(),
                 std::sync::Arc::clone(&selection_presenter),
+                speech_chat_presenter.clone(),
                 ai_runtime_status.clone(),
                 speech_view.clone(),
                 releases.clone(),
@@ -1582,13 +1632,12 @@ impl ApplicationLifecycle {
                 graph_presenter.clone(),
                 guide_persistence.clone(),
                 prompt_folder.clone(),
-                ai_hub_native.clone(),
-                ai_hub_install.clone(),
+                native_hub_presenter.clone(),
+                ai_install_presenter.clone(),
                 speech_model_catalog,
-                Arc::clone(&speech_controller),
                 speech_capture.clone(),
-                telegram_admin.clone(),
-                remote_voice_admin.clone(),
+                telegram_presenter.clone(),
+                remote_voice_presenter.clone(),
             )),
         )));
         let stop = CancellationToken::new();
@@ -1601,12 +1650,15 @@ impl ApplicationLifecycle {
         });
         Ok(Self {
             presenter: GuiPresenter {
+                ai_install: ai_install_presenter,
+                native_hub: native_hub_presenter,
                 selection: selection_presenter,
                 audio_input: crate::presentation::AudioInputPresenter::new(Arc::clone(
                     &audio_input,
                 )),
                 prompts: prompts.clone(),
                 speech: speech_view,
+                speech_chat: speech_chat_presenter,
                 ai_runtime: ai_runtime_status,
                 releases,
                 connections: ConnectionsPresenter::new(server.clone()),
@@ -1618,8 +1670,8 @@ impl ApplicationLifecycle {
                 graph: graph_presenter,
                 guide_persistence,
                 prompt_folder,
-                telegram_admin,
-                remote_voice_admin,
+                telegram: telegram_presenter,
+                remote_voice: remote_voice_presenter,
             },
             bindings,
             timeline,
@@ -1994,7 +2046,7 @@ impl ApplicationLifecycle {
 
     fn request_stop(&self) {
         if !self.stop.is_cancelled() {
-            if let Some(remote) = self.presenter.remote_voice_admin.as_ref() {
+            if let Some(remote) = self.presenter.remote_voice.as_ref() {
                 remote.cancel();
             }
             self.bindings.chat.close();
@@ -2054,6 +2106,9 @@ impl ApplicationOwner {
             if let Err(error) = owner.await {
                 failure = Some(ApplicationError::Task(error.to_string()));
             }
+        }
+        if let Some(telegram) = self.telegram_admin.take() {
+            telegram.disconnect().await;
         }
         if let Some(task) = self.speech_watch_task.take()
             && let Err(error) = task.await

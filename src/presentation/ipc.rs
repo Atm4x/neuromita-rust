@@ -249,6 +249,7 @@ pub(crate) enum PresenterSurface {
 pub(crate) struct PresenterProbe {
     pub(super) chat: ChatPresenter,
     pub(super) selection: std::sync::Arc<super::ChatSelectionPresenter>,
+    pub(super) speech_chat: super::SpeechChatPresenter,
     runtime: RuntimeStatePresenter,
     speech: super::SpeechSessionPresenter,
     releases: ReleasesPresenter,
@@ -263,16 +264,12 @@ pub(crate) struct PresenterProbe {
     pub(super) graph: super::GraphMaintenancePresenter,
     pub(super) guide_persistence: super::GuidePersistencePresenter,
     pub(super) prompt_folder: super::PromptFolderPresenter,
-    pub(super) native:
-        Option<std::sync::Arc<crate::ai_runtime::native_service::AiHubNativeService>>,
+    pub(super) native: Option<super::NativeHubApi>,
     pub(super) speech_catalog: Option<crate::ai_runtime::speech_catalog::SpeechModelCatalog>,
-    speech_controller:
-        std::sync::Arc<tokio::sync::Mutex<crate::audio::controller::SpeechSessionController>>,
     pub(super) speech_capture: crate::app::SharedSpeechCapture,
-    pub(super) ai_hub_install:
-        Option<std::sync::Arc<crate::ai_runtime::install_coordinator::AiHubInstallCoordinator>>,
-    pub(super) telegram_admin: Option<std::sync::Arc<crate::telegram_admin::TelegramAdmin>>,
-    pub(super) remote_voice_admin: Option<std::sync::Arc<crate::remote_voice::RemoteVoiceAdmin>>,
+    pub(super) ai_hub_install: Option<super::AiHubInstallPresenter>,
+    pub(super) telegram_admin: Option<super::TelegramPresenter>,
+    pub(super) remote_voice_admin: Option<super::RemoteVoicePresenter>,
 }
 
 pub(super) fn request_status_json(row: &super::RequestView) -> Value {
@@ -318,6 +315,7 @@ impl PresenterProbe {
     pub(crate) fn new(
         chat: ChatPresenter,
         selection: std::sync::Arc<super::ChatSelectionPresenter>,
+        speech_chat: super::SpeechChatPresenter,
         runtime: RuntimeStatePresenter,
         speech: super::SpeechSessionPresenter,
         releases: ReleasesPresenter,
@@ -332,21 +330,17 @@ impl PresenterProbe {
         graph: super::GraphMaintenancePresenter,
         guide_persistence: super::GuidePersistencePresenter,
         prompt_folder: super::PromptFolderPresenter,
-        native: Option<std::sync::Arc<crate::ai_runtime::native_service::AiHubNativeService>>,
-        ai_hub_install: Option<
-            std::sync::Arc<crate::ai_runtime::install_coordinator::AiHubInstallCoordinator>,
-        >,
+        native: Option<super::NativeHubApi>,
+        ai_hub_install: Option<super::AiHubInstallPresenter>,
         speech_catalog: Option<crate::ai_runtime::speech_catalog::SpeechModelCatalog>,
-        speech_controller: std::sync::Arc<
-            tokio::sync::Mutex<crate::audio::controller::SpeechSessionController>,
-        >,
         speech_capture: crate::app::SharedSpeechCapture,
-        telegram_admin: Option<std::sync::Arc<crate::telegram_admin::TelegramAdmin>>,
-        remote_voice_admin: Option<std::sync::Arc<crate::remote_voice::RemoteVoiceAdmin>>,
+        telegram_admin: Option<super::TelegramPresenter>,
+        remote_voice_admin: Option<super::RemoteVoicePresenter>,
     ) -> Self {
         Self {
             chat,
             selection,
+            speech_chat,
             runtime,
             speech,
             releases,
@@ -363,7 +357,6 @@ impl PresenterProbe {
             prompt_folder,
             native,
             speech_catalog,
-            speech_controller,
             speech_capture,
             ai_hub_install,
             telegram_admin,
@@ -619,21 +612,16 @@ impl PresenterProbe {
                     let ffmpeg = checked_path(ffmpeg)?;
                     let ffplay = checked_path(ffplay)?;
                     self.selection
-                        .start_capture(
+                        .start_capture_and_press(
                             super::ChatSelection {
                                 character,
                                 revision,
                             },
                             ffmpeg,
                             ffplay,
+                            press_on_start,
                         )
                         .await?;
-                    if press_on_start {
-                        if let Err(error) = self.speech_controller.lock().await.press(true).await {
-                            self.selection.stop_capture().await;
-                            return Err(error.to_string());
-                        }
-                    }
                     json!({"action":"speech_capture","enabled":true,
                         "character":character,"selection_revision":revision,
                         "phase":format!("{:?}",self.speech.snapshot().phase)})
@@ -654,12 +642,7 @@ impl PresenterProbe {
                 }
             }
             SpeechPushToTalk { pressed } => {
-                self.speech_controller
-                    .lock()
-                    .await
-                    .press(pressed)
-                    .await
-                    .map_err(|e| e.to_string())?;
+                self.selection.press(pressed).await?;
                 json!({"action":"speech_push_to_talk","pressed":pressed,
                     "phase":format!("{:?}",self.speech.snapshot().phase)})
             }
@@ -682,11 +665,7 @@ impl PresenterProbe {
                     .save_python_preferences(preferences)
                     .map_err(|e| e.to_string())?;
                 let telegram = if let Some(owner) = &self.telegram_admin {
-                    json!(
-                        owner
-                            .refresh_voice(&self.settings.tts.preferences.get())
-                            .await?
-                    )
+                    json!(owner.refresh_voice().await?)
                 } else {
                     Value::Null
                 };
@@ -762,14 +741,7 @@ impl PresenterProbe {
                     .telegram_admin
                     .as_ref()
                     .ok_or("Telegram administration is not configured")?;
-                let status = owner
-                    .connect(
-                        &api_id,
-                        &api_hash,
-                        &phone,
-                        &self.settings.tts.preferences.get(),
-                    )
-                    .await?;
+                let status = owner.connect(&api_id, &api_hash, &phone).await?;
                 json!({"action":"telegram_connect","status":status})
             }
             TelegramCode { code } => {
@@ -783,9 +755,7 @@ impl PresenterProbe {
                     .telegram_admin
                     .as_ref()
                     .ok_or("Telegram administration is not configured")?;
-                let status = owner
-                    .submit_code(&code, &self.settings.tts.preferences.get())
-                    .await?;
+                let status = owner.submit_code(&code).await?;
                 json!({"action":"telegram_code","status":status})
             }
             TelegramPassword { password } => {
@@ -799,9 +769,7 @@ impl PresenterProbe {
                     .telegram_admin
                     .as_ref()
                     .ok_or("Telegram administration is not configured")?;
-                let status = owner
-                    .submit_password(&password, &self.settings.tts.preferences.get())
-                    .await?;
+                let status = owner.submit_password(&password).await?;
                 json!({"action":"telegram_password","status":status})
             }
             TelegramDisconnect {} => {
@@ -816,7 +784,7 @@ impl PresenterProbe {
                     .telegram_admin
                     .as_ref()
                     .ok_or("Telegram administration is not configured")?;
-                json!({"action":"telegram_refresh_voice","status":owner.refresh_voice(&self.settings.tts.preferences.get()).await?})
+                json!({"action":"telegram_refresh_voice","status":owner.refresh_voice().await?})
             }
             RemoteVoiceAdd { expected_revision } => {
                 let owner = self
@@ -921,11 +889,8 @@ impl PresenterProbe {
                     .remote_voice_admin
                     .as_ref()
                     .ok_or("Remote Voice is not configured")?;
-                let player = owner
-                    .ffplay_binary()
-                    .ok_or("FFplay executable unavailable")?;
                 let result = owner
-                    .preview_patch(text, character, preset, player, expected_revision)
+                    .preview_patch(text, character, preset, expected_revision)
                     .map_err(|_| "remote voice preview rejected")?;
                 json!({"action":"remote_voice_preview","status":result})
             }
@@ -997,7 +962,6 @@ impl PresenterProbe {
                     .native
                     .as_ref()
                     .ok_or("native AI Hub is not configured")?;
-                let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
                 let operation_id = native
                     .start_download(
                         crate::ai_runtime::native_download_operation::NativeDownloadSelection {
@@ -1005,18 +969,8 @@ impl PresenterProbe {
                             manifest_sha256: manifest_sha256.clone(),
                             backend,
                         },
-                        sender,
                     )
                     .await?;
-                let owner = std::sync::Arc::clone(native);
-                tokio::spawn(async move {
-                    while let Some(event) = events.recv().await {
-                        if let crate::ai_runtime::native_download_operation::NativeDownloadEvent::Finished { id, .. } = event {
-                            let _ = owner.finish_download(id).await;
-                            break;
-                        }
-                    }
-                });
                 json!({"action":"native_install","operation_id":operation_id,
                     "model_id":model_id,"manifest_sha256":manifest_sha256,"backend":backend.as_str(),
                     "accepted":true})

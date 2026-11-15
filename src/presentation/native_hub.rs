@@ -33,6 +33,91 @@ pub struct NativeHubRevision {
 
 pub struct NativeHubPresenter;
 
+/// Typed application API for a single Core native owner. GUI and MCP hold
+/// clones of this façade, not independent workflow or download state.
+#[derive(Clone)]
+pub struct NativeHubApi {
+    owner: std::sync::Arc<crate::ai_runtime::native_service::AiHubNativeService>,
+}
+
+impl NativeHubApi {
+    pub fn new(
+        owner: std::sync::Arc<crate::ai_runtime::native_service::AiHubNativeService>,
+    ) -> Self {
+        Self { owner }
+    }
+
+    pub async fn snapshot(&self) -> Result<NativeWorkflowSnapshot, String> {
+        self.owner.snapshot().await
+    }
+
+    pub async fn refresh(&self) -> Result<NativeWorkflowSnapshot, String> {
+        self.owner.refresh().await
+    }
+
+    pub fn authorized_releases(
+        &self,
+    ) -> Result<Vec<crate::ai_runtime::native_trust::NativeAuthorizedRelease>, String> {
+        self.owner.authorized_releases()
+    }
+
+    pub async fn select(
+        &self,
+        model: &str,
+        manifest: &str,
+        backend: NativeBackend,
+    ) -> Result<(), String> {
+        self.owner.select(model, manifest, backend).await
+    }
+
+    pub async fn activate_exact_for_service(
+        &self,
+        service: crate::ai_runtime::native_speech::NativeSpeechKind,
+        model: &str,
+        revision: &str,
+    ) -> Result<crate::ai_runtime::native_model::NativeModelSnapshot, String> {
+        self.owner
+            .activate_exact_for_service(service, model, revision)
+            .await
+    }
+
+    pub async fn deactivate_exact_for_service(
+        &self,
+        service: crate::ai_runtime::native_speech::NativeSpeechKind,
+        model: &str,
+        revision: &str,
+    ) -> Result<(), String> {
+        self.owner
+            .deactivate_exact_for_service(service, model, revision)
+            .await
+    }
+
+    pub async fn start_download(
+        &self,
+        request: crate::ai_runtime::native_download_operation::NativeDownloadSelection,
+    ) -> Result<uuid::Uuid, String> {
+        self.owner.start_download(request).await
+    }
+
+    pub async fn cancel_download(&self) -> bool {
+        self.owner.cancel_download().await
+    }
+
+    pub fn download_snapshot(&self) -> crate::ai_runtime::native_service::NativeDownloadStatus {
+        self.owner.download_snapshot()
+    }
+
+    pub fn observe_download(
+        &self,
+    ) -> tokio::sync::watch::Receiver<crate::ai_runtime::native_service::NativeDownloadStatus> {
+        self.owner.observe_download()
+    }
+
+    pub async fn refresh_worker(&self) -> Result<(), String> {
+        self.owner.refresh_worker().await
+    }
+}
+
 impl NativeHubPresenter {
     pub fn project(snapshot: NativeWorkflowSnapshot) -> NativeHubView {
         let trust = snapshot.trust;

@@ -4364,3 +4364,85 @@ async fn full_chat_trace_uses_presenter_and_denies_unprivileged_core_reads() {
     assert!(!frame.contains("unused-fixture-key"));
     fixture.shutdown().await;
 }
+
+#[tokio::test]
+async fn presenter_speech_draft_is_single_reactive_owner_for_gui_and_mcp() {
+    let mut fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+    let mut observer = fixture.app.presenter().speech_chat.observe();
+    let mut read = command("presenter_admin_read");
+    read["query"] = json!({"query":"speech_draft"});
+    client.send(read.clone()).await;
+    let initial = client
+        .until(|r| r["command_id"] == read["command_id"])
+        .await;
+    assert_eq!(initial["type"], "presenter_admin_read", "{initial}");
+    assert_eq!(initial["snapshot"]["draft_length"], 0);
+    assert!(initial["snapshot"].get("draft").is_none());
+
+    let mut write = command("presenter_admin_write");
+    write["change"] = json!({"change":"speech_draft","expected_character":"Crazy",
+        "expected_revision":0,"text":"PRIVATE_DRAFT_OWNED_BY_PRESENTER"});
+    client.send(write.clone()).await;
+    let saved = client
+        .until(|r| r["command_id"] == write["command_id"])
+        .await;
+    assert_eq!(saved["type"], "presenter_admin_write", "{saved}");
+    assert!(
+        !saved
+            .to_string()
+            .contains("PRIVATE_DRAFT_OWNED_BY_PRESENTER")
+    );
+    bounded(observer.changed()).await.unwrap();
+    let observed = observer.borrow_and_update().clone();
+    assert_eq!(observed.draft, "PRIVATE_DRAFT_OWNED_BY_PRESENTER");
+    assert_eq!(observed.selection.character, CharacterId::Crazy);
+    assert_eq!(observed.selection.revision, 0);
+
+    read["command_id"] = json!(Uuid::new_v4());
+    client.send(read.clone()).await;
+    let redacted = client
+        .until(|r| r["command_id"] == read["command_id"])
+        .await;
+    assert_eq!(
+        redacted["snapshot"]["draft_length"],
+        "PRIVATE_DRAFT_OWNED_BY_PRESENTER".len()
+    );
+    assert!(redacted["snapshot"].get("draft").is_none());
+    read["command_id"] = json!(Uuid::new_v4());
+    read["query"]["include_content"] = json!(true);
+    client.send(read.clone()).await;
+    let included = client
+        .until(|r| r["command_id"] == read["command_id"])
+        .await;
+    assert_eq!(
+        included["snapshot"]["draft"],
+        "PRIVATE_DRAFT_OWNED_BY_PRESENTER"
+    );
+
+    write["command_id"] = json!(Uuid::new_v4());
+    write["change"]["expected_revision"] = json!(10);
+    write["change"]["text"] = json!("stale");
+    client.send(write.clone()).await;
+    let stale = client
+        .until(|r| r["command_id"] == write["command_id"])
+        .await;
+    assert_eq!(stale["type"], "error", "{stale}");
+    assert_eq!(
+        fixture.app.presenter().speech_chat.snapshot().draft,
+        "PRIVATE_DRAFT_OWNED_BY_PRESENTER"
+    );
+
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn conversation_attachment_fence_is_owned_by_presenter() {
+    let fixture = Fixture::start(|_| {}).await;
+    let conversation = &fixture.app.presenter().conversation;
+    let snapshot = conversation.snapshot(CharacterId::Crazy).await.unwrap();
+    let fence = conversation.current_fence().unwrap();
+    assert_eq!(fence.at, snapshot.at);
+    assert_eq!(fence.selection, snapshot.selection);
+    fixture.shutdown().await;
+}

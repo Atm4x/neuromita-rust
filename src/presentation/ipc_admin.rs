@@ -31,6 +31,10 @@ pub(crate) enum PresenterRead {
         authorization: String,
     },
     ChatSelection {},
+    SpeechDraft {
+        #[serde(default)]
+        include_content: bool,
+    },
     ConversationRefresh {
         character: CharacterId,
     },
@@ -303,6 +307,11 @@ pub(crate) enum PresenterWrite {
     PromptFolderOpen {
         character: CharacterId,
     },
+    SpeechDraft {
+        expected_character: CharacterId,
+        expected_revision: u64,
+        text: String,
+    },
     ChatSelect {
         expected_character: CharacterId,
         expected_revision: u64,
@@ -466,6 +475,20 @@ impl PresenterProbe {
         match query {
             PresenterRead::ChatSelection {} => Ok(json!({"source":"chat_selection_presenter",
                     "selection":self.selection.snapshot(),"gui_session_required":false})),
+            PresenterRead::SpeechDraft { include_content } => {
+                let snapshot = self.speech_chat.snapshot();
+                let mut result = json!({
+                    "source":"speech_chat_presenter",
+                    "selection":snapshot.selection,
+                    "revision":snapshot.revision,
+                    "draft_length":snapshot.draft.chars().count(),
+                    "content_included":include_content,
+                });
+                if include_content {
+                    result["draft"] = json!(snapshot.draft);
+                }
+                Ok(result)
+            }
             PresenterRead::DiagnosticExport {
                 character,
                 authorization,
@@ -630,16 +653,10 @@ impl PresenterProbe {
                 memory_id,
                 query_text,
             } => {
-                if query_text.trim().is_empty() || query_text.len() > 4096 {
-                    return Err("recall query must contain 1..4096 characters".into());
-                }
-                let result = crate::api::HistoricalRecallApi::inspect(
-                    character,
-                    crate::knowledge::forgotten_recall::RecallSelector::Ids(vec![memory_id]),
-                    &query_text,
-                )
-                .await
-                .map_err(|error| error.to_string())?;
+                let result = self
+                    .characters
+                    .recall_forgotten(character, memory_id, &query_text)
+                    .await?;
                 Ok(
                     json!({"source":"historical_recall_api","character":character,
                     "memory_id":memory_id,"found":result.is_some(),"text":result}),
@@ -910,7 +927,7 @@ impl PresenterProbe {
                             .ai_hub_install
                             .as_ref()
                             .ok_or("AI Hub installation is not configured")?;
-                        let mut updates = owner.observe_status();
+                        let mut updates = owner.observe();
                         let threshold = after_revision.expect("validated");
                         let wait = async {
                             loop {
@@ -1239,6 +1256,27 @@ impl PresenterProbe {
 
     pub(crate) async fn admin_write(&self, change: PresenterWrite) -> Result<Value, String> {
         match change {
+            PresenterWrite::SpeechDraft {
+                expected_character,
+                expected_revision,
+                text,
+            } => {
+                self.speech_chat
+                    .set_draft(
+                        super::ChatSelection {
+                            character: expected_character,
+                            revision: expected_revision,
+                        },
+                        text,
+                    )
+                    .await?;
+                let status = self.speech_chat.snapshot();
+                Ok(
+                    json!({"source":"speech_chat_presenter", "selection":status.selection,
+                    "revision":status.revision,"draft_length":status.draft.chars().count(),
+                    "content_included":false}),
+                )
+            }
             PresenterWrite::ChatSelect {
                 expected_character,
                 expected_revision,

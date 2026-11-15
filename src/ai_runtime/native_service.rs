@@ -574,9 +574,8 @@ impl AiHubNativeService {
     }
 
     pub async fn start_download(
-        &self,
+        self: &Arc<Self>,
         request: NativeDownloadSelection,
-        events: mpsc::UnboundedSender<NativeDownloadEvent>,
     ) -> Result<Uuid, String> {
         let mut state = self.state.lock().await;
         if self.stop.is_cancelled() {
@@ -639,6 +638,7 @@ impl AiHubNativeService {
             succeeded: None,
         });
         let updates = self.download_status.clone();
+        let owner = Arc::downgrade(self);
         tokio::spawn(async move {
             while let Some(event) = inner_receiver.recv().await {
                 let terminal = matches!(event, NativeDownloadEvent::Finished { .. });
@@ -669,8 +669,16 @@ impl AiHubNativeService {
                     },
                 };
                 updates.send_replace(snapshot);
-                let _ = events.send(event);
                 if terminal {
+                    if let Some(owner) = owner.upgrade() {
+                        if let Err(error) = owner.finish_download(event.id()).await {
+                            tracing::warn!(%error, "native package finalization failed");
+                        } else if owner.download_snapshot().succeeded == Some(true)
+                            && let Err(error) = owner.refresh().await
+                        {
+                            tracing::warn!(%error, "native package inventory refresh failed");
+                        }
+                    }
                     break;
                 }
             }
@@ -771,19 +779,15 @@ mod tests {
     async fn download_without_pinned_origin_is_rejected_before_touching_storage() {
         let root = std::env::temp_dir().join(format!("native-owner-untrusted-{}", Uuid::new_v4()));
         let owner = AiHubNativeService::new(root.clone());
-        let (tx, mut rx) = mpsc::unbounded_channel();
         let result = owner
-            .start_download(
-                NativeDownloadSelection {
-                    model_id: "voice".into(),
-                    manifest_sha256: "aa".repeat(32),
-                    backend: NativeBackend::Cpu,
-                },
-                tx,
-            )
+            .start_download(NativeDownloadSelection {
+                model_id: "voice".into(),
+                manifest_sha256: "aa".repeat(32),
+                backend: NativeBackend::Cpu,
+            })
             .await;
         assert!(result.is_err());
-        assert!(rx.try_recv().is_err());
+        assert_eq!(owner.download_snapshot().phase, "idle");
         assert!(!root.exists());
     }
 }

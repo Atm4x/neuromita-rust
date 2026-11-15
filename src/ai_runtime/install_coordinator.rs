@@ -1,15 +1,11 @@
 //! Core-owned admission and supervised execution for AI Hub installation.
 //! The desktop renders events but never owns an approved plan or an installer task.
 
-use std::{
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+use std::{path::PathBuf, sync::Arc};
 
 use serde::Serialize;
 use tokio::{
-    sync::Mutex as AsyncMutex,
-    sync::{mpsc, watch},
+    sync::{Mutex as AsyncMutex, watch},
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
@@ -37,6 +33,10 @@ pub struct InstallStatus {
     pub operation_id: Option<Uuid>,
     pub action: Option<&'static str>,
     pub error_code: Option<&'static str>,
+    /// Immutable preview DTO retained for an in-process Presenter projection.
+    /// The raw plan is never serialized in the public IPC status.
+    #[serde(skip)]
+    pub review: Option<InstallActionReview>,
 }
 
 impl Default for InstallStatus {
@@ -51,6 +51,7 @@ impl Default for InstallStatus {
             operation_id: None,
             action: None,
             error_code: None,
+            review: None,
         }
     }
 }
@@ -69,24 +70,6 @@ fn install_error_code(error: &InstallPreviewError) -> &'static str {
     }
 }
 
-pub enum InstallEvent {
-    Preview {
-        category: String,
-        id: String,
-        token: i32,
-        result: Result<InstallActionReview, InstallPreviewError>,
-        admitted: bool,
-    },
-    Finished {
-        operation: Uuid,
-        category: String,
-        id: String,
-        token: i32,
-        action: InstallAction,
-        result: Result<PathBuf, InstallPreviewError>,
-    },
-}
-
 struct InstallState {
     fence: InstallReviewFence,
     gate: InstallApprovalGate,
@@ -99,9 +82,7 @@ pub struct AiHubInstallCoordinator {
     root: PathBuf,
     catalog: SpeechModelCatalog,
     state: AsyncMutex<InstallState>,
-    events: mpsc::UnboundedSender<InstallEvent>,
     status: watch::Sender<InstallStatus>,
-    receiver: Mutex<Option<mpsc::UnboundedReceiver<InstallEvent>>>,
     stop: CancellationToken,
     installation: Arc<InstallationOwner>,
 }
@@ -116,7 +97,6 @@ impl AiHubInstallCoordinator {
         root: PathBuf,
         installation: Arc<InstallationOwner>,
     ) -> Arc<Self> {
-        let (events, receiver) = mpsc::unbounded_channel();
         let (status, _) = watch::channel(InstallStatus::default());
         Arc::new(Self {
             catalog: SpeechModelCatalog::for_desktop(root.clone()),
@@ -128,9 +108,7 @@ impl AiHubInstallCoordinator {
                 preview: None,
                 active: None,
             }),
-            events,
             status,
-            receiver: Mutex::new(Some(receiver)),
             stop: CancellationToken::new(),
             installation,
         })
@@ -147,10 +125,6 @@ impl AiHubInstallCoordinator {
     fn publish_status(&self, mut status: InstallStatus) {
         status.revision = self.status.borrow().revision.wrapping_add(1);
         self.status.send_replace(status);
-    }
-
-    pub fn take_events(&self) -> Option<mpsc::UnboundedReceiver<InstallEvent>> {
-        self.receiver.lock().ok()?.take()
     }
 
     pub async fn preview(self: &Arc<Self>, category: String, id: String, token: i32) {
@@ -205,13 +179,6 @@ impl AiHubInstallCoordinator {
                 error_code: Some("invalid_selection"),
                 ..InstallStatus::default()
             });
-            let _ = self.events.send(InstallEvent::Preview {
-                category,
-                id,
-                token,
-                result: Err(InstallPreviewError::InvalidSelection),
-                admitted: false,
-            });
             return;
         }
         let weak = Arc::downgrade(self);
@@ -256,21 +223,15 @@ impl AiHubInstallCoordinator {
             };
             let error_code = result.as_ref().err().map(install_error_code);
             owner.publish_status(InstallStatus {
-                category: category.clone(),
-                id: id.clone(),
+                category,
+                id,
                 token,
                 stage,
                 can_install: admitted,
                 action,
                 error_code,
+                review: result.ok(),
                 ..InstallStatus::default()
-            });
-            let _ = owner.events.send(InstallEvent::Preview {
-                category,
-                id,
-                token,
-                result,
-                admitted,
             });
         }));
     }
@@ -376,7 +337,6 @@ impl AiHubInstallCoordinator {
         });
         let action_for_worker = action.clone();
         let root = self.root.clone();
-        let events = self.events.clone();
         let owner = Arc::downgrade(self);
         let stop = self.stop.clone();
         let task = tokio::spawn(async move {
@@ -420,14 +380,6 @@ impl AiHubInstallCoordinator {
                         ..InstallStatus::default()
                     });
                 }
-                let _ = events.send(InstallEvent::Finished {
-                    operation,
-                    category,
-                    id,
-                    token,
-                    action: action_for_worker,
-                    result,
-                });
             }
         });
         state.active = Some((operation, task));
@@ -486,16 +438,11 @@ mod tests {
     async fn wrong_selection_never_creates_install_authorization() {
         let root = std::env::temp_dir().join(format!("nm-hub-invalid-{}", Uuid::new_v4()));
         let owner = AiHubInstallCoordinator::new(root.clone());
-        let mut events = owner.take_events().unwrap();
+        let mut observer = owner.observe_status();
         owner.preview("unknown".into(), "unknown".into(), 91).await;
-        assert!(matches!(
-            events.recv().await,
-            Some(InstallEvent::Preview {
-                result: Err(InstallPreviewError::InvalidSelection),
-                admitted: false,
-                ..
-            })
-        ));
+        observer.changed().await.unwrap();
+        assert_eq!(observer.borrow_and_update().stage, "failed");
+        assert_eq!(observer.borrow().error_code, Some("invalid_selection"));
         assert!(
             owner
                 .confirm("tts".into(), "unknown".into(), 91)

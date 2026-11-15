@@ -2,27 +2,18 @@ use std::{num::NonZeroUsize, path::PathBuf, sync::Arc, thread, time::Duration};
 
 use neuromita::{
     ai_runtime::{
-        install_admission::{InstallAction, InstallActionReview},
-        install_coordinator::InstallEvent,
-        install_review::{InstallPlanReview, InstallPreviewError},
-        native_download_operation::{NativeDownloadEvent, NativeDownloadSelection},
-        native_https::NativeTransferPhase,
+        native_download_operation::NativeDownloadSelection,
         native_model::NativeBackend,
         native_revisions::NativeRevisionOverview,
-        native_service::AiHubNativeService,
         native_trust::NativeAuthorizedRelease,
         native_workflow::NativeWorkflowSnapshot,
-        runtime_status::{RuntimePhase, RuntimeSnapshot},
-        speech::Transcript,
+        runtime_status::RuntimeSnapshot,
         speech_catalog::{SpeechInventory, SpeechModelCatalog},
     },
     app::{ApplicationConfig, ApplicationLifecycle, RuntimeLimits},
     audio::{
-        controller::{SpeechCaptureConfig, SpeechSessionSnapshot},
-        device::{AudioPlayback, FfplayOutput},
-        input_catalog::AudioInputDevice,
+        controller::SpeechSessionSnapshot, input_catalog::AudioInputDevice,
         monitor::MonitorSnapshot,
-        session::{SpeechConversation, SpeechFuture, SpeechSessionError},
     },
     character::CharacterId,
     generation::PresetRecord,
@@ -33,13 +24,11 @@ use neuromita::{
     onboarding::GuideChange,
     presentation::{
         ChatSelection, ConversationChange, ConversationChangePreview, ConversationSnapshot,
-        GuiPresenter, PresetSlot, native_download::NativeDownloadPresenter,
+        GuiPresenter, NativeHubApi, PresetSlot, native_download::NativeDownloadPresenter,
     },
     remote_voice::{RemoteVoiceCatalogAction, RemoteVoiceConfig, RemoteVoicePreset},
     request::{CancelResult, RequestId},
-    settings::{
-        AsrPreferences, PresetId, PresetSelection, SettingsApi, TtsBackend, TtsPreferences, Volume,
-    },
+    settings::{AsrPreferences, PresetId, PresetSelection, TtsPreferences, Volume},
     telegram_admin::TelegramAdmin,
     telegram_voice::DynamicTelegramVoice,
 };
@@ -168,6 +157,7 @@ pub enum Command {
     SetMemoryDedupThreshold(u16),
     Select(ChatOrigin, CharacterId),
     Send(ChatOrigin, String),
+    DraftChanged(ChatOrigin, String),
     AttachFile(ChatOrigin, String, String),
     Cancel(ChatOrigin, RequestId),
     Retry(ChatOrigin, RequestId),
@@ -207,12 +197,7 @@ pub enum Update {
     RemoteVoiceState(String, bool),
     SpeechSessionStatus(SpeechSessionSnapshot),
     MicrophoneTestStatus(MonitorSnapshot),
-    RecognizedText {
-        origin: ChatOrigin,
-        text: String,
-        auto_send_after: Option<Duration>,
-        merge_with_draft: bool,
-    },
+    SpeechDraft(neuromita::presentation::SpeechDraftSnapshot),
     Hardware(neuromita::presentation::hardware::HardwareView),
     CharacterCatalog(Vec<neuromita::character::CharacterDefinition>),
     SpeechInventory(Box<SpeechInventory>, Vec<AudioInputDevice>),
@@ -353,50 +338,6 @@ fn find_binary(directory: &std::path::Path, variable: &str, filename: &str) -> O
     .find(|path| path.is_absolute() && path.is_file())
 }
 
-#[cfg(test)]
-struct DesktopTranscriptSink {
-    send: mpsc::UnboundedSender<(ChatOrigin, Transcript)>,
-    origin: ChatOrigin,
-}
-
-#[cfg(test)]
-fn speech_conversation(
-    send: &mpsc::UnboundedSender<(ChatOrigin, Transcript)>,
-    origin: ChatOrigin,
-) -> Arc<dyn SpeechConversation> {
-    Arc::new(DesktopTranscriptSink {
-        send: send.clone(),
-        origin,
-    })
-}
-
-#[cfg(test)]
-impl SpeechConversation for DesktopTranscriptSink {
-    fn reply<'a>(
-        &'a self,
-        ticket: &'a neuromita::audio::ticket::SpeechTicket,
-        transcript: &'a Transcript,
-    ) -> SpeechFuture<'a, Option<neuromita::voice::AudioArtifact>> {
-        Box::pin(async move {
-            if let Some(result) = ticket.admit(|| self.send.send((self.origin, transcript.clone())))
-            {
-                result.map_err(|_| SpeechSessionError::DispatchClosed)?;
-            }
-            Ok(None)
-        })
-    }
-}
-
-fn dispatch_policy(preferences: &AsrPreferences) -> Option<Duration> {
-    preferences.instant_send.then(|| {
-        if preferences.delayed_send {
-            Duration::from_millis(u64::from(preferences.send_delay_ms))
-        } else {
-            Duration::ZERO
-        }
-    })
-}
-
 async fn enable_speech_session(
     app: &ApplicationLifecycle,
     directory: &std::path::Path,
@@ -424,13 +365,23 @@ async fn enable_speech_session(
     .unwrap_or_default();
     app.presenter()
         .selection
-        .start_capture(
+        .start_capture_and_press(
             ChatSelection {
                 character: origin.character,
                 revision: origin.selection_revision,
             },
             ffmpeg,
             ffplay,
+            matches!(
+                app.presenter()
+                    .settings
+                    .asr
+                    .preferences
+                    .get()
+                    .input_mode
+                    .as_str(),
+                "radio" | "push_to_talk"
+            ),
         )
         .await
 }
@@ -500,47 +451,6 @@ async fn start(
         .map_err(|e| e.to_string())
 }
 
-fn summarize_ai_hub_review(review: &InstallPlanReview) -> String {
-    let mut lines = vec![
-        format!(
-            "Python: {} · SDK и источник проверены",
-            review.identity.python_version
-        ),
-        format!("Backend: {}", review.backend_options.join(", ")),
-        format!(
-            "Пакетов: {} · требований: {}",
-            review.packages.len(),
-            review.requirements.len()
-        ),
-        format!(
-            "Файлов моделей: обязательных {}, дополнительных {}",
-            review.required_assets.len(),
-            review.optional_assets.len()
-        ),
-        format!(
-            "Действий с отдельным подтверждением: {} · hooks: {}",
-            review.actions.len(),
-            review.asset_hooks.len()
-        ),
-        format!(
-            "Build-stage: {} (без автоматического исполнения)",
-            review.build_stages.len()
-        ),
-        format!("Отпечаток плана: {}", &review.fingerprint[..16]),
-        "План проверен, но установка ещё не разрешена и не запускалась.".to_owned(),
-    ];
-    if !review.required_backends.is_empty() {
-        lines.insert(
-            2,
-            format!(
-                "Дополнительные backend: {}",
-                review.required_backends.join(", ")
-            ),
-        );
-    }
-    lines.join("\n")
-}
-
 async fn run(
     directory: PathBuf,
     initial_model: Option<String>,
@@ -593,17 +503,7 @@ async fn run(
     publish(Update::CharacterCatalog(
         app.presenter().characters.catalog(),
     ));
-    if let Err(error) = observe(
-        &app,
-        &directory,
-        &catalog,
-        &mut receive,
-        &stop,
-        &publish,
-        &telegram_admin,
-    )
-    .await
-    {
+    if let Err(error) = observe(&app, &directory, &catalog, &mut receive, &stop, &publish).await {
         publish(Update::Error(error));
     }
     if let Err(error) = app.shutdown().await {
@@ -645,7 +545,7 @@ pub fn native_download_configured() -> bool {
     neuromita::ai_runtime::native_service::native_download_configured()
 }
 
-async fn publish_native_release_catalog(native: &AiHubNativeService, publish: &impl Fn(Update)) {
+async fn publish_native_release_catalog(native: &NativeHubApi, publish: &impl Fn(Update)) {
     let overview = match native.snapshot().await {
         Ok(snapshot) => snapshot.inventory,
         Err(error) => {
@@ -669,7 +569,7 @@ async fn publish_native_release_catalog(native: &AiHubNativeService, publish: &i
     }
 }
 
-async fn publish_native(native: &AiHubNativeService, publish: &impl Fn(Update)) {
+async fn publish_native(native: &NativeHubApi, publish: &impl Fn(Update)) {
     match native.snapshot().await {
         Ok(snapshot) => publish(Update::NativeModels(Box::new(snapshot))),
         Err(error) => publish(Update::NativeError(format!(
@@ -706,16 +606,19 @@ async fn observe(
     receive: &mut mpsc::Receiver<Command>,
     stop: &CancellationToken,
     publish: &impl Fn(Update),
-    telegram_admin: &Arc<TelegramAdmin>,
 ) -> Result<(), String> {
     let administration = app.presenter();
     let remote_admin = administration
-        .remote_voice_admin
+        .remote_voice
         .as_ref()
         .ok_or("Remote Voice administration was not initialized")?;
     let mut remote_updates = remote_admin.observe();
     let mut remote_revision = remote_admin.snapshot().revision;
     publish(Update::RemoteVoices(remote_admin.config()));
+    let telegram_admin = administration
+        .telegram
+        .as_ref()
+        .ok_or("Telegram Presenter is not configured")?;
     let mut telegram_updates = telegram_admin.observe();
     let mut telegram_watch_closed = false;
     let mut releases = administration.releases.observe();
@@ -724,10 +627,6 @@ async fn observe(
     let mut memories = MemoryWatch::start(administration, CharacterId::Crazy)?;
     let (recall_updates, mut recall_results) = mpsc::unbounded_channel();
     let mut pending: Option<(ChatOrigin, ConversationChangePreview)> = None;
-    let tts = administration.settings.tts.preferences.get();
-    if tts.enabled && tts.backend == TtsBackend::Telegram && tts.telegram_auto_connect {
-        let _ = telegram_admin.auto_connect(&tts).await;
-    }
     let telegram_status = telegram_admin.snapshot();
     publish(Update::TelegramAuth {
         phase: i32::from(telegram_status.phase),
@@ -746,21 +645,24 @@ async fn observe(
     let mut runtime_status = administration.ai_runtime.observe();
     let mut speech_status = administration.speech.observe();
     let mut microphone_test = administration.audio_input.observe_test();
-    let install_owner = app
-        .ai_hub_install()
-        .expect("desktop configured Core AI Hub installer");
-    let mut install_updates = install_owner
-        .take_events()
-        .expect("only one desktop consumes Core AI Hub events");
-    let (native_download_events, mut native_download_updates) =
-        mpsc::unbounded_channel::<NativeDownloadEvent>();
-    let mut active_native_download: Option<uuid::Uuid> = None;
-    let mut transcript_updates = app.observe_transcripts();
+    let install_owner = administration
+        .ai_install
+        .as_ref()
+        .ok_or("desktop has no AI Hub install Presenter")?;
+    let mut install_updates = install_owner.observe();
+    publish_ai_install(&install_owner.status(), publish);
+    let mut draft_updates = administration.speech_chat.observe();
+    publish(Update::SpeechDraft(
+        draft_updates.borrow_and_update().clone(),
+    ));
     let mut liveness = tokio::time::interval(Duration::from_secs(5));
     liveness.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let native_owner = app
-        .ai_hub_native()
-        .expect("desktop configured Core native owner");
+    let native_owner = administration
+        .native_hub
+        .as_ref()
+        .ok_or("desktop has no NativeHub Presenter")?;
+    let mut native_download_updates = native_owner.observe_download();
+    publish_native_download(&native_download_updates.borrow().clone(), publish);
     let initial_native = native_owner.refresh().await;
     if initial_native.is_err() {
         publish(Update::NativeError(
@@ -814,7 +716,6 @@ async fn observe(
         tokio::select! {
             biased;
             _ = stop.cancelled() => {
-                telegram_admin.disconnect().await;
                 return Ok(());
             },
             changed = telegram_updates.changed(), if !telegram_watch_closed => {
@@ -888,7 +789,7 @@ async fn observe(
                 Some(Command::SaveTts(value)) => {
                     match super::settings::execute(administration, Command::SaveTts(value)) {
                         Ok(()) => {
-                            if let Err(error) = telegram_admin.refresh_voice(&administration.settings.tts.preferences.get()).await {
+                            if let Err(error) = telegram_admin.refresh_voice().await {
                                 publish(Update::AdminError(error));
                             }
                             let status = telegram_admin.snapshot();
@@ -899,24 +800,21 @@ async fn observe(
                     }
                 },
                 Some(Command::TelegramConnect { api_id, api_hash, phone }) => {
-                    let prefs = administration.settings.tts.preferences.get();
-                    if let Err(error) = telegram_admin.connect(&api_id, &api_hash, &phone, &prefs).await {
+                    if let Err(error) = telegram_admin.connect(&api_id, &api_hash, &phone).await {
                         publish(Update::AdminError(error));
                     }
                     let status = telegram_admin.snapshot();
                     publish(Update::TelegramAuth { phase: i32::from(status.phase), status: format!("Telegram: {}", status.status) });
                 },
                 Some(Command::TelegramCode(code)) => {
-                    let prefs = administration.settings.tts.preferences.get();
-                    if let Err(error) = telegram_admin.submit_code(&code, &prefs).await {
+                    if let Err(error) = telegram_admin.submit_code(&code).await {
                         publish(Update::AdminError(error));
                     }
                     let status = telegram_admin.snapshot();
                     publish(Update::TelegramAuth { phase: i32::from(status.phase), status: format!("Telegram: {}", status.status) });
                 },
                 Some(Command::TelegramPassword(password)) => {
-                    let prefs = administration.settings.tts.preferences.get();
-                    if let Err(error) = telegram_admin.submit_password(&password, &prefs).await {
+                    if let Err(error) = telegram_admin.submit_password(&password).await {
                         publish(Update::AdminError(error));
                     }
                     let status = telegram_admin.snapshot();
@@ -929,13 +827,8 @@ async fn observe(
                 Some(Command::RemoteVoice(action)) => {
                     let result = match action {
                         RemoteVoiceAction::Preview(text, character, preset) => {
-                            let player = find_binary(directory, "NEUROMITA_FFPLAY",
-                                if cfg!(windows) { "ffplay.exe" } else { "ffplay" });
-                            match player {
-                                Some(player) => remote_admin.preview(text, character, preset, player, Some(remote_revision))
-                                    .map_err(|e| e.to_string()),
-                                None => Err("FFplay не найден: укажите NEUROMITA_FFPLAY или установите AIData/bin/ffplay".into()),
-                            }
+                            remote_admin.preview(text, character, preset, Some(remote_revision))
+                                .map_err(|error| error.to_string())
                         }
                         RemoteVoiceAction::Cancel => Ok(remote_admin.cancel()),
                         action => {
@@ -987,29 +880,8 @@ async fn observe(
                         continue;
                     }
                     let result = if enabled {
-                        match enable_speech_session(
-                            app,
-                            directory,
-                            origin,
-                        ).await {
-                            Ok(()) => {
-                                let mode = administration.settings.asr.preferences.get().input_mode;
-                                if matches!(mode.as_str(), "radio" | "push_to_talk") {
-                                    match app.press_speech_button(true).await {
-                                        Ok(()) => Ok(()),
-                                        Err(error) => {
-                                            administration.selection.stop_capture().await;
-                                            Err(error.to_string())
-                                        }
-                                    }
-                                } else {
-                                    Ok(())
-                                }
-                            }
-                            Err(error) => Err(error),
-                        }
+                        enable_speech_session(app, directory, origin).await
                     } else {
-                        let _ = app.press_speech_button(false).await;
                         administration.selection.stop_capture().await;
                         Ok(())
                     };
@@ -1017,8 +889,8 @@ async fn observe(
                     publish(Update::SpeechSessionStatus(administration.speech.snapshot()));
                 },
                 Some(Command::SpeechPushToTalk(pressed)) => {
-                    if let Err(error) = app.press_speech_button(pressed).await && pressed {
-                        publish(Update::AdminError(error.to_string()));
+                    if let Err(error) = administration.selection.press(pressed).await && pressed {
+                        publish(Update::AdminError(error));
                     }
                 },
                 Some(Command::MicrophoneTest(enabled, backend, device)) => {
@@ -1073,42 +945,21 @@ async fn observe(
                     refresh_views = false;
                 },
                 Some(Command::InstallNativePackage { model_id, manifest_sha256, backend }) => {
-                    if active_native_download.is_some() {
-                        publish(Update::NativeDownloadStatus {
-                            summary: "Установка уже выполняется; сначала завершите или отмените её".into(),
-                            percent: -1, active: true,
-                        });
-                    } else if let Some(backend) = native_backend(&backend) {
-                        match native_owner.start_download(
-                            NativeDownloadSelection { model_id, manifest_sha256, backend },
-                            native_download_events.clone(),
-                        ).await {
-                            Ok(operation) => {
-                                active_native_download = Some(operation);
-                                publish(Update::NativeDownloadStatus {
-                                    summary: "Проверка подписи пройдена. Подключение к доверенному HTTPS-источнику…".into(),
-                                    percent: -1, active: true,
-                                });
-                            },
-                            Err(error) => publish(Update::NativeDownloadStatus {
-                                summary: format!("Установка отклонена: {error}"),
-                                percent: -1, active: false,
-                            }),
-                        }
-                    } else {
-                        publish(Update::NativeDownloadStatus {
-                            summary: "Неизвестный native backend".into(), percent: -1, active: false,
-                        });
+                    let result = match native_backend(&backend) {
+                        Some(backend) => native_owner.start_download(
+                            NativeDownloadSelection { model_id, manifest_sha256, backend }
+                        ).await,
+                        None => Err("Неизвестный native backend".into()),
+                    };
+                    if let Err(error) = result {
+                        publish(Update::NativeError(error));
                     }
+                    publish_native_download(&native_owner.download_snapshot(), publish);
                     refresh_views = false;
                 },
                 Some(Command::CancelNativePackageInstall) => {
-                    if native_owner.cancel_download().await {
-                        publish(Update::NativeDownloadStatus {
-                            summary: "Отмена запрошена. Начатая атомарная публикация может завершиться целиком".into(),
-                            percent: -1, active: true,
-                        });
-                    }
+                    native_owner.cancel_download().await;
+                    publish_native_download(&native_owner.download_snapshot(), publish);
                     refresh_views = false;
                 },
                 Some(Command::RefreshPromptCatalog) => {},
@@ -1124,34 +975,11 @@ async fn observe(
                     refresh_views = false;
                 },
                 Some(Command::ConfirmAiHubInstall { category, id, token }) => {
-                    match install_owner.confirm(category.clone(), id.clone(), token).await {
-                        Ok((operation, action)) => {
-                            let (operation_summary, preview_summary) = match &action {
-                                InstallAction::Overlay => (
-                                    "Публикация проверенного plugin overlay",
-                                    "Установка plugin overlay выполняется. Worker не запускается.",
-                                ),
-                                InstallAction::Wheel { .. } => (
-                                    "Установка одного проверенного wheel-stage",
-                                    "Устанавливается один wheel-stage. Модель и worker не активируются.",
-                                ),
-                            };
-                            publish(Update::AiHubInstallOperation {
-                                operation_id: operation.to_string(),
-                                category: category.clone(), id: id.clone(),
-                                stage: "installing".into(), summary: operation_summary.into(),
-                            });
-                            publish(Update::AiHubInstallPreview {
-                                category, id, token,
-                                summary: preview_summary.into(), error: String::new(),
-                                stage: "installing".into(), can_install: false,
-                                operation_id: operation.to_string(),
-                            });
-                        },
-                        Err(error) => publish(Update::AiHubInstallPreview {
+                    if let Err(error) = install_owner.confirm(category.clone(), id.clone(), token).await {
+                        publish(Update::AiHubInstallPreview {
                             category, id, token, summary: String::new(), error: error.into(),
                             stage: "failed".into(), can_install: false, operation_id: String::new(),
-                        }),
+                        });
                     }
                     refresh_views = false;
                 },
@@ -1198,14 +1026,11 @@ async fn observe(
                 Some(Command::MemoryRecall(request_id, character, memory_id, query)) => {
                     let sender = recall_updates.clone();
                     let cancelled = stop.clone();
+                    let characters = administration.characters.clone();
                     tokio::spawn(async move {
                         let result = tokio::select! {
                             _ = cancelled.cancelled() => return,
-                            result = neuromita::api::HistoricalRecallApi::inspect(
-                                character,
-                                neuromita::knowledge::forgotten_recall::RecallSelector::Ids(vec![memory_id]),
-                                &query,
-                            ) => result.map_err(|error| error.to_string()),
+                            result = characters.recall_forgotten(character, memory_id, &query) => result,
                         };
                         let _ = sender.send(Update::MemoryRecallResult(request_id, result));
                     });
@@ -1289,6 +1114,15 @@ async fn observe(
                         .await.map_err(|error| error.to_string());
                     publish(Update::OlderPage(origin, ticket, page));
                 },
+                Some(Command::DraftChanged(origin, text)) => {
+                    if let Err(error) = administration.speech_chat.set_draft(ChatSelection {
+                        character: origin.character,
+                        revision: origin.selection_revision,
+                    }, text).await {
+                        publish(Update::ChatError(origin, error));
+                    }
+                    refresh_views = false;
+                },
                 Some(Command::Send(origin, text)) => {
                     if !chat_fence::accepts(
                         origin.character.index() as i32,
@@ -1298,9 +1132,12 @@ async fn observe(
                     ) {
                         publish(Update::ChatError(origin, "Chat selection changed before send".into()));
                     } else {
-                        match presenter.reply(origin.character, text.clone()) {
+                        match administration.speech_chat.send(ChatSelection {
+                            character: origin.character,
+                            revision: origin.selection_revision,
+                        }, text.clone()).await {
                             Ok(_) => publish(Update::Sent(origin, text)),
-                            Err(error) => publish(Update::ChatError(origin, error.to_string())),
+                            Err(error) => publish(Update::ChatError(origin, error)),
                         }
                     }
                 },
@@ -1314,12 +1151,14 @@ async fn observe(
                         publish(Update::ChatError(origin, "Chat selection changed before attachment".into()));
                         continue;
                     }
-                    let result = administration.conversation.attach_file(
-                        origin.character, text.clone(), std::path::Path::new(&source),
-                        neuromita::request::TimelineFence {
-                            at: app.at(), selection: app.timeline_selection(),
-                        },
-                    ).map(|_| ());
+                    let result = administration.conversation.current_fence().and_then(|fence| {
+                        administration.conversation.attach_file(
+                            origin.character,
+                            text.clone(),
+                            std::path::Path::new(&source),
+                            fence,
+                        )
+                    }).map(|_| ());
                     match result {
                         Ok(()) => publish(Update::FileAttached(origin, text, source)),
                         Err(error) => publish(Update::ChatError(origin, error)),
@@ -1368,75 +1207,10 @@ async fn observe(
             result = recall_results.recv() => {
                 if let Some(result) = result { publish(result); }
             },
-            installed = install_updates.recv() => {
-                match installed {
-                    Some(InstallEvent::Finished { operation, category, id, token, action, result }) => {
-                        install_owner.join_finished(operation).await;
-                        let (summary, error, stage): (String, String, String) = match result {
-                            Ok(_) => match action {
-                                InstallAction::Overlay => ("Plugin overlay установлен и проверен. Worker не запущен, model assets не установлены.".into(), String::new(), "installed".into()),
-                                InstallAction::Wheel { .. } => ("Один wheel-stage установлен и проверен. Это не готовность backend, модели или worker.".into(), String::new(), "wheel-installed".into()),
-                            },
-                            Err(InstallPreviewError::ReviewChanged) => (String::new(), "Исходный план изменился после подтверждения — установка остановлена.".into(), "failed".into()),
-                            Err(InstallPreviewError::Cancelled) => ("Установка отменена.".into(), String::new(), "cancelled".into()),
-                            Err(InstallPreviewError::UnsupportedInstall) => (String::new(), "Этот план требует дополнительного подтверждения backend или файлов модели.".into(), "failed".into()),
-                            Err(_) => (String::new(), "Core не смог завершить установку. Подробности доступны в диагностике установщика.".into(), "failed".into()),
-                        };
-                        publish(Update::AiHubInstallOperation {
-                            operation_id: operation.to_string(),
-                            category: category.clone(), id: id.clone(),
-                            stage: stage.clone(),
-                            summary: if error.is_empty() { summary.clone() } else { error.clone() },
-                        });
-                        publish(Update::AiHubInstallPreview { category, id, token,
-                            summary, error, stage, can_install: false, operation_id: operation.to_string() });
-                    },
-                    Some(InstallEvent::Preview { category, id, token, result, admitted }) => {
-                        if !install_owner.is_current_preview(&category, &id, token).await {
-                            continue;
-                        }
-                        let (summary, error, can_install, stage) = match result {
-                            Ok(InstallActionReview { review, action }) => {
-                                let mut summary = summarize_ai_hub_review(&review);
-                                let review_stage = match action {
-                                    Some(InstallAction::Overlay) if admitted => "review",
-                                    Some(InstallAction::Wheel { stage_id, backend }) => {
-                                        summary.push_str(&format!(
-                                            "\nДоступен проверенный wheel-stage: {stage_id} · {backend}. Установится только этот пакет, не модель.",
-                                        ));
-                                        if admitted { "wheel-review" } else { "review" }
-                                    },
-                                    _ => {
-                                        summary.push_str("\nИсполнение недоступно: нет единственного проверенного и локально доступного wheel-stage либо необходимы другие установочные этапы.");
-                                        "review"
-                                    },
-                                };
-                                (summary, String::new(), admitted, review_stage.to_owned())
-                            },
-                            Err(InstallPreviewError::InvalidSelection) => (String::new(),
-                                "Модель недоступна или неоднозначна в актуальном каталоге".into(), false, "failed".into()),
-                            Err(InstallPreviewError::Sdk(_)) => (String::new(),
-                                "Для проверки необходимы установленные в UserData проверенный SDK и код плагина.".into(), false, "failed".into()),
-                            Err(InstallPreviewError::PythonVersion | InstallPreviewError::Python(_)) => (String::new(),
-                                "Managed CPython 3.12.x ещё не подготовлен либо не прошёл проверку версии.".into(), false, "failed".into()),
-                            Err(InstallPreviewError::Plan(_)) => (String::new(),
-                                "Установочный скрипт не предоставил допустимый план. Установка не запускалась.".into(), false, "failed".into()),
-                            Err(InstallPreviewError::InvalidPlan(_)) => (String::new(),
-                                "Полученный план не прошёл проверку зависимостей, backend или путей.".into(), false, "failed".into()),
-                            Err(InstallPreviewError::ReviewChanged) => (String::new(),
-                                "План или исходник изменился во время проверки.".into(), false, "failed".into()),
-                            Err(InstallPreviewError::Cancelled) => ("Проверка отменена.".into(),
-                                String::new(), false, "cancelled".into()),
-                            Err(InstallPreviewError::UnsupportedInstall) => (String::new(),
-                                "Для этого плана пока не поддерживается установка.".into(), false, "failed".into()),
-                            Err(InstallPreviewError::WheelPin | InstallPreviewError::WheelExecution) => (String::new(),
-                                "Проверенный wheel-stage недоступен или не смог завершиться; установка модели не запускалась.".into(), false, "failed".into()),
-                        };
-                        publish(Update::AiHubInstallPreview { category, id, token, summary, error,
-                            stage, can_install, operation_id: String::new() });
-                    },
-                    None => {},
-                }
+            changed = install_updates.changed() => {
+                changed.map_err(|_| "AI Hub install observer closed")?;
+                publish_ai_install(&install_updates.borrow_and_update().clone(), publish);
+                refresh_views = false;
             },
             changed = remote_updates.changed() => {
                 changed.map_err(|_| "Remote Voice observer closed")?;
@@ -1446,30 +1220,10 @@ async fn observe(
                 publish(Update::RemoteVoiceState(remote_message(&state.phase).into(), state.busy));
                 refresh_views = false;
             },
-            transcript = transcript_updates.recv() => {
-                if let Ok(transcript) = transcript {
-                    let origin = ChatOrigin { character: transcript.character,
-                        selection_revision: transcript.selection_revision };
-                    let transcript = transcript.transcript;
-                    if !chat_fence::accepts(
-                        origin.character.index() as i32,
-                        origin.selection_revision,
-                        character.index() as i32,
-                        selection_revision,
-                    ) {
-                        continue;
-                    }
-                    let text = transcript.text.trim();
-                    if !text.is_empty() {
-                        let preferences = administration.settings.asr.preferences.get();
-                        publish(Update::RecognizedText {
-                            origin,
-                            text: text.to_owned(),
-                            auto_send_after: dispatch_policy(&preferences),
-                            merge_with_draft: preferences.merge_chat,
-                        });
-                    }
-                }
+            changed = draft_updates.changed() => {
+                changed.map_err(|_| "Speech draft Presenter observation closed")?;
+                publish(Update::SpeechDraft(draft_updates.borrow_and_update().clone()));
+                refresh_views = false;
             },
             update = memories.updates.recv(), if !memories.closed => { match update { Some(update) => publish(update), None => memories.closed = true } },
             result = speech_status.changed() => {
@@ -1503,66 +1257,13 @@ async fn observe(
             } => {
                 if result.is_err() { runtime_status = None; }
             },
-            event = native_download_updates.recv() => {
-                if let Some(event) = event {
-                    let matching = active_native_download == Some(event.id());
-                    if matching {
-                        match event {
-                            NativeDownloadEvent::Progress { progress, .. } => {
-                                let view = NativeDownloadPresenter::project(progress);
-                                let summary = match view.phase {
-                                    NativeTransferPhase::Manifest => "Загрузка подписанного manifest…".to_owned(),
-                                    NativeTransferPhase::Downloading => format!(
-                                        "Загружено {} / {} МиБ. Пакет пока не установлен",
-                                        view.transferred_bytes / (1024 * 1024),
-                                        view.planned_bytes.unwrap_or(0) / (1024 * 1024),
-                                    ),
-                                    NativeTransferPhase::Publishing => "Повторная проверка и атомарная публикация…".to_owned(),
-                                };
-                                publish(Update::NativeDownloadStatus {
-                                    summary,
-                                    percent: view.percent.map_or(-1, i32::from),
-                                    active: true,
-                                });
-                            },
-                            NativeDownloadEvent::Finished { result, .. } => {
-                                let journal = if let Some(operation) = active_native_download.take() {
-                                    native_owner.finish_download(operation).await
-                                } else {
-                                    Err("Отсутствует активная установка для завершения".into())
-                                };
-                                if let Err(error) = journal {
-                                    publish(Update::NativeError(error.clone()));
-                                    publish(Update::NativeDownloadStatus {
-                                        summary: format!("Проверка журнала установки не завершена: {error}"),
-                                        percent: -1,
-                                        active: false,
-                                    });
-                                    continue;
-                                }
-                                match result {
-                                    Ok(installed) => {
-                                        if let Err(error) = native_owner.refresh().await {
-                                            publish(Update::NativeError(error));
-                                        }
-                                        publish_native(native_owner, publish).await;
-                                        publish_native_release_catalog(native_owner, publish).await;
-                                        publish(Update::NativeDownloadStatus {
-                                            summary: format!("Пакет {} опубликован (повторное использование: {})",
-                                                installed.model_id, installed.reused_package),
-                                            percent: 100,
-                                            active: false,
-                                        });
-                                    },
-                                    Err(error) => publish(Update::NativeDownloadStatus {
-                                        summary: format!("Установка не выполнена: {error}"),
-                                        percent: -1,
-                                        active: false,
-                                    }),
-                                }
-                            },
-                        }
-                    }
+            changed = native_download_updates.changed() => {
+                changed.map_err(|_| "Native download observer closed")?;
+                let status = native_download_updates.borrow_and_update().clone();
+                publish_native_download(&status, publish);
+                if status.phase == "installed" {
+                    publish_native(native_owner, publish).await;
+                    publish_native_release_catalog(native_owner, publish).await;
                 }
                 refresh_views = false;
             },
@@ -1577,6 +1278,44 @@ async fn observe(
             },
         }
     }
+}
+
+fn publish_ai_install(
+    status: &neuromita::ai_runtime::install_coordinator::InstallStatus,
+    publish: &impl Fn(Update),
+) {
+    let view = neuromita::presentation::AiHubInstallPresenter::project(status);
+    if !view.operation_id.is_empty() {
+        publish(Update::AiHubInstallOperation {
+            operation_id: view.operation_id.clone(),
+            category: view.category.clone(),
+            id: view.id.clone(),
+            stage: view.stage.clone(),
+            summary: view.operation_summary,
+        });
+    }
+    publish(Update::AiHubInstallPreview {
+        category: view.category,
+        id: view.id,
+        token: view.token,
+        summary: view.summary,
+        error: view.error,
+        stage: view.stage,
+        can_install: view.can_install,
+        operation_id: view.operation_id,
+    });
+}
+
+fn publish_native_download(
+    state: &neuromita::ai_runtime::native_service::NativeDownloadStatus,
+    publish: &impl Fn(Update),
+) {
+    let view = NativeDownloadPresenter::status(state);
+    publish(Update::NativeDownloadStatus {
+        summary: view.summary,
+        percent: view.percent,
+        active: view.active,
+    });
 }
 
 async fn character_debug_snapshot(api: &GuiPresenter, character: CharacterId) -> Update {
@@ -1648,63 +1387,4 @@ async fn hardware_snapshot() -> Update {
                 },
             );
     Update::Hardware(neuromita::presentation::hardware::HardwarePresenter::present(inventory))
-}
-
-#[cfg(test)]
-mod speech_dispatch_tests {
-    use super::*;
-
-    #[test]
-    fn manual_speech_does_not_trigger_reply() {
-        let mut settings = AsrPreferences::default();
-        assert_eq!(dispatch_policy(&settings), None);
-        settings.instant_send = true;
-        settings.delayed_send = false;
-        assert_eq!(dispatch_policy(&settings), Some(Duration::ZERO));
-        settings.delayed_send = true;
-        settings.send_delay_ms = 2400;
-        assert_eq!(
-            dispatch_policy(&settings),
-            Some(Duration::from_millis(2400))
-        );
-    }
-
-    #[tokio::test]
-    async fn speech_sink_only_delivers_transcripts() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let captured = ChatOrigin {
-            character: CharacterId::Crazy,
-            selection_revision: 4,
-        };
-        let sink = speech_conversation(&tx, captured);
-        let stream = neuromita::audio::ticket::SpeechStream::new(CancellationToken::new());
-        let ticket = stream.ticket();
-        let transcript = Transcript {
-            text: "spoken words".into(),
-            language: None,
-        };
-        sink.reply(&ticket, &transcript).await.unwrap();
-        sink.reply(&ticket, &transcript).await.unwrap();
-        let (origin, transcript) = rx.recv().await.unwrap();
-        assert_eq!(transcript.text, "spoken words");
-        assert_eq!(origin, captured);
-        assert!(rx.try_recv().is_err(), "duplicate ticket must not requeue");
-
-        let stale = stream.ticket();
-        stream.invalidate();
-        sink.reply(&stale, &transcript).await.unwrap();
-        assert!(rx.try_recv().is_err(), "reset ticket must not enqueue");
-
-        let fresh = stream.ticket();
-        sink.reply(&fresh, &transcript).await.unwrap();
-        let (fresh_origin, fresh_transcript) = rx.recv().await.unwrap();
-        assert_eq!(fresh_origin, captured);
-        assert_eq!(fresh_transcript.text, "spoken words");
-        assert!(!chat_fence::accepts(
-            origin.character.index() as i32,
-            origin.selection_revision,
-            CharacterId::Crazy.index() as i32,
-            6,
-        ));
-    }
 }

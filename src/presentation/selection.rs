@@ -38,14 +38,24 @@ impl ChatSelectionPresenter {
         self.value.subscribe()
     }
 
-    /// A capture request is fenced against the same Presenter selection used by GUI and MCP.
-    /// Hold the selection mutex across capture start so a concurrent select cannot
-    /// race a stale ASR start after it has stopped the previous character.
+    /// Capture admission and push-to-talk are one selection-fenced operation.
+    /// The mutex is held until the microphone controller has accepted the entire request.
     pub async fn start_capture(
         &self,
         expected: ChatSelection,
         ffmpeg: std::path::PathBuf,
         ffplay: std::path::PathBuf,
+    ) -> Result<(), String> {
+        self.start_capture_and_press(expected, ffmpeg, ffplay, false)
+            .await
+    }
+
+    pub async fn start_capture_and_press(
+        &self,
+        expected: ChatSelection,
+        ffmpeg: std::path::PathBuf,
+        ffplay: std::path::PathBuf,
+        press_on_start: bool,
     ) -> Result<(), String> {
         let _mutation = self.mutation.lock().await;
         if self.snapshot() != expected {
@@ -53,12 +63,37 @@ impl ChatSelectionPresenter {
         }
         self.speech_capture
             .start(expected.character, expected.revision, ffmpeg, ffplay)
-            .await
+            .await?;
+        if press_on_start {
+            if let Err(error) = self.speech_capture.press(true).await {
+                self.speech_capture.stop().await;
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn press(&self, pressed: bool) -> Result<(), String> {
+        let _mutation = self.mutation.lock().await;
+        self.speech_capture.press(pressed).await
     }
 
     pub async fn stop_capture(&self) {
         let _mutation = self.mutation.lock().await;
         self.speech_capture.stop().await;
+    }
+
+    /// Execute a synchronous mutation while the selected-character CAS gate is held.
+    pub(crate) async fn run_fenced<T>(
+        &self,
+        expected: ChatSelection,
+        action: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let _mutation = self.mutation.lock().await;
+        if self.snapshot() != expected {
+            return Err("chat selection revision conflict".into());
+        }
+        action()
     }
 
     pub async fn select(
