@@ -147,6 +147,7 @@ pub struct ConversationPresenter {
     settings: Arc<SettingsOwner>,
     presets: Arc<PresetCatalog>,
     volume: BoundProperty<Volume>,
+    assets: Option<Arc<crate::timeline::storage::assets::TimelineAssetStore>>,
 }
 
 impl ConversationPresenter {
@@ -268,7 +269,60 @@ impl ConversationPresenter {
             settings,
             presets,
             volume,
+            assets: None,
         }
+    }
+
+    pub(crate) fn with_attachment_store(
+        mut self,
+        assets: Option<Arc<crate::timeline::storage::assets::TimelineAssetStore>>,
+    ) -> Self {
+        self.assets = assets;
+        self
+    }
+
+    /// One selected Timeline event with verified binary references, shared by GUI/MCP.
+    pub fn attach_file(
+        &self,
+        character: CharacterId,
+        text: String,
+        source: &std::path::Path,
+        fence: TimelineFence,
+    ) -> Result<crate::identity::EventId, String> {
+        use crate::timeline::{
+            domain::parse_message_content,
+            file_attachments::{compose_local_file_message, import_local_file},
+        };
+        let assets = self
+            .assets
+            .as_ref()
+            .ok_or("Timeline asset owner is unavailable")?;
+        if text.len() > 64 * 1024 {
+            return Err("attachment text exceeds 64 KiB".into());
+        }
+        let part = import_local_file(assets, source).map_err(|e| e.to_string())?;
+        let message =
+            compose_local_file_message(character, text, part).map_err(|e| e.to_string())?;
+        let parts = parse_message_content(&message.content).map_err(|e| e.to_string())?;
+        if !parts.iter().any(|part| part.asset().is_some()) {
+            return Err("attachment reference missing".into());
+        }
+        for part in parts {
+            if let Some(reference) = part.asset() {
+                assets.verify(reference).map_err(|e| e.to_string())?;
+            }
+        }
+        let mut timeline = self
+            .timeline
+            .lock()
+            .map_err(|_| "Timeline mutex poisoned")?;
+        if timeline.anchor() != fence.at || timeline.selection() != fence.selection {
+            return Err("Timeline selection changed before attachment commit".into());
+        }
+        let fact = timeline
+            .publish_conversation_message(fence.selection, message)
+            .map_err(|e| e.to_string())?;
+        Ok(fact.draft.id)
     }
 
     pub fn characters(&self) -> &'static [CharacterId] {

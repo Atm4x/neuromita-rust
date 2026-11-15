@@ -1549,8 +1549,16 @@ impl ApplicationLifecycle {
             Arc::clone(&timeline),
             Arc::clone(&bindings.settings),
             Arc::clone(&presets),
-        );
+        )
+        .with_attachment_store(timeline_assets.clone());
         let presets_presenter = PresetsPresenter::new(Arc::clone(&presets));
+        let graph_presenter =
+            crate::presentation::GraphMaintenancePresenter::new(owner.server_stop.clone());
+        let guide_persistence = crate::presentation::GuidePersistencePresenter::new();
+        let prompt_folder = crate::presentation::PromptFolderPresenter::new(
+            prompts.clone(),
+            Arc::clone(&settings_presenter),
+        );
         owner.server_task = Some(tokio::spawn(server_lifecycle.run_with_presenter(
             owner.server_stop.clone(),
             Arc::clone(&bindings),
@@ -1567,6 +1575,9 @@ impl ApplicationLifecycle {
                 settings_presenter.presets.clone(),
                 Arc::clone(&settings_presenter),
                 CharactersPresenter::new(bindings.characters.clone()),
+                graph_presenter.clone(),
+                guide_persistence.clone(),
+                prompt_folder.clone(),
                 ai_hub_native.clone(),
                 ai_hub_install.clone(),
                 speech_model_catalog,
@@ -1599,6 +1610,9 @@ impl ApplicationLifecycle {
                 settings: settings_presenter,
                 presets: presets_presenter,
                 characters: CharactersPresenter::new(bindings.characters.clone()),
+                graph: graph_presenter,
+                guide_persistence,
+                prompt_folder,
                 telegram_admin,
                 remote_voice_admin,
             },

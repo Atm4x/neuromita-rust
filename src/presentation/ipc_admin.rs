@@ -21,6 +21,19 @@ use crate::{
 #[serde(tag = "query", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum PresenterRead {
     SpeechInventory {},
+    MemoryRecall {
+        character: CharacterId,
+        memory_id: MemoryId,
+        query_text: String,
+    },
+    GraphPreview {
+        character: CharacterId,
+        memory_id: MemoryId,
+        mode: GraphReviewMode,
+    },
+    PromptFolder {
+        character: CharacterId,
+    },
     SpeechTranscript {
         #[serde(default)]
         include_content: bool,
@@ -81,6 +94,20 @@ pub(crate) enum PresenterRead {
         event_id: Uuid,
         version: ConversationVersion,
     },
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum GraphReviewMode {
+    Clear,
+    Reindex,
+}
+
+fn mode_name(mode: crate::knowledge::maintenance::GraphMaintenanceMode) -> &'static str {
+    match mode {
+        crate::knowledge::maintenance::GraphMaintenanceMode::Clear => "clear",
+        crate::knowledge::maintenance::GraphMaintenanceMode::Reindex => "reindex",
+    }
 }
 
 fn default_wait_ms() -> u64 {
@@ -194,6 +221,23 @@ pub(crate) enum PresenterWrite {
     RetryFailed {
         character: CharacterId,
         request_id: Uuid,
+    },
+    GraphApply {
+        character: CharacterId,
+        request_id: Uuid,
+    },
+    GraphAbort {
+        request_id: Uuid,
+    },
+    GuideRetry {},
+    PromptFolderOpen {
+        character: CharacterId,
+    },
+    AttachFile {
+        character: CharacterId,
+        version: ConversationVersion,
+        text: String,
+        source: String,
     },
 }
 
@@ -312,6 +356,58 @@ fn messages_json(
 impl PresenterProbe {
     pub(crate) async fn admin_read(&self, query: PresenterRead) -> Result<Value, String> {
         match query {
+            PresenterRead::PromptFolder { character } => {
+                let path = self.prompt_folder.locate(character)?;
+                Ok(
+                    json!({"source":"prompt_folder_presenter","character":character,
+                    "path":path,"opened":false}),
+                )
+            }
+            PresenterRead::MemoryRecall {
+                character,
+                memory_id,
+                query_text,
+            } => {
+                if query_text.trim().is_empty() || query_text.len() > 4096 {
+                    return Err("recall query must contain 1..4096 characters".into());
+                }
+                let result = crate::api::HistoricalRecallApi::inspect(
+                    character,
+                    crate::knowledge::forgotten_recall::RecallSelector::Ids(vec![memory_id]),
+                    &query_text,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+                Ok(
+                    json!({"source":"historical_recall_api","character":character,
+                    "memory_id":memory_id,"found":result.is_some(),"text":result}),
+                )
+            }
+            PresenterRead::GraphPreview {
+                character,
+                memory_id,
+                mode,
+            } => {
+                let mode = match mode {
+                    GraphReviewMode::Clear => {
+                        crate::knowledge::maintenance::GraphMaintenanceMode::Clear
+                    }
+                    GraphReviewMode::Reindex => {
+                        crate::knowledge::maintenance::GraphMaintenanceMode::Reindex
+                    }
+                };
+                let request_id = Uuid::new_v4();
+                let report = self
+                    .graph
+                    .preview(request_id, character, memory_id, mode)
+                    .await?;
+                Ok(
+                    json!({"source":"graph_maintenance_presenter","request_id":report.request_id,
+                    "character":report.character,"relation_count":report.relation_count,
+                    "mode":mode_name(mode),"confirmation_required":true}),
+                )
+            }
+
             PresenterRead::SpeechTranscript { include_content } => {
                 let hub = self.speech_capture.transcripts();
                 let ui_route = hub.gui_route();
@@ -881,6 +977,88 @@ impl PresenterProbe {
 
     pub(crate) async fn admin_write(&self, change: PresenterWrite) -> Result<Value, String> {
         match change {
+            PresenterWrite::AttachFile {
+                character,
+                version,
+                text,
+                source,
+            } => {
+                if std::env::var_os("NEUROMITA_ENABLE_LOCAL_FILE_ATTACH").as_deref()
+                    != Some(std::ffi::OsStr::new("1"))
+                {
+                    return Err(
+                        "local file attachment requires NEUROMITA_ENABLE_LOCAL_FILE_ATTACH=1"
+                            .into(),
+                    );
+                }
+                if source.len() > 4096 || !std::path::Path::new(&source).is_absolute() {
+                    return Err(
+                        "attachment source must be an absolute path up to 4096 bytes".into(),
+                    );
+                }
+                if text.len() > 65536 {
+                    return Err("attachment text exceeds 64 KiB".into());
+                }
+                let id = self.conversation.attach_file(
+                    character,
+                    text,
+                    std::path::Path::new(&source),
+                    version.fence(),
+                )?;
+                Ok(
+                    json!({"source":"conversation_presenter","event_id":id.0,"character":character,
+                    "attachment_committed":true}),
+                )
+            }
+            PresenterWrite::GuideRetry {} => {
+                let change = self
+                    .guide_persistence
+                    .retry()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let snapshot = self.settings.snapshot().map_err(|e| e.to_string())?;
+                Ok(
+                    json!({"source":"guide_persistence_presenter","change":format!("{change:?}"),
+                    "revision":snapshot.revision,"persisted_revision":snapshot.persisted_revision}),
+                )
+            }
+            PresenterWrite::PromptFolderOpen { character } => {
+                if std::env::var_os("NEUROMITA_ENABLE_LOCAL_HOST_ACTIONS").as_deref()
+                    != Some(std::ffi::OsStr::new("1"))
+                {
+                    return Err(
+                        "host shell actions require NEUROMITA_ENABLE_LOCAL_HOST_ACTIONS=1".into(),
+                    );
+                }
+                self.prompt_folder.open(character)?;
+                Ok(json!({"source":"prompt_folder_presenter","character":character,"opened":true}))
+            }
+            PresenterWrite::GraphApply {
+                character,
+                request_id,
+            } => {
+                if std::env::var_os("NEUROMITA_ENABLE_LOCAL_GRAPH_MAINTENANCE").as_deref()
+                    != Some(std::ffi::OsStr::new("1"))
+                {
+                    return Err(
+                        "graph maintenance requires NEUROMITA_ENABLE_LOCAL_GRAPH_MAINTENANCE=1"
+                            .into(),
+                    );
+                }
+                self.graph.apply(request_id, character).await?;
+                Ok(
+                    json!({"source":"graph_maintenance_presenter","request_id":request_id,
+                    "applied":true,"confirmed":true}),
+                )
+            }
+            PresenterWrite::GraphAbort { request_id } => {
+                let aborted = self.graph.abort(request_id).await;
+                Ok(
+                    json!({"source":"graph_maintenance_presenter","request_id":request_id,
+                    "aborted":aborted}),
+                )
+            }
+
             PresenterWrite::Settings { field, value } => {
                 let p = &self.settings;
                 match field {

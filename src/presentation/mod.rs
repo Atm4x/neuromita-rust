@@ -12,9 +12,15 @@ pub use audio_input::AudioInputPresenter;
 mod chat;
 mod connections;
 mod conversation;
+mod guide_persistence;
 pub mod hardware;
 mod ipc;
 mod ipc_admin;
+mod knowledge_admin;
+mod prompt_folder;
+pub use guide_persistence::{GuidePersistencePresenter, GuideSaveError};
+pub use knowledge_admin::{GraphMaintenancePresenter, GraphReview};
+pub use prompt_folder::PromptFolderPresenter;
 mod presets;
 mod releases;
 mod runtime;
@@ -60,6 +66,9 @@ pub struct GuiPresenter {
     pub settings: std::sync::Arc<SettingsPresenter>,
     pub presets: PresetsPresenter,
     pub characters: CharactersPresenter,
+    pub graph: GraphMaintenancePresenter,
+    pub guide_persistence: GuidePersistencePresenter,
+    pub prompt_folder: PromptFolderPresenter,
     pub telegram_admin: Option<std::sync::Arc<crate::telegram_admin::TelegramAdmin>>,
     pub remote_voice_admin: Option<std::sync::Arc<crate::remote_voice::RemoteVoiceAdmin>>,
 }

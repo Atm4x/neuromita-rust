@@ -2628,7 +2628,7 @@ async fn mcp_stdio_probes_the_same_running_core() {
             let result = &response["result"];
             match id {
                 1 => assert_eq!(result["serverInfo"]["name"], "neuromita"),
-                2 => assert_eq!(result["tools"].as_array().unwrap().len(), 41),
+                2 => assert_eq!(result["tools"].as_array().unwrap().len(), 46),
                 3 => {
                     let frame = &result["structuredContent"];
                     assert_eq!(frame["type"], "presenter_inspect");
@@ -3542,5 +3542,66 @@ async fn remote_voice_gui_and_mcp_share_catalog_with_versioned_safe_responses() 
         .await;
     assert_eq!(cancelled["result"]["result"]["status"]["phase"], "saved");
     assert_eq!(cancelled["result"]["result"]["status"]["revision"], 2);
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn gui_equivalent_knowledge_and_admin_commands_reject_unapproved_actions() {
+    let fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+    let mut recall = command("presenter_admin_read");
+    recall["query"] = json!({"query":"memory_recall","character":"Crazy",
+        "memory_id":Uuid::new_v4(),"query_text":""});
+    client.send(recall.clone()).await;
+    let rejected = client
+        .until(|v| v["command_id"] == recall["command_id"])
+        .await;
+    assert_eq!(rejected["type"], "error");
+
+    let mut preview = command("presenter_admin_read");
+    preview["query"] = json!({"query":"graph_preview","character":"Crazy",
+        "memory_id":Uuid::new_v4(),"mode":"clear"});
+    client.send(preview.clone()).await;
+    let invalid = client
+        .until(|v| v["command_id"] == preview["command_id"])
+        .await;
+    assert_eq!(invalid["type"], "error");
+
+    let mut apply = command("presenter_admin_write");
+    apply["change"] = json!({"change":"graph_apply","character":"Crazy",
+        "request_id":Uuid::new_v4()});
+    client.send(apply.clone()).await;
+    let refused = client
+        .until(|v| v["command_id"] == apply["command_id"])
+        .await;
+    assert_eq!(refused["type"], "error");
+
+    let mut abort = command("presenter_admin_write");
+    abort["change"] = json!({"change":"graph_abort","request_id":Uuid::new_v4()});
+    client.send(abort.clone()).await;
+    let no_plan = client
+        .until(|v| v["command_id"] == abort["command_id"])
+        .await;
+    assert_eq!(no_plan["type"], "presenter_admin_write");
+    assert_eq!(no_plan["result"]["aborted"], false);
+
+    let mut guide = command("presenter_admin_write");
+    guide["change"] = json!({"change":"guide_retry"});
+    client.send(guide.clone()).await;
+    let no_retry = client
+        .until(|v| v["command_id"] == guide["command_id"])
+        .await;
+    assert_eq!(no_retry["type"], "error");
+
+    let mut attach = command("presenter_admin_write");
+    attach["change"] = json!({"change":"attach_file","character":"Crazy",
+        "text":"note","source":"/not/an/approved/file",
+        "version":{"branch_id":Uuid::new_v4(),"through":0,"generation":0}});
+    client.send(attach.clone()).await;
+    let restricted = client
+        .until(|v| v["command_id"] == attach["command_id"])
+        .await;
+    assert_eq!(restricted["type"], "error");
+    assert!(!restricted.to_string().contains("not/an/approved/file"));
     fixture.shutdown().await;
 }

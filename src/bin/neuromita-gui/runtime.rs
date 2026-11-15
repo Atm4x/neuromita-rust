@@ -192,16 +192,6 @@ pub struct GraphPreviewReport {
     pub relations: Vec<neuromita::memory::ProvenancedRelation>,
 }
 
-impl GraphPreviewReport {
-    fn from_plan(plan: &neuromita::knowledge::maintenance::GraphMaintenancePreview) -> Self {
-        let relations = plan.inspected_relations();
-        Self {
-            count: relations.len(),
-            relations,
-        }
-    }
-}
-
 pub enum RemoteVoiceAction {
     Add,
     Delete,
@@ -723,13 +713,7 @@ async fn observe(
     let mut connections = administration.connections.observe();
     let mut memories = MemoryWatch::start(administration, CharacterId::Crazy)?;
     let (recall_updates, mut recall_results) = mpsc::unbounded_channel();
-    let mut graph_pending: Option<(
-        uuid::Uuid,
-        CharacterId,
-        neuromita::knowledge::maintenance::GraphMaintenancePreview,
-    )> = None;
     let mut pending: Option<(ChatOrigin, ConversationChangePreview)> = None;
-    let mut failed_guide_change: Option<GuideChange> = None;
     let tts = administration.settings.tts.preferences.get();
     if tts.enabled && tts.backend == TtsBackend::Telegram && tts.telegram_auto_connect {
         let _ = telegram_admin.auto_connect(&tts).await;
@@ -857,71 +841,21 @@ async fn observe(
                     }
                 },
                 Some(Command::ChangeGuide { request_id, change }) => {
-                    if failed_guide_change.is_some() {
-                        publish(Update::GuideFailed {
-                            request_id,
-                            error: "A previous Guide change is not persisted; retry it first".into(),
-                        });
-                        continue;
-                    }
-                    match change.apply() {
-                        Err(error) => publish(Update::GuideRejected {
-                            request_id,
-                            error: error.to_string(),
-                        }),
-                        Ok(()) => match SettingsApi::flush().await {
-                            Ok(()) => match change.matches_current() {
-                                Ok(true) => publish(Update::GuidePersisted { request_id, change }),
-                                Ok(false) => publish(Update::GuideRejected {
-                                    request_id,
-                                    error: "Guide was concurrently changed; reopen to reconcile".into(),
-                                }),
-                                Err(error) => publish(Update::GuideRejected {
-                                    request_id,
-                                    error: error.to_string(),
-                                }),
-                            },
-                            Err(error) => {
-                                failed_guide_change = Some(change);
-                                publish(Update::GuideFailed {
-                                    request_id,
-                                    error: error.to_string(),
-                                });
-                            }
-                        },
+                    match administration.guide_persistence.change(change.clone()).await {
+                        Ok(()) => publish(Update::GuidePersisted { request_id, change }),
+                        Err(neuromita::presentation::GuideSaveError::Failed(error)) =>
+                            publish(Update::GuideFailed { request_id, error }),
+                        Err(neuromita::presentation::GuideSaveError::Rejected(error)) =>
+                            publish(Update::GuideRejected { request_id, error }),
                     }
                 },
                 Some(Command::RetryGuideChange { request_id }) => {
-                    let Some(change) = failed_guide_change.clone() else {
-                        publish(Update::GuideRejected {
-                            request_id,
-                            error: "No failed Guide change to retry".into(),
-                        });
-                        continue;
-                    };
-                    let result = match SettingsApi::retry_save() {
-                        Ok(()) => SettingsApi::flush().await,
-                        Err(error) => Err(error),
-                    };
-                    match result {
-                        Ok(()) => {
-                            failed_guide_change = None;
-                            match change.matches_current() {
-                                Ok(true) => publish(Update::GuidePersisted { request_id, change }),
-                                Ok(false) => publish(Update::GuideRejected {
-                                    request_id,
-                                    error: "Guide changed concurrently; restart to reconcile".into(),
-                                }),
-                                Err(error) => publish(Update::GuideRejected {
-                                    request_id,
-                                    error: error.to_string(),
-                                }),
-                            }
-                        }
-                        Err(error) => publish(Update::GuideFailed {
-                            request_id,
-                            error: error.to_string(),
-                        }),
+                    match administration.guide_persistence.retry().await {
+                        Ok(change) => publish(Update::GuidePersisted { request_id, change }),
+                        Err(neuromita::presentation::GuideSaveError::Failed(error)) =>
+                            publish(Update::GuideFailed { request_id, error }),
+                        Err(neuromita::presentation::GuideSaveError::Rejected(error)) =>
+                            publish(Update::GuideRejected { request_id, error }),
                     }
                 },
                 Some(command @ (Command::DeletePreset(_) | Command::MovePreset(..) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::AssignAllPresets(..) | Command::SelectPromptSet(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_) | Command::SectionVisibility(..) | Command::HidePrivate(_) | Command::StructuredDisplay(_) | Command::SetToolOption(..) | Command::SetToolDepth(_) | Command::SetMemoryDedupEnabled(_) | Command::SetMemoryDedupThreshold(_) | Command::SaveAsr(..) | Command::SaveCharacterVoice(..) | Command::SelectAsrRecognizer(_))) => {
@@ -1173,25 +1107,8 @@ async fn observe(
                 Some(Command::RefreshPromptCatalog) => {},
                 Some(Command::DebugSelect(id)) => { debug_character = id; },
                 Some(Command::OpenPromptFolder(character)) => {
-                    if let Some(catalog) = &administration.prompts {
-                        let result = (|| -> Result<(), String> {
-                            let settings = administration.settings.snapshot().map_err(|e| e.to_string())?;
-                            let selected = settings.values.characters.for_character(character).prompt_set.as_deref();
-                            let character_root = catalog.root().join(character.to_string());
-                            let folder = match selected {
-                                Some(name) => {
-                                    let name = catalog.resolve_set(character, Some(name)).map_err(|e| e.to_string())?;
-                                    character_root.join(name)
-                                }
-                                None => character_root,
-                            };
-                            std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
-                            let folder = folder.canonicalize().map_err(|e| e.to_string())?;
-                            let command = if cfg!(windows) { "explorer.exe" } else { "xdg-open" };
-                            std::process::Command::new(command).arg(folder).spawn().map_err(|e| e.to_string())?;
-                            Ok(())
-                        })();
-                        if let Err(error) = result { publish(Update::AdminError(error)); }
+                    if let Err(error) = administration.prompt_folder.open(character) {
+                        publish(Update::AdminError(error));
                     }
                 },
                 Some(Command::RefreshHardware) => publish(hardware_snapshot().await),
@@ -1246,55 +1163,25 @@ async fn observe(
                 Some(Command::RefreshReleases) => { if let Err(error) = administration.releases.refresh() { publish(Update::ReleaseError(error.to_string())); } },
                 None => return Ok(()),
                 Some(Command::MemorySelect(id)) => {
-                    graph_pending = None;
+                    administration.graph.reset().await;
                     memories = MemoryWatch::start(administration, id)?;
                 },
                 Some(Command::GraphPreview(request_id, selected, memory_id, mode)) => {
-                    graph_pending = None;
-                    let result = if mode == neuromita::knowledge::maintenance::GraphMaintenanceMode::Reindex
-                        && !neuromita::api::GraphMaintenanceApi::reindex_available().unwrap_or(false)
-                    {
-                        Err("Graph Reindex backend is unavailable".to_owned())
-                    } else {
-                        neuromita::api::GraphMaintenanceApi::preview(
-                            selected,
-                            &[memory_id],
-                            std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_millis()
-                                .try_into()
-                                .unwrap_or(u64::MAX),
-                            mode,
-                        ).await.map_err(|error| error.to_string())
-                    };
+                    let result = administration.graph.preview(request_id, selected, memory_id, mode).await;
                     match result {
-                        Ok(plan) => {
-                            let report = GraphPreviewReport::from_plan(&plan);
-                            graph_pending = Some((request_id, selected, plan));
-                            publish(Update::GraphPreviewResult(request_id, Ok(report)));
-                        }
+                        Ok(review) => publish(Update::GraphPreviewResult(request_id, Ok(GraphPreviewReport {
+                            count: review.relation_count,
+                            relations: review.relations,
+                        }))),
                         Err(error) => publish(Update::GraphPreviewResult(request_id, Err(error))),
                     }
                 },
                 Some(Command::GraphApply(request_id, selected)) => {
-                    let result = match graph_pending.take() {
-                        Some((id, owner, plan)) if id == request_id && owner == selected => {
-                            neuromita::api::GraphMaintenanceApi::apply_confirmed(
-                                selected, plan, true, stop,
-                            ).await.map(|_| ()).map_err(|error| error.to_string())
-                        }
-                        other => {
-                            graph_pending = other;
-                            Err("Graph preview is missing or belongs to another selection".to_owned())
-                        }
-                    };
-                    publish(Update::GraphApplyResult(request_id, result));
+                    publish(Update::GraphApplyResult(request_id,
+                        administration.graph.apply(request_id, selected).await));
                 },
                 Some(Command::GraphAbort(request_id)) => {
-                    if graph_pending.as_ref().is_some_and(|(id, _, _)| *id == request_id) {
-                        graph_pending = None;
-                    }
+                    administration.graph.abort(request_id).await;
                 },
                 Some(Command::MemoryEdit(edit_id, expected, commands)) => {
                     match administration.characters.edit_memories(expected.character(), expected, commands).await {
@@ -1427,22 +1314,12 @@ async fn observe(
                         publish(Update::ChatError(origin, "Chat selection changed before attachment".into()));
                         continue;
                     }
-                    let result = (|| -> Result<(), String> {
-                        use neuromita::timeline::{
-                            file_attachments::{compose_local_file_message, import_local_file},
-                            storage::assets::TimelineAssetStore,
-                        };
-                        let selection = app.timeline_selection();
-                        let assets = TimelineAssetStore::new(directory.join("TimelineAssets"), 8 * 1024 * 1024)
-                            .map_err(|error| error.to_string())?;
-                        let part = import_local_file(&assets, std::path::Path::new(&source))
-                            .map_err(|error| error.to_string())?;
-                        let message = compose_local_file_message(origin.character, text.clone(), part)
-                            .map_err(|error| error.to_string())?;
-                        app.publish_attached_conversation_message(selection, message, &assets)
-                            .map_err(|error| error.to_string())?;
-                        Ok(())
-                    })();
+                    let result = administration.conversation.attach_file(
+                        origin.character, text.clone(), std::path::Path::new(&source),
+                        neuromita::request::TimelineFence {
+                            at: app.at(), selection: app.timeline_selection(),
+                        },
+                    ).map(|_| ());
                     match result {
                         Ok(()) => publish(Update::FileAttached(origin, text, source)),
                         Err(error) => publish(Update::ChatError(origin, error)),

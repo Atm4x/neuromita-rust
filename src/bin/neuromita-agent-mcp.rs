@@ -337,6 +337,38 @@ impl ServerHandler for NeuroMita {
             admin_write_tool("presenter_retry_failed",
                 "Re-admit a failed request only when its player input is still the latest visible message.",
                 &["character","request_id"],json!({"character":{"type":"string"},"request_id":{"type":"string","format":"uuid"}})),
+            inspection_tool("presenter_memory_recall",
+                "Explicit forgotten-memory inspection through running HistoricalRecallApi. Requires --allow-content. Does not inject into generation.",
+                &["character","memory_id","query_text"],json!({"character":{"type":"string"},
+                "memory_id":{"type":"string","format":"uuid"},
+                "query_text":{"type":"string","minLength":1,"maxLength":4096}})),
+            Tool::new("presenter_graph",
+                "Review or confirm GUI-equivalent GraphMaintenance through shared owner. Preview requires character, memory_id, mode; apply requires character, request_id; abort requires request_id. Confirm needs --allow-write and Core opt-in NEUROMITA_ENABLE_LOCAL_GRAPH_MAINTENANCE=1.",
+                serde_json::Map::from_iter([
+                    ("type".into(),json!("object")),("additionalProperties".into(),json!(false)),
+                    ("required".into(),json!(["action"])),
+                    ("properties".into(),json!({"action":{"type":"string","enum":["preview","apply","abort"]},
+                        "character":{"type":"string"},"memory_id":{"type":"string","format":"uuid"},
+                        "mode":{"type":"string","enum":["clear","reindex"]},
+                        "request_id":{"type":"string","format":"uuid"}}))
+                ])
+            ).with_annotations(ToolAnnotations::new().read_only(false)),
+            admin_write_tool("presenter_attach_file",
+                "Attach a local file as one verified Timeline event, using same ConversationPresenter as GUI. Requires exact current version, --allow-write, --allow-content and Core NEUROMITA_ENABLE_LOCAL_FILE_ATTACH=1.",
+                &["character","version","source","text"],json!({"character":{"type":"string"},
+                    "version":{"type":"object"},"source":{"type":"string","maxLength":4096},
+                    "text":{"type":"string","maxLength":65536}})),
+            Tool::new("presenter_prompt_folder",
+                "Locate or open selected character PromptCatalog folder on Core host. Locate requires --allow-content (exposes host path); open also requires --allow-write and NEUROMITA_ENABLE_LOCAL_HOST_ACTIONS=1.",
+                serde_json::Map::from_iter([
+                    ("type".into(),json!("object")),("additionalProperties".into(),json!(false)),
+                    ("required".into(),json!(["character","action"])),
+                    ("properties".into(),json!({"action":{"type":"string","enum":["locate","open"]},"character":{"type":"string"}}))
+                ])
+            ).with_annotations(ToolAnnotations::new().read_only(false)),
+            admin_write_tool("presenter_guide_retry",
+                "Retry pending failed Guide save in same GUI-owned persistence controller. Requires --allow-write.",
+                &[],json!({})),
             Tool::new("core_debug_command",
                 "Privileged raw typed Core LocalControl command. Requires --core-debug, and --allow-write for mutation. Strict allowlist, no unrestricted reflection. Use Presenter tools for ordinary UI acceptance.",
                 serde_json::Map::from_iter([
@@ -384,6 +416,34 @@ impl ServerHandler for NeuroMita {
         _: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
         let args = request.arguments.unwrap_or_default();
+        if matches!(
+            request.name.as_ref(),
+            "presenter_memory_recall" | "presenter_attach_file" | "presenter_prompt_folder"
+        ) && !self.allow_content
+        {
+            return Err(ErrorData::invalid_params(
+                "local content/path requires --allow-content",
+                None,
+            ));
+        }
+        if request.name == "presenter_graph"
+            && args.get("action") == Some(&json!("apply"))
+            && !self.allow_write
+        {
+            return Err(ErrorData::invalid_params(
+                "graph apply requires --allow-write",
+                None,
+            ));
+        }
+        if request.name == "presenter_prompt_folder"
+            && args.get("action") == Some(&json!("open"))
+            && !self.allow_write
+        {
+            return Err(ErrorData::invalid_params(
+                "folder open requires --allow-write",
+                None,
+            ));
+        }
         if request.name == "presenter_speech_transcript"
             && args.get("include_content") == Some(&Value::Bool(true))
             && !self.allow_content
@@ -428,6 +488,8 @@ impl ServerHandler for NeuroMita {
                 | "presenter_tool_settings"
                 | "presenter_telegram"
                 | "presenter_remote_voice"
+                | "presenter_attach_file"
+                | "presenter_guide_retry"
         ) && !self.allow_write
         {
             return Err(ErrorData::invalid_params(
@@ -821,6 +883,85 @@ fn command_for_tool(name: &str, mut args: Map<String, Value>) -> Result<Value, E
                 .remove("edit")
                 .ok_or_else(|| ErrorData::invalid_params("missing edit", None))?;
             json!({"command":"presenter_admin_write","change":{"change":"conversation","character":character,"version":version,"edit":edit}})
+        }
+        "presenter_memory_recall" => {
+            let character = string(&mut args, "character")?;
+            let memory_id = uuid_field(&mut args, "memory_id")?;
+            let query_text = string(&mut args, "query_text")?;
+            if query_text.trim().is_empty() || query_text.len() > 4096 {
+                return Err(ErrorData::invalid_params(
+                    "query_text must contain 1..4096 characters",
+                    None,
+                ));
+            }
+            json!({"command":"presenter_admin_read","query":{"query":"memory_recall",
+                "character":character,"memory_id":memory_id,"query_text":query_text}})
+        }
+        "presenter_graph" => {
+            let action = string(&mut args, "action")?;
+            match action.as_str() {
+                "preview" => {
+                    let character = string(&mut args, "character")?;
+                    let memory_id = uuid_field(&mut args, "memory_id")?;
+                    let mode = string(&mut args, "mode")?;
+                    if !matches!(mode.as_str(), "clear" | "reindex") {
+                        return Err(ErrorData::invalid_params("invalid mode", None));
+                    }
+                    json!({"command":"presenter_admin_read","query":{"query":"graph_preview",
+                        "character":character,"memory_id":memory_id,"mode":mode}})
+                }
+                "apply" => {
+                    let character = string(&mut args, "character")?;
+                    let request_id = uuid_field(&mut args, "request_id")?;
+                    json!({"command":"presenter_admin_write","change":{"change":"graph_apply","character":character,"request_id":request_id}})
+                }
+                "abort" => {
+                    let request_id = uuid_field(&mut args, "request_id")?;
+                    json!({"command":"presenter_admin_write","change":{"change":"graph_abort","request_id":request_id}})
+                }
+                _ => return Err(ErrorData::invalid_params("invalid graph action", None)),
+            }
+        }
+        "presenter_attach_file" => {
+            let character = string(&mut args, "character")?;
+            let source = string(&mut args, "source")?;
+            let text = string(&mut args, "text")?;
+            let version = args
+                .remove("version")
+                .filter(Value::is_object)
+                .ok_or_else(|| ErrorData::invalid_params("version must be an object", None))?;
+            if text.len() > 65536
+                || source.len() > 4096
+                || !std::path::Path::new(&source).is_absolute()
+            {
+                return Err(ErrorData::invalid_params(
+                    "invalid attachment source/text",
+                    None,
+                ));
+            }
+            json!({"command":"presenter_admin_write","change":{"change":"attach_file",
+                "character":character,"version":version,"text":text,"source":source}})
+        }
+        "presenter_prompt_folder" => {
+            let character = string(&mut args, "character")?;
+            let action = string(&mut args, "action")?;
+            match action.as_str() {
+                "locate" => {
+                    json!({"command":"presenter_admin_read","query":{"query":"prompt_folder","character":character}})
+                }
+                "open" => {
+                    json!({"command":"presenter_admin_write","change":{"change":"prompt_folder_open","character":character}})
+                }
+                _ => {
+                    return Err(ErrorData::invalid_params(
+                        "invalid prompt folder action",
+                        None,
+                    ));
+                }
+            }
+        }
+        "presenter_guide_retry" => {
+            json!({"command":"presenter_admin_write","change":{"change":"guide_retry"}})
         }
         "presenter_retry_failed" => {
             let character = string(&mut args, "character")?;
@@ -1870,5 +2011,76 @@ mod remote_voice_tool_tests {
         )
         .unwrap();
         assert_eq!(wait["query"]["target"], "remote_voice");
+    }
+}
+
+#[cfg(test)]
+mod cycle16_gui_parity_tests {
+    use super::*;
+    fn args(value: Value) -> Map<String, Value> {
+        value.as_object().unwrap().clone()
+    }
+    #[test]
+    fn typed_gui_commands_map_to_presenter_owners() {
+        let uuid = Uuid::new_v4();
+        let graph = command_for_tool(
+            "presenter_graph",
+            args(json!({"action":"preview","character":"Crazy","memory_id":uuid,"mode":"clear"})),
+        )
+        .unwrap();
+        assert_eq!(graph["query"]["query"], "graph_preview");
+        let apply = command_for_tool(
+            "presenter_graph",
+            args(json!({"action":"apply","character":"Crazy","request_id":uuid})),
+        )
+        .unwrap();
+        assert_eq!(apply["change"]["change"], "graph_apply");
+        let abort = command_for_tool(
+            "presenter_graph",
+            args(json!({"action":"abort","request_id":uuid})),
+        )
+        .unwrap();
+        assert_eq!(abort["change"]["change"], "graph_abort");
+        let recall = command_for_tool(
+            "presenter_memory_recall",
+            args(json!({"character":"Crazy","memory_id":uuid,"query_text":"find"})),
+        )
+        .unwrap();
+        assert_eq!(recall["query"]["query"], "memory_recall");
+        let file = command_for_tool(
+            "presenter_attach_file",
+            args(json!({"character":"Crazy","version":{},"text":"x","source":"/tmp/local.txt"})),
+        )
+        .unwrap();
+        assert_eq!(file["change"]["change"], "attach_file");
+        let folder = command_for_tool(
+            "presenter_prompt_folder",
+            args(json!({"action":"open","character":"Crazy"})),
+        )
+        .unwrap();
+        assert_eq!(folder["change"]["change"], "prompt_folder_open");
+        let guide = command_for_tool("presenter_guide_retry", args(json!({}))).unwrap();
+        assert_eq!(guide["change"]["change"], "guide_retry");
+        for invalid in [
+            json!({"action":"preview","character":"Crazy","memory_id":uuid,"mode":"drop"}),
+            json!({"action":"apply","character":"Crazy","request_id":"abc"}),
+            json!({"action":"abort","request_id":uuid,"unused":true}),
+        ] {
+            assert!(command_for_tool("presenter_graph", args(invalid)).is_err());
+        }
+        assert!(
+            command_for_tool(
+                "presenter_memory_recall",
+                args(json!({"character":"Crazy","memory_id":uuid,"query_text":""}))
+            )
+            .is_err()
+        );
+        assert!(
+            command_for_tool(
+                "presenter_attach_file",
+                args(json!({"character":"Crazy","version":{},"text":"x","source":"relative"}))
+            )
+            .is_err()
+        );
     }
 }
