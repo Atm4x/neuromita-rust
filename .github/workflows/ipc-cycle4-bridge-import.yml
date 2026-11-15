@@ -31,4 +31,4 @@ jobs:
           test "$(git rev-parse refs/heads/ipc-cycle15-imported)" = "$EXPECTED"
           git merge-base --is-ancestor "$BASE" "$EXPECTED"
           git diff "$BASE" "$EXPECTED" --check
-          git push origin refs/heads/ipc-cycle15-imported:refs/heads/bridge/ipc-cycle15-staged-20261115
+          git push origin refs/heads/ipc-cycle15-imported:refs/heads/bridge/ipc-cycle15-final-staged-20261115
