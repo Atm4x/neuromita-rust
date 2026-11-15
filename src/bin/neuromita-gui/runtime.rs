@@ -835,6 +835,7 @@ async fn observe(
     }
     let mut character = CharacterId::Crazy;
     let mut selection_revision = 0;
+    app.set_speech_gui_route(character, selection_revision);
     let mut speech_owner: Option<ChatOrigin> = None;
     let mut debug_character = CharacterId::Crazy;
     let mut requests = presenter.observe_requests();
@@ -1553,6 +1554,7 @@ async fn observe(
                     }
                     character = origin.character;
                     selection_revision = origin.selection_revision;
+                    app.set_speech_gui_route(character, selection_revision);
                     pending = None;
                     publish(Update::Confirmation(origin, None));
                 },

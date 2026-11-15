@@ -3338,12 +3338,12 @@ async fn mcp_speech_capture_reuses_core_owner_and_rejects_unready_asr() {
 #[tokio::test]
 async fn speech_transcript_observation_uses_the_same_ticket_fenced_hub_as_gui() {
     use neuromita::ai_runtime::speech::Transcript;
-    use neuromita::audio::{
-        session::SpeechConversation, ticket::SpeechStream, transcript_bridge::SpeechTranscriptHub,
-    };
+    use neuromita::audio::{ticket::SpeechStream, transcript_bridge::SpeechTranscriptHub};
     use tokio_util::sync::CancellationToken;
 
     let bus = std::sync::Arc::new(SpeechTranscriptHub::default());
+    bus.set_gui_route(CharacterId::Crazy, 12);
+    assert_eq!(bus.gui_route(), Some((CharacterId::Crazy, 12)));
     let mut gui = bus.subscribe();
     let mut observer = bus.observe();
     let stream = SpeechStream::new(CancellationToken::new());

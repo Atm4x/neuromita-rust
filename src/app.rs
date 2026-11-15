@@ -1720,6 +1720,12 @@ impl ApplicationLifecycle {
             .await
     }
 
+    pub fn set_speech_gui_route(&self, character: CharacterId, selection_revision: u64) {
+        self.speech_capture
+            .transcripts
+            .set_gui_route(character, selection_revision);
+    }
+
     pub fn observe_transcripts(
         &self,
     ) -> tokio::sync::broadcast::Receiver<crate::audio::transcript_bridge::RoutedTranscript> {

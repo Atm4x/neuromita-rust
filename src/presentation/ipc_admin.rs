@@ -311,8 +311,10 @@ impl PresenterProbe {
     pub(crate) async fn admin_read(&self, query: PresenterRead) -> Result<Value, String> {
         match query {
             PresenterRead::SpeechTranscript { include_content } => {
-                let last = self.speech_capture.transcripts().latest();
-                Ok(match last {
+                let hub = self.speech_capture.transcripts();
+                let ui_route = hub.gui_route();
+                let last = hub.latest();
+                let mut record = match last {
                     Some(event) => {
                         let mut record = json!({"source":"application_speech_transcript_hub",
                             "revision":event.revision,"character":event.character,
@@ -327,7 +329,10 @@ impl PresenterProbe {
                     }
                     None => json!({"source":"application_speech_transcript_hub",
                         "revision":0,"available":false,"content_included":include_content}),
-                })
+                };
+                record["gui_selected_character"] = json!(ui_route.map(|route| route.0));
+                record["gui_selection_revision"] = json!(ui_route.map(|route| route.1));
+                Ok(record)
             }
             PresenterRead::SpeechInventory {} => {
                 let catalog = self

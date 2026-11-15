@@ -8,13 +8,13 @@ The MCP endpoint is an **administrative peer of the GUI**. Speech sessions are c
 - `presenter_speech_capture({"enabled":false})`: stops the same capture; cannot supply character, revision, paths or `press_on_start` on stop.
 - `presenter_speech_session({"pressed":true|false})`: controls PTT on the same currently active session; does not implicitly launch a worker.
 - `inspect_presenter({"surface":"speech"})`: phase `stopped/starting/listening/stopping/failed`; no transcript or raw audio.
-- `presenter_speech_transcript({"include_content":false})`: last accepted transcript revision, character, selection revision, language, text length; no text by default.
+- `presenter_speech_transcript({"include_content":false})`: last accepted transcript revision, character, selection revision, **current GUI selected character and selection revision**, language, text length; no text by default.
 - `presenter_speech_transcript({"include_content":true})`: same plus transcribed text, requiring MCP launch flag `--allow-content`.
 - `presenter_wait({"target":"speech_transcript","after_revision":0,"timeout_ms":30000})`: waits on the application-owned watch channel; returns revision + route identity only, no text.
 
 ## Concurrency and ownership
 
-`SpeechTicket::admit` ensures each transcript dispatch is admitted once; invalidated/cancelled tickets do not publish. A bounded broadcast (64 items) is consumed by the real GUI runtime, while a watch channel holds only the most recent transcript for bounded MCP inspection. The GUI's existing selected-chat fence rejects transcripts from a previous selection, including a session started by MCP with stale revision. Both interfaces share a single capture owner: starting a second microphone session returns `AlreadyRunning`, and stopping it terminates the actual owner.
+`SpeechTicket::admit` ensures each transcript dispatch is admitted once; invalidated/cancelled tickets do not publish. A bounded broadcast (64 items) is consumed by the real GUI runtime, while a watch channel holds only the most recent transcript for bounded MCP inspection. The GUI publishes its live selection into the shared hub on initial selection and each `Select` command, so the main agent can inspect the current selection before starting a capture. The GUI's existing selected-chat fence rejects transcripts from a previous selection, including a session started by MCP with stale revision. Both interfaces share a single capture owner: starting a second microphone session returns `AlreadyRunning`, and stopping it terminates the actual owner.
 
 MCP tool permission boundaries remain `--allow-write` for start/stop/PTT and `--allow-content` for recognized words. Neither flag is TCP authentication. Audio data is not serialized in IPC.
 
