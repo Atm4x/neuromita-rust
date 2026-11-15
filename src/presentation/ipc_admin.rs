@@ -241,6 +241,7 @@ pub(crate) enum PresenterWrite {
         request_id: Uuid,
     },
     GuideRetry {},
+    SettingsRetry {},
     PromptFolderOpen {
         character: CharacterId,
     },
@@ -1064,6 +1065,19 @@ impl PresenterProbe {
                     json!({"source":"guide_persistence_presenter","change":format!("{change:?}"),
                     "revision":snapshot.revision,"persisted_revision":snapshot.persisted_revision}),
                 )
+            }
+            PresenterWrite::SettingsRetry {} => {
+                self.settings
+                    .retry_failed_save()
+                    .map_err(|e| e.to_string())?;
+                let snapshot = self.settings.snapshot().map_err(|e| e.to_string())?;
+                Ok(json!({
+                    "source": "settings_presenter",
+                    "retry_requested": true,
+                    "revision": snapshot.revision,
+                    "persisted_revision": snapshot.persisted_revision,
+                    "disk_save_confirmed": snapshot.persisted_revision == Some(snapshot.revision)
+                }))
             }
             PresenterWrite::PromptFolderOpen { character } => {
                 if std::env::var_os("NEUROMITA_ENABLE_LOCAL_HOST_ACTIONS").as_deref()

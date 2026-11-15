@@ -385,6 +385,9 @@ impl ServerHandler for NeuroMita {
             admin_write_tool("presenter_guide_retry",
                 "Retry pending failed Guide save in same GUI-owned persistence controller. Requires --allow-write.",
                 &[],json!({})),
+            admin_write_tool("presenter_settings_retry",
+                "Request a retry of a failed settings write via the same SettingsPresenter as GUI. Requires --allow-write and persistence=Failed. Acknowledgement is not a disk receipt.",
+                &[],json!({})),
             Tool::new("core_debug_command",
                 "Privileged raw typed Core LocalControl command. Requires --core-debug, and --allow-write for mutation. Strict allowlist, no unrestricted reflection. Use Presenter tools for ordinary UI acceptance.",
                 serde_json::Map::from_iter([
@@ -508,6 +511,7 @@ impl ServerHandler for NeuroMita {
                 | "presenter_remote_voice"
                 | "presenter_attach_file"
                 | "presenter_guide_retry"
+                | "presenter_settings_retry"
         ) && !self.allow_write
         {
             return Err(ErrorData::invalid_params(
@@ -1035,6 +1039,9 @@ fn command_for_tool(name: &str, mut args: Map<String, Value>) -> Result<Value, E
         }
         "presenter_guide_retry" => {
             json!({"command":"presenter_admin_write","change":{"change":"guide_retry"}})
+        }
+        "presenter_settings_retry" => {
+            json!({"command":"presenter_admin_write","change":{"change":"settings_retry"}})
         }
         "presenter_retry_failed" => {
             let character = string(&mut args, "character")?;
@@ -2191,6 +2198,11 @@ mod cycle16_gui_parity_tests {
         assert_eq!(folder["change"]["change"], "prompt_folder_open");
         let guide = command_for_tool("presenter_guide_retry", args(json!({}))).unwrap();
         assert_eq!(guide["change"]["change"], "guide_retry");
+        let settings_retry = command_for_tool("presenter_settings_retry", args(json!({}))).unwrap();
+        assert_eq!(settings_retry["change"]["change"], "settings_retry");
+        assert!(
+            command_for_tool("presenter_settings_retry", args(json!({"unexpected":true}))).is_err()
+        );
         for invalid in [
             json!({"action":"preview","character":"Crazy","memory_id":uuid,"mode":"drop"}),
             json!({"action":"apply","character":"Crazy","request_id":"abc"}),

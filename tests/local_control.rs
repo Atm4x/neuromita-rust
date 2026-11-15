@@ -1,4 +1,13 @@
-use std::{future::Future, net::SocketAddr, num::NonZeroUsize, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    net::SocketAddr,
+    num::NonZeroUsize,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use neuromita::{
     api::ChatApi,
@@ -13,7 +22,10 @@ use neuromita::{
     request::UserInput,
     request::{RequestHandle, RequestId, RequestOutcome, RequestSource, RequestState},
     server::{ServerConfig, ServerHandle, ServerLifecycle, ServerSnapshot},
-    settings::{SettingsApi, VoiceSettings, Volume},
+    settings::{
+        MemorySettingsRepository, PersistenceState, SettingsApi, SettingsError, SettingsRepository,
+        StoredSettings, VoiceSettings, Volume,
+    },
     voice::{AudioArtifact, AudioFormat, VoiceFuture, VoiceOptions, VoiceProvider},
 };
 use serde_json::{Value, json};
@@ -86,6 +98,42 @@ impl VoiceProvider for FixtureVoice {
     }
 }
 
+struct FailOnDemandSettingsRepository {
+    inner: MemorySettingsRepository,
+    armed: AtomicBool,
+    failures: AtomicUsize,
+}
+
+impl FailOnDemandSettingsRepository {
+    fn new() -> Self {
+        Self {
+            inner: MemorySettingsRepository::new(),
+            armed: AtomicBool::new(false),
+            failures: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl SettingsRepository for FailOnDemandSettingsRepository {
+    fn migrate(&self) -> Result<(), SettingsError> {
+        self.inner.migrate()
+    }
+
+    fn load(&self) -> Result<StoredSettings, SettingsError> {
+        self.inner.load()
+    }
+
+    fn save(&self, settings: &StoredSettings) -> Result<(), SettingsError> {
+        if self.armed.swap(false, Ordering::SeqCst) {
+            self.failures.fetch_add(1, Ordering::SeqCst);
+            return Err(SettingsError::Storage(
+                "injected settings write failure".into(),
+            ));
+        }
+        self.inner.save(settings)
+    }
+}
+
 struct Fixture {
     app: ApplicationLifecycle,
     calls: mpsc::UnboundedReceiver<GenerationCall>,
@@ -114,11 +162,15 @@ impl Fixture {
     }
 
     async fn with_remote_voice() -> Self {
-        Self::with_voice_hub_telegram(8, |_| {}, false, None, false, true).await
+        Self::with_voice_hub_telegram(8, |_| {}, false, None, false, true, None).await
     }
 
     async fn with_telegram() -> Self {
-        Self::with_voice_hub_telegram(8, |_| {}, false, None, true, false).await
+        Self::with_voice_hub_telegram(8, |_| {}, false, None, true, false, None).await
+    }
+
+    async fn with_settings_repository(repository: Arc<dyn SettingsRepository>) -> Self {
+        Self::with_voice_hub_telegram(8, |_| {}, false, None, false, false, Some(repository)).await
     }
 
     async fn with_voice_and_hub(
@@ -127,7 +179,7 @@ impl Fixture {
         enabled: bool,
         hub_root: Option<std::path::PathBuf>,
     ) -> Self {
-        Self::with_voice_hub_telegram(queue, configure, enabled, hub_root, false, false).await
+        Self::with_voice_hub_telegram(queue, configure, enabled, hub_root, false, false, None).await
     }
 
     async fn with_voice_hub_telegram(
@@ -137,6 +189,7 @@ impl Fixture {
         hub_root: Option<std::path::PathBuf>,
         telegram: bool,
         remote_voice: bool,
+        settings_repository: Option<Arc<dyn SettingsRepository>>,
     ) -> Self {
         let serial = APPLICATION.lock().await;
         let preset = GenerationPreset::new(ProviderTemplate::Gemini(
@@ -162,6 +215,9 @@ impl Fixture {
             "127.0.0.1:0".parse().unwrap(),
         );
         configure(&mut config.server);
+        if let Some(repository) = settings_repository {
+            config.settings.repository = repository;
+        }
         if let Some(root) = hub_root {
             config.ai_hub_install_root = Some(root);
         }
@@ -3771,5 +3827,129 @@ async fn presenter_character_assignment_cas_preserves_other_slots_and_validates_
         .await;
     assert_eq!(after["snapshot"]["presets"]["reply"], "active");
     assert_eq!(after["snapshot"]["presets"]["react"], "active");
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn presenter_settings_retry_rejects_when_no_failed_write_exists() {
+    let fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+
+    let mut before = command("presenter_admin_read");
+    before["query"] = json!({"query":"settings","area":"persistence"});
+    client.send(before.clone()).await;
+    let initial = client
+        .until(|r| r["command_id"] == before["command_id"])
+        .await;
+    assert_eq!(initial["type"], "presenter_admin_read", "{initial}");
+    assert!(
+        !initial["snapshot"]["values"]["persistence"]
+            .as_str()
+            .unwrap()
+            .starts_with("Failed")
+    );
+
+    let mut retry = command("presenter_admin_write");
+    retry["change"] = json!({"change":"settings_retry"});
+    client.send(retry.clone()).await;
+    let rejected = client
+        .until(|r| r["command_id"] == retry["command_id"])
+        .await;
+    assert_eq!(rejected["type"], "error", "{rejected}");
+    assert_eq!(rejected["code"], "invalid_value", "{rejected}");
+    assert!(
+        rejected["error"]
+            .as_str()
+            .unwrap()
+            .contains("no failed settings write")
+    );
+
+    client.send(before.clone()).await;
+    let after = client
+        .until(|r| r["command_id"] == before["command_id"])
+        .await;
+    assert_eq!(after["type"], "presenter_admin_read", "{after}");
+    assert_eq!(
+        after["snapshot"]["revision"],
+        initial["snapshot"]["revision"]
+    );
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn presenter_settings_retry_recovers_real_failed_persistence_via_shared_owner() {
+    let repository = Arc::new(FailOnDemandSettingsRepository::new());
+    let fixture = Fixture::with_settings_repository(repository.clone()).await;
+    let mut client = fixture.connect().await;
+
+    repository.armed.store(true, Ordering::SeqCst);
+    let mut change = command("presenter_admin_write");
+    change["change"] = json!({"change":"settings","field":"voice_volume","value":37});
+    client.send(change.clone()).await;
+    let changed = client
+        .until(|r| r["command_id"] == change["command_id"])
+        .await;
+    assert_eq!(changed["type"], "presenter_admin_write", "{changed}");
+    let failed = bounded(async {
+        loop {
+            let snapshot = fixture.app.presenter().settings.snapshot().unwrap();
+            if let PersistenceState::Failed { error, .. } = &snapshot.persistence {
+                break error.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    assert!(
+        failed
+            .to_string()
+            .contains("injected settings write failure")
+    );
+    assert_eq!(repository.failures.load(Ordering::SeqCst), 1);
+
+    let mut inspect = command("presenter_admin_read");
+    inspect["query"] = json!({"query":"settings","area":"persistence"});
+    client.send(inspect.clone()).await;
+    let before_retry = client
+        .until(|r| r["command_id"] == inspect["command_id"])
+        .await;
+    assert_eq!(
+        before_retry["type"], "presenter_admin_read",
+        "{before_retry}"
+    );
+    assert!(
+        before_retry["snapshot"]["values"]["persistence"]
+            .as_str()
+            .unwrap()
+            .starts_with("Failed")
+    );
+
+    let mut retry = command("presenter_admin_write");
+    retry["change"] = json!({"change":"settings_retry"});
+    client.send(retry.clone()).await;
+    let accepted = client
+        .until(|r| r["command_id"] == retry["command_id"])
+        .await;
+    assert_eq!(accepted["type"], "presenter_admin_write", "{accepted}");
+    assert_eq!(accepted["result"]["source"], "settings_presenter");
+    assert_eq!(accepted["result"]["retry_requested"], true);
+    bounded(SettingsApi::flush()).await.unwrap();
+
+    client.send(inspect.clone()).await;
+    let saved = client
+        .until(|r| r["command_id"] == inspect["command_id"])
+        .await;
+    assert_eq!(saved["type"], "presenter_admin_read", "{saved}");
+    assert!(
+        saved["snapshot"]["values"]["persistence"]
+            .as_str()
+            .unwrap()
+            .starts_with("Saved")
+    );
+    assert_eq!(
+        saved["snapshot"]["values"]["persisted_revision"],
+        saved["snapshot"]["revision"]
+    );
+    assert_eq!(repository.failures.load(Ordering::SeqCst), 1);
     fixture.shutdown().await;
 }
