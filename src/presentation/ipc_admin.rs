@@ -26,6 +26,9 @@ pub(crate) enum PresenterRead {
         #[serde(default = "default_limit")]
         limit: usize,
     },
+    ConversationRefresh {
+        character: CharacterId,
+    },
     MemoryRecall {
         character: CharacterId,
         memory_id: MemoryId,
@@ -418,6 +421,37 @@ impl PresenterProbe {
 
     pub(crate) async fn admin_read(&self, query: PresenterRead) -> Result<Value, String> {
         match query {
+            PresenterRead::ConversationRefresh { character } => {
+                let state = self
+                    .conversation
+                    .snapshot(character)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let requests_for_character = state
+                    .requests
+                    .requests
+                    .iter()
+                    .filter(|request| request.metadata.character_id == character)
+                    .count();
+                Ok(json!({
+                    "source": "conversation_presenter",
+                    "character": character,
+                    "version": {
+                        "branch_id": state.at.branch_id,
+                        "through": state.at.through,
+                        "generation": state.selection.generation,
+                    },
+                    "visible_message_count": state.messages.len(),
+                    "chat_revision": state.requests.revision,
+                    "character_request_count": requests_for_character,
+                    "settings_revision": state.settings.revision,
+                    "preset_id": state.preset.0,
+                    "refresh_completed": true,
+                    "gui_window_rendered": false,
+                    "content_included": false,
+                    "evidence_level": "presenter_snapshot",
+                }))
+            }
             PresenterRead::ChatDiagnostics { character, limit } => {
                 if !(1..=100).contains(&limit) {
                     return Err("diagnostics limit must be 1..100".into());

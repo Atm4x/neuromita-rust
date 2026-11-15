@@ -1,4 +1,4 @@
-# MCP ↔ GUI parity progress — 2026-11-15 (Cycle 21)
+# MCP ↔ GUI parity progress — 2026-11-15 (Cycle 22)
 
 ## Scope and counting
 
@@ -6,11 +6,11 @@ The denominator is the **68 `Command` variants** in `src/bin/neuromita-gui/runti
 
 | State | Commands | Share |
 |---|---:|---:|
-| Fully covered | **65** | **95.6%** |
-| Partially covered | **3** | **4.4%** |
+| Fully covered | **66** | **97.1%** |
+| Partially covered | **2** | **2.9%** |
 | No coverage | **0** | **0%** |
 
-History of source-based counts: Cycle 15: 50 full / 11 partial / 7 missing; Cycle 16: 59 full / 9 partial / 0 missing; Cycle 17: 62 full / 6 partial; Cycle 18: 63 full / 5 partial; Cycle 19: diagnostics safe subset (still partial); Cycle 20: prompt catalog refresh, 64 full / 4 partial; Cycle 21: GUI debug selection projection, 65 full / 3 partial.
+History of source-based counts: Cycle 15: 50 full / 11 partial / 7 missing; Cycle 16: 59 full / 9 partial / 0 missing; Cycle 17: 62 full / 6 partial; Cycle 18: 63 full / 5 partial; Cycle 19: diagnostics safe subset (still partial); Cycle 20: prompt catalog refresh, 64 full / 4 partial; Cycle 21: GUI debug selection projection, 65 full / 3 partial; Cycle 22: live conversation refresh, 66 full / 2 partial.
 
 ## Cycle 20: RefreshPromptCatalog
 
@@ -30,13 +30,18 @@ The desktop DebugSelect continues to own its per-window selected character, but 
 
 Verified: **56/56 LocalControl** and **8/8 MCP** tests on Rust 1.100.0; GUI `cargo check --locked --offline --features "gui mcp" --bin neuromita-gui` **PASS** on memory-limited retry (the first attempt was OOM-killed, not a compiler diagnostic). Full GUI rendering remains untested.
 
-## Three remaining partial commands
+## Cycle 22: Refresh conversation snapshot
+
+The desktop `Refresh` handler re-enters its regular update loop and reads `ConversationPresenter::snapshot(character)` again, publishing the resulting `Update::Snapshot` for its own window. The MCP `presenter_refresh(surface=conversation, character=...)` now performs the exact same fresh Presenter read and returns a sanitized refresh receipt: Timeline branch/generation, visible message count, chat and settings revisions, selected preset and observed request count. This does not mutate the GUI selection and never claims a GUI window was repainted. There is no duplicated snapshot store.
+
+Local acceptance checks that a real completed chat request changes the subsequent refresh revision; the receipt matches a direct GUI Presenter snapshot, never includes user input/output/provider credentials, and stays character-scoped.
+
+## Two remaining partial commands
 
 | GUI Command | Remaining acceptance condition |
 |---|---|
 | `Diagnostics` | GUI exports raw full diagnostic trace; MCP deliberately provides only bounded redacted state. A full export needs a distinct privileged and auditable access policy, not a silent content downgrade. |
 | `Select` | GUI selection owns per-window character and ASR routing with a `selection_revision` fence. MCP can inspect but cannot impersonate the active GUI session or change its selection safely. Requires explicit session ownership. |
-| `Refresh` | GUI command is currently a no-op *handler* that re-enters the ordinary snapshot loop. MCP can inspect latest history/conversation, but there is no shared refresh receipt/event proving identical UI lifecycle semantics. |
 
 ## Non-command release gates (not included in the percentage)
 

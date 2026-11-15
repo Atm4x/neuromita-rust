@@ -4124,3 +4124,99 @@ async fn debug_select_projection_is_shared_and_private_by_default() {
     assert!(!denied.to_string().contains("unused-fixture-key"));
     fixture.shutdown().await;
 }
+
+#[tokio::test]
+async fn conversation_refresh_reads_gui_snapshot_without_creating_another_owner() {
+    let mut fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+    let mut refresh = command("presenter_admin_read");
+    refresh["query"] = json!({"query":"conversation_refresh","character":"Crazy"});
+    let before_gui = fixture
+        .app
+        .presenter()
+        .conversation
+        .snapshot(CharacterId::Crazy)
+        .await
+        .unwrap();
+    client.send(refresh.clone()).await;
+    let before = client
+        .until(|r| r["command_id"] == refresh["command_id"])
+        .await;
+    assert_eq!(before["type"], "presenter_admin_read", "{before}");
+    assert_eq!(before["snapshot"]["source"], "conversation_presenter");
+    assert_eq!(
+        before["snapshot"]["visible_message_count"],
+        before_gui.messages.len()
+    );
+    assert_eq!(
+        before["snapshot"]["settings_revision"],
+        before_gui.settings.revision
+    );
+    assert_eq!(before["snapshot"]["preset_id"], before_gui.preset.0);
+    assert_eq!(
+        before["snapshot"]["chat_revision"],
+        before_gui.requests.revision
+    );
+    assert_eq!(before["snapshot"]["gui_window_rendered"], false);
+    assert_eq!(before["snapshot"]["content_included"], false);
+    let revision = before["snapshot"]["chat_revision"].as_u64().unwrap();
+
+    let mut send = command("presenter_action");
+    send["action"] = json!({"action":"chat_reply","character":"Crazy",
+        "text":"PRIVATE_REFRESH_INPUT_NEVER_LEAK"});
+    client.send(send.clone()).await;
+    let accepted = client.accepted(uuid(&send["command_id"])).await;
+    let request_id = uuid(&accepted["request_id"]);
+    fixture
+        .call()
+        .await
+        .finish("PRIVATE_REFRESH_OUTPUT_NEVER_LEAK");
+    assert_eq!(client.terminal(request_id).await["outcome"], "success");
+    refresh["command_id"] = json!(Uuid::new_v4());
+    client.send(refresh.clone()).await;
+    let after = client
+        .until(|r| r["command_id"] == refresh["command_id"])
+        .await;
+    assert_eq!(after["type"], "presenter_admin_read", "{after}");
+    assert_eq!(after["snapshot"]["refresh_completed"], true);
+    assert!(after["snapshot"]["chat_revision"].as_u64().unwrap() > revision);
+    assert_eq!(after["snapshot"]["character_request_count"], 1);
+    let gui = fixture
+        .app
+        .presenter()
+        .conversation
+        .snapshot(CharacterId::Crazy)
+        .await
+        .unwrap();
+    assert_eq!(
+        after["snapshot"]["visible_message_count"],
+        gui.messages.len()
+    );
+    assert_eq!(after["snapshot"]["chat_revision"], gui.requests.revision);
+    assert_eq!(after["snapshot"]["version"]["through"], gui.at.through);
+    assert_eq!(
+        after["snapshot"]["version"]["generation"],
+        gui.selection.generation
+    );
+    assert!(
+        !after
+            .to_string()
+            .contains("PRIVATE_REFRESH_INPUT_NEVER_LEAK")
+    );
+    assert!(
+        !after
+            .to_string()
+            .contains("PRIVATE_REFRESH_OUTPUT_NEVER_LEAK")
+    );
+    assert!(!after.to_string().contains("unused-fixture-key"));
+    refresh["command_id"] = json!(Uuid::new_v4());
+    refresh["query"]["character"] = json!("Kind");
+    client.send(refresh.clone()).await;
+    let isolated = client
+        .until(|r| r["command_id"] == refresh["command_id"])
+        .await;
+    assert_eq!(isolated["type"], "presenter_admin_read", "{isolated}");
+    assert_eq!(isolated["snapshot"]["character_request_count"], 0);
+    assert!(!isolated.to_string().contains(&request_id.to_string()));
+    fixture.shutdown().await;
+}

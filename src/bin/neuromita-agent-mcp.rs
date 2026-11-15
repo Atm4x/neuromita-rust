@@ -183,11 +183,14 @@ impl ServerHandler for NeuroMita {
                 ])
             ).with_annotations(ToolAnnotations::new().read_only(false)),
             Tool::new("presenter_refresh",
-                "Refresh releases, AI runtime or hardware using their actual application Presenter. Hardware returns current sanitized GPU inventory.",
+                "Refresh releases, AI runtime, hardware or a character conversation from the live GUI-owned Presenter. Conversation returns a privacy-safe snapshot receipt, not a GUI-window render claim.",
                 serde_json::Map::from_iter([
                     ("type".into(),json!("object")),("additionalProperties".into(),json!(false)),
                     ("required".into(),json!(["surface"])),
-                    ("properties".into(),json!({"surface":{"type":"string","enum":["releases","ai_runtime","hardware"]}})),
+                    ("properties".into(),json!({
+                        "surface":{"type":"string","enum":["releases","ai_runtime","hardware","conversation"]},
+                        "character":{"type":"string","description":"Required when surface=conversation"}
+                    })),
                 ])
             ).with_annotations(ToolAnnotations::new().read_only(false)),
             inspection_tool(
@@ -1586,13 +1589,20 @@ fn command_for_tool(name: &str, mut args: Map<String, Value>) -> Result<Value, E
         }
         "presenter_refresh" => {
             let surface = string(&mut args, "surface")?;
-            let action = match surface.as_str() {
-                "releases" => "releases_refresh",
-                "ai_runtime" => "runtime_refresh",
-                "hardware" => "hardware_refresh",
-                _ => return Err(ErrorData::invalid_params("unknown refresh surface", None)),
-            };
-            json!({"command":"presenter_action","action":{"action":action}})
+            if surface == "conversation" {
+                let character = string(&mut args, "character")?;
+                json!({"command":"presenter_admin_read","query":{
+                    "query":"conversation_refresh","character":character
+                }})
+            } else {
+                let action = match surface.as_str() {
+                    "releases" => "releases_refresh",
+                    "ai_runtime" => "runtime_refresh",
+                    "hardware" => "hardware_refresh",
+                    _ => return Err(ErrorData::invalid_params("unknown refresh surface", None)),
+                };
+                json!({"command":"presenter_action","action":{"action":action}})
+            }
         }
         "inspect_presets" => json!({"command":"debug_inspect", "scope":"presets"}),
         "inspect_onboarding" => json!({"command":"debug_inspect", "scope":"onboarding"}),
@@ -1868,9 +1878,23 @@ mod tests {
         let hardware =
             command_for_tool("presenter_refresh", args(json!({"surface":"hardware"}))).unwrap();
         assert_eq!(hardware["action"]["action"], "hardware_refresh");
-        assert!(
-            command_for_tool("presenter_refresh", args(json!({"surface":"unknown"})),).is_err()
-        );
+        let refresh = command_for_tool(
+            "presenter_refresh",
+            args(json!({"surface":"conversation","character":"Crazy"})),
+        )
+        .unwrap();
+        assert_eq!(refresh["command"], "presenter_admin_read");
+        assert_eq!(refresh["query"]["query"], "conversation_refresh");
+        assert_eq!(refresh["query"]["character"], "Crazy");
+        for invalid in [
+            json!({"surface":"unknown"}),
+            json!({"surface":"conversation"}),
+            json!({"surface":"conversation","character":13}),
+            json!({"surface":"conversation","character":"Crazy","include_content":true}),
+            json!({"surface":"hardware","character":"Crazy"}),
+        ] {
+            assert!(command_for_tool("presenter_refresh", args(invalid)).is_err());
+        }
         let visibility = command_for_tool(
             "presenter_settings_write",
             args(json!({"field":"section_visibility", "value":{"area":"api","visible":false}})),
