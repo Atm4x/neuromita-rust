@@ -4,7 +4,7 @@
 use std::{
     collections::BTreeSet,
     ffi::OsStr,
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::{self, Write},
     path::{Component, Path, PathBuf},
 };
@@ -125,7 +125,7 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), InventoryError> {
 fn sync_directory(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
-        return File::open(path)?.sync_all();
+        fs::File::open(path)?.sync_all()
     }
     #[cfg(not(unix))]
     {

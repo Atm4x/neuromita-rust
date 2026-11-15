@@ -103,7 +103,8 @@ fn valid_wav(wav: &[u8], sample_rate_hz: u32) -> bool {
     declared_size.checked_add(8) == Some(wav.len())
         && data_size.checked_add(44) == Some(wav.len())
         && data_size > 0
-        && data_size % (u16::from_le_bytes(wav[22..24].try_into().unwrap()) as usize * 2) == 0
+        && data_size
+            .is_multiple_of(u16::from_le_bytes(wav[22..24].try_into().unwrap()) as usize * 2)
 }
 
 pub fn encode_tts(

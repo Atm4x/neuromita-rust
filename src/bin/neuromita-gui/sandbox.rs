@@ -816,6 +816,7 @@ fn apply_with_catalog(
                     neuromita::onboarding::GuideChange::Complete => {
                         window.set_onboarding_guide_visible(false);
                     }
+                    neuromita::onboarding::GuideChange::MarkIncomplete => {}
                 }
             }
         }

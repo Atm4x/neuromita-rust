@@ -1167,10 +1167,10 @@ impl AiSupervisor {
                     "device-profiled recovery requires hardware revalidation".into(),
                 ));
             }
-            if let Some(requested) = profile {
-                if process.runtime_profiles.get(&service) != Some(requested) {
-                    return Err(AiRuntimeError::ActivationSuperseded);
-                }
+            if let Some(requested) = profile
+                && process.runtime_profiles.get(&service) != Some(requested)
+            {
+                return Err(AiRuntimeError::ActivationSuperseded);
             }
             if process.selections.len() != models.len()
                 || models.iter().any(|model| {

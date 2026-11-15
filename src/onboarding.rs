@@ -14,6 +14,7 @@ pub enum GuideChange {
     Level(GuideLevel),
     Language(Language),
     Complete,
+    MarkIncomplete,
 }
 
 impl GuideChange {
@@ -27,6 +28,7 @@ impl GuideChange {
             }
             Self::Language(language) => snapshot.values.interface.language == *language,
             Self::Complete => snapshot.values.onboarding.guide_completed,
+            Self::MarkIncomplete => !snapshot.values.onboarding.guide_completed,
         })
     }
 
@@ -91,6 +93,7 @@ impl GuideChange {
                 state.guide_page = 0;
             }
             Self::Complete => state.guide_completed = true,
+            Self::MarkIncomplete => state.guide_completed = false,
             Self::Language(_) => {}
         }
         Ok(())

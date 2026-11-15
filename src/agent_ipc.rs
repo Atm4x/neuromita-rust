@@ -325,18 +325,18 @@ pub async fn run_local_control_scenario(
                 object.insert(key.to_owned(), value);
             }
         }
-        if command.get("command").and_then(Value::as_str) == Some("presenter_action") {
-            if let Some(action) = command.get_mut("action").and_then(Value::as_object_mut) {
-                for (key, marker, selected) in [
-                    ("request_id", "$last_request_id", &last_request_id),
-                    ("event_id", "$last_event_id", &last_event_id),
-                ] {
-                    if action.get(key).and_then(Value::as_str) == Some(marker) {
-                        let value = selected.clone().ok_or_else(|| {
-                            AgentError::Protocol(format!("{marker} has no preceding source"))
-                        })?;
-                        action.insert(key.to_owned(), value);
-                    }
+        if command.get("command").and_then(Value::as_str) == Some("presenter_action")
+            && let Some(action) = command.get_mut("action").and_then(Value::as_object_mut)
+        {
+            for (key, marker, selected) in [
+                ("request_id", "$last_request_id", &last_request_id),
+                ("event_id", "$last_event_id", &last_event_id),
+            ] {
+                if action.get(key).and_then(Value::as_str) == Some(marker) {
+                    let value = selected.clone().ok_or_else(|| {
+                        AgentError::Protocol(format!("{marker} has no preceding source"))
+                    })?;
+                    action.insert(key.to_owned(), value);
                 }
             }
         }
@@ -352,14 +352,12 @@ pub async fn run_local_control_scenario(
             results.push(result);
             return Ok(json!({"type":"scenario","ok":false,"failed_index":index,"steps":results}));
         }
-        if let Some(expected) = expect {
-            if !is_subset(&expected, &sanitized) {
-                result["assertion_failed"] = json!("response did not match expected subset");
-                results.push(result);
-                return Ok(
-                    json!({"type":"scenario","ok":false,"failed_index":index,"steps":results}),
-                );
-            }
+        if let Some(expected) = expect
+            && !is_subset(&expected, &sanitized)
+        {
+            result["assertion_failed"] = json!("response did not match expected subset");
+            results.push(result);
+            return Ok(json!({"type":"scenario","ok":false,"failed_index":index,"steps":results}));
         }
         if response["type"] == "accepted" {
             last_request_id = response.get("request_id").cloned();

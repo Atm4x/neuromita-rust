@@ -119,10 +119,10 @@ pub(crate) fn scoped_candidates(
     max_content_chars: usize,
     window: Option<&HistoryWindow>,
 ) -> Result<Vec<ProjectedMessage>, HistorySearchError> {
-    if let Some(window) = window {
-        if !window.matches(view) {
-            return Err(HistorySearchError::StaleWindow);
-        }
+    if let Some(window) = window
+        && !window.matches(view)
+    {
+        return Err(HistorySearchError::StaleWindow);
     }
     Ok(candidates(view, max_content_chars)
         .into_iter()

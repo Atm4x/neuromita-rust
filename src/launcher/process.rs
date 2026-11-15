@@ -130,12 +130,8 @@ mod platform {
 
     pub(super) fn request_window_close(pid: u32) -> bool {
         let mut request = CloseRequest { pid, posted: 0 };
-        let enumerated = unsafe {
-            EnumWindows(
-                Some(close_matching_window),
-                &raw mut request as *mut CloseRequest as isize,
-            )
-        };
+        let enumerated =
+            unsafe { EnumWindows(Some(close_matching_window), &raw mut request as isize) };
         enumerated != 0 && request.posted > 0
     }
 

@@ -833,14 +833,13 @@ impl TimelineStore {
             ))?;
             receipt.validate(self, branch_id, child_id, anchor_id, recipient)?;
             for existing in self.branches.values() {
-                if let Some(marker) = existing.events.first() {
-                    if crate::timeline::RegenerateAdmissionReceipt::from_marker(
+                if let Some(marker) = existing.events.first()
+                    && crate::timeline::RegenerateAdmissionReceipt::from_marker(
                         &marker.draft.payload,
                     )?
                     .is_some_and(|previous| previous.request == receipt.request)
-                    {
-                        return Err(TimelineError::Conflict);
-                    }
+                {
+                    return Err(TimelineError::Conflict);
                 }
             }
             payload.insert(

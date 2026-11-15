@@ -964,7 +964,7 @@ impl SemanticMemoryRetriever {
             .map(|record| (CachedSourceId::Memory(record.id), record.content.as_str()))
             .collect::<Vec<_>>();
         let (space, similarities, cost, barrier) = self
-            .score_canonical_documents(character, &sources, &query, turn)
+            .score_canonical_documents(character, &sources, query, turn)
             .await?;
         let mut ranked = memories.iter().zip(similarities).collect::<Vec<_>>();
         ranked.sort_by(|(a, ascore), (b, bscore)| {
@@ -996,8 +996,8 @@ impl SemanticMemoryRetriever {
             hits: vector_hits,
         }];
         if !matches!(mode, FusionMode::VectorOnly) {
-            let query_tokens = tokens(&query);
-            let lexical_hits = lexical_ranked_scoped(&memories, &query, include_forgotten)
+            let query_tokens = tokens(query);
+            let lexical_hits = lexical_ranked_scoped(&memories, query, include_forgotten)
                 .into_iter()
                 .filter(|memory| {
                     tokens(&memory.content)

@@ -119,6 +119,7 @@ impl RequestObserver {
 }
 
 impl RequestRecord {
+    #[cfg(test)]
     pub(crate) fn new(
         message: Box<dyn GenerationCommand>,
         id: RequestId,

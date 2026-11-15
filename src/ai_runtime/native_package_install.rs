@@ -317,13 +317,7 @@ fn stage_root(managed: &Path) -> Result<PathBuf, NativePackageInstallError> {
         NativePackageInstallError::Invalid("invalid managed directory name"),
     )?;
     let root = parent.join(format!(".{name}.native-staging"));
-    let mut builder = fs::DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    match builder.create(&root) {
+    match crate::portable::create_private_directory(&root) {
         Ok(()) => sync_dir(parent)?,
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
         Err(error) => return Err(error.into()),

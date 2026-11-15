@@ -224,13 +224,12 @@ pub struct WorkerClaim {
 
 impl Drop for WorkerClaim {
     fn drop(&mut self) {
-        if let Ok(mut active) = self.active.lock() {
-            if active
+        if let Ok(mut active) = self.active.lock()
+            && active
                 .get(&self.service)
                 .is_some_and(|(generation, _)| *generation == self.generation)
-            {
-                active.remove(&self.service);
-            }
+        {
+            active.remove(&self.service);
         }
     }
 }

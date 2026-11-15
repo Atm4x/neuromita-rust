@@ -2,8 +2,7 @@
 //! Network content is untrusted; publication is delegated to the existing installer.
 
 use std::{
-    fs::{self, DirBuilder},
-    io,
+    fs, io,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -386,10 +385,10 @@ impl NativeHttpsPackageTransfer {
             if response.status() != reqwest::StatusCode::OK {
                 return Err(NativeHttpsError::HttpStatus);
             }
-            if let Some(length) = response.content_length() {
-                if length > max_size || exact_size.is_some_and(|expected| length != expected) {
-                    return Err(NativeHttpsError::Integrity);
-                }
+            if let Some(length) = response.content_length()
+                && (length > max_size || exact_size.is_some_and(|expected| length != expected))
+            {
+                return Err(NativeHttpsError::Integrity);
             }
             let mut output = OpenOptions::new()
                 .write(true)
@@ -554,16 +553,16 @@ struct DownloadStage {
 impl DownloadStage {
     fn new(parent: &Path, model_id: &str) -> Result<Self, NativeHttpsError> {
         let root = parent.join(format!(".native-download-{}", Uuid::new_v4()));
-        private_create_dir(&root)?;
+        crate::portable::create_private_directory(&root)?;
         let stage = Self {
             packages_root: root.join("packages"),
             package: root.join("packages").join(model_id),
             runtime: root.join("runtime"),
             root,
         };
-        private_create_dir(&stage.packages_root)?;
-        private_create_dir(&stage.runtime)?;
-        private_create_dir(&stage.package)?;
+        crate::portable::create_private_directory(&stage.packages_root)?;
+        crate::portable::create_private_directory(&stage.runtime)?;
+        crate::portable::create_private_directory(&stage.package)?;
         Ok(stage)
     }
 }
@@ -576,16 +575,6 @@ impl Drop for DownloadStage {
             let _ = fs::remove_dir_all(&self.root);
         }
     }
-}
-
-fn private_create_dir(path: &Path) -> Result<(), io::Error> {
-    let mut builder = DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    builder.create(path)
 }
 
 #[cfg(test)]

@@ -14,10 +14,9 @@ pub(crate) fn dispatch_may_have_started(
     for fact in facts {
         if fact.draft.kind == EventKind::RegenerateMayHaveDispatched
             && parse_dispatch(&fact.draft)? == request
+            && evidence.replace(fact).is_some()
         {
-            if evidence.replace(fact).is_some() {
-                return Err(TimelineError::Conflict);
-            }
+            return Err(TimelineError::Conflict);
         }
     }
     Ok(evidence)
@@ -31,10 +30,9 @@ pub(crate) fn abandoned_regenerate(
     for fact in facts {
         if fact.draft.kind == EventKind::RegenerateAbandoned
             && parse_abandoned(&fact.draft)? == request
+            && abandoned.replace(fact).is_some()
         {
-            if abandoned.replace(fact).is_some() {
-                return Err(TimelineError::Conflict);
-            }
+            return Err(TimelineError::Conflict);
         }
     }
     Ok(abandoned)
@@ -312,18 +310,15 @@ pub(crate) fn validate_regenerate_transition(
                     if let Some(receipt) =
                         RegenerateAdmissionReceipt::from_marker(&fact.draft.payload)?
                         && receipt.request.0 == request
+                        && legacy.replace(receipt).is_some()
                     {
-                        if legacy.replace(receipt).is_some() {
-                            return Err(TimelineError::Conflict);
-                        }
+                        return Err(TimelineError::Conflict);
                     }
                 }
                 EventKind::RegenerateAdmitted => {
                     let receipt = SameBranchRegenerateReceipt::from_fact(&fact.draft)?;
-                    if receipt.request.0 == request {
-                        if same_branch.replace(receipt).is_some() {
-                            return Err(TimelineError::Conflict);
-                        }
+                    if receipt.request.0 == request && same_branch.replace(receipt).is_some() {
+                        return Err(TimelineError::Conflict);
                     }
                 }
                 _ => {}

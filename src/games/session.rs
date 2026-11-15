@@ -312,15 +312,14 @@ impl GameSlot {
         if self.current.is_some() && self.chess.is_some() {
             return Err("more than one active game");
         }
-        if let Some(chess) = &self.chess {
-            if chess.id.is_nil()
+        if let Some(chess) = &self.chess
+            && (chess.id.is_nil()
                 || chess.branch.0.is_nil()
                 || chess.generation.checked_add(1) != Some(self.next_generation)
                 || chess.revision < chess.game.revision()
-                || chess.game.validate().is_err()
-            {
-                return Err("invalid chess game replay or generation");
-            }
+                || chess.game.validate().is_err())
+        {
+            return Err("invalid chess game replay or generation");
         }
         Ok(())
     }
@@ -521,10 +520,10 @@ React briefly in character and put exactly one legal MakeMove,<coordinate> comma
             ChessUserCommand::Move(uci) | ChessUserCommand::EngineMove { uci, .. } => {
                 let engine = engine_ticket.is_some();
                 let session = self.chess.as_mut().ok_or(GameError::NoActiveGame)?;
-                if let Some(expected) = engine_ticket {
-                    if session.key() != expected {
-                        return Err(GameError::StaleState);
-                    }
+                if let Some(expected) = engine_ticket
+                    && session.key() != expected
+                {
+                    return Err(GameError::StaleState);
                 }
                 let view = session
                     .game

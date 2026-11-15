@@ -41,10 +41,10 @@ impl HistoryWindow {
             .take(active_messages)
             .map(|message| message.event_id)
             .collect::<BTreeSet<_>>();
-        if let Some(focus) = focus {
-            if eligible.iter().any(|message| message.event_id == focus) {
-                active.insert(focus);
-            }
+        if let Some(focus) = focus
+            && eligible.iter().any(|message| message.event_id == focus)
+        {
+            active.insert(focus);
         }
         let archived = eligible
             .into_iter()

@@ -749,10 +749,10 @@ impl AiHubNativeService {
             let _ = operation.join().await;
         }
         state.installation.take();
-        if let Some(workflow) = state.workflow.as_mut() {
-            if let Err(error) = workflow.deactivate_all().await {
-                tracing::warn!(%error, "native worker shutdown failed");
-            }
+        if let Some(workflow) = state.workflow.as_mut()
+            && let Err(error) = workflow.deactivate_all().await
+        {
+            tracing::warn!(%error, "native worker shutdown failed");
         }
         state.claims.clear();
     }
