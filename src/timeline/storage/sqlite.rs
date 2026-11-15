@@ -12,7 +12,9 @@ use crate::timeline::domain::{
 use crate::timeline::selection::{
     SessionWorkspace, TimelineSelection, TimelineSelectionRepository, TimelineTurn,
 };
-use crate::timeline::{KnowledgeDispatchSource, RegenerateAdmissionReceipt};
+use crate::timeline::{
+    KnowledgeDispatchSource, PersistentTimelineObservation, RegenerateAdmissionReceipt,
+};
 
 mod backup;
 mod maintenance;
@@ -487,6 +489,33 @@ impl SqliteTimelineRepository {
         let result = operation(&connection);
         connection.exec("ROLLBACK")?;
         result
+    }
+
+    pub(crate) fn observe_changes(
+        &self,
+        previous: Option<(TimelineSelection, u64)>,
+    ) -> Result<Option<PersistentTimelineObservation>, TimelineError> {
+        self.read_snapshot(|connection| {
+            let selection = read_selection(connection)?.ok_or(TimelineError::NotFound)?;
+            let revision = revision(connection)?;
+            if previous == Some((selection, revision)) {
+                return Ok(None);
+            }
+            let world = IndexedWorld::through(connection, selection.branch_id, None)?;
+            let epochs = CharacterId::ALL
+                .into_iter()
+                .map(|character| {
+                    world
+                        .latest_reset(character)
+                        .map(|epoch| (character, epoch))
+                })
+                .collect::<Result<_, _>>()?;
+            Ok(Some(PersistentTimelineObservation {
+                selection,
+                revision,
+                epochs,
+            }))
+        })
     }
 
     fn with_write<T>(

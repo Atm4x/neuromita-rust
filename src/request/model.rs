@@ -89,8 +89,11 @@ impl ReplyRequest {
         self.at = at;
         self
     }
-    pub fn expect_timeline(mut self, fence: TimelineFence) -> Self {
-        self.at = ContextPosition::At(fence.at);
+    pub fn expect_timeline(self, fence: TimelineFence) -> Self {
+        self.at(ContextPosition::At(fence.at))
+            .with_admission_fence(fence)
+    }
+    pub(crate) fn with_admission_fence(mut self, fence: TimelineFence) -> Self {
         self.fence = Some(fence);
         self
     }

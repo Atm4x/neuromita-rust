@@ -324,6 +324,37 @@ impl RequestRegistry {
         }
     }
 
+    #[cfg(feature = "sqlite-system")]
+    pub(crate) fn cancel_outdated_timeline_requests(
+        &self,
+        observed: &crate::timeline::PersistentTimelineObservation,
+    ) {
+        let outdated: Vec<_> = self
+            .inner
+            .records
+            .lock()
+            .expect("registry mutex poisoned")
+            .values()
+            .filter_map(|record| {
+                let admission = record.admission();
+                let reason = if admission.selection.generation < observed.selection.generation {
+                    CancelReason::SelectionChanged
+                } else if admission.selection == observed.selection
+                    && admission.context_epoch
+                        < observed.epochs[&record.snapshot().metadata.character_id]
+                {
+                    CancelReason::ContextChanged
+                } else {
+                    return None;
+                };
+                Some((record.handle(), reason))
+            })
+            .collect();
+        for (handle, reason) in outdated {
+            handle.cancel_with_reason(reason);
+        }
+    }
+
     /// Explicit repair pass for records whose terminal Timeline append failed.
     /// Only a copied set of records is held while entering the Timeline owner.
     pub(crate) fn reconcile_pending_terminals(
