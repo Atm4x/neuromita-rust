@@ -1573,9 +1573,11 @@ impl ApplicationLifecycle {
             prompts.clone(),
             Arc::clone(&settings_presenter),
         );
-        let selection_presenter = std::sync::Arc::new(
-            crate::presentation::ChatSelectionPresenter::new(speech_capture.clone()),
-        );
+        let selection_presenter =
+            std::sync::Arc::new(crate::presentation::ChatSelectionPresenter::new(
+                speech_capture.clone(),
+                Arc::clone(&settings_presenter),
+            ));
         let speech_chat_presenter = crate::presentation::SpeechChatPresenter::new(
             chat.clone(),
             Arc::clone(&selection_presenter),

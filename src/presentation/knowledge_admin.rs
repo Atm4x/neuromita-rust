@@ -41,6 +41,10 @@ impl GraphMaintenancePresenter {
         }
     }
 
+    pub fn reindex_available(&self) -> Result<bool, String> {
+        GraphMaintenanceApi::reindex_available().map_err(|error| error.to_string())
+    }
+
     pub async fn preview(
         &self,
         request_id: Uuid,

@@ -365,23 +365,13 @@ async fn enable_speech_session(
     .unwrap_or_default();
     app.presenter()
         .selection
-        .start_capture_and_press(
+        .start_capture_from_settings(
             ChatSelection {
                 character: origin.character,
                 revision: origin.selection_revision,
             },
             ffmpeg,
             ffplay,
-            matches!(
-                app.presenter()
-                    .settings
-                    .asr
-                    .preferences
-                    .get()
-                    .input_mode
-                    .as_str(),
-                "radio" | "push_to_talk"
-            ),
         )
         .await
 }
@@ -483,7 +473,7 @@ async fn run(
     };
     publish(Update::Connected(app.server().address().to_string()));
     publish(Update::GraphCapability(
-        neuromita::api::GraphMaintenanceApi::reindex_available().unwrap_or(false),
+        app.presenter().graph.reindex_available().unwrap_or(false),
     ));
     let devices = match app.presenter().audio_input.devices().await {
         Ok(devices) => devices,

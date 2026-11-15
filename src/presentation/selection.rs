@@ -1,8 +1,11 @@
 //! Application-owned, revision-fenced chat selection. All GUI and MCP clients
 //! observe and change this state only through the same Presenter API.
+use std::sync::Arc;
 use tokio::sync::{Mutex, watch};
 
 use crate::{app::SharedSpeechCapture, character::CharacterId};
+
+use super::SettingsPresenter;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct ChatSelection {
@@ -14,10 +17,14 @@ pub struct ChatSelectionPresenter {
     value: watch::Sender<ChatSelection>,
     mutation: Mutex<()>,
     speech_capture: SharedSpeechCapture,
+    settings: Arc<SettingsPresenter>,
 }
 
 impl ChatSelectionPresenter {
-    pub(crate) fn new(speech_capture: SharedSpeechCapture) -> Self {
+    pub(crate) fn new(
+        speech_capture: SharedSpeechCapture,
+        settings: Arc<SettingsPresenter>,
+    ) -> Self {
         let selected = ChatSelection {
             character: CharacterId::Crazy,
             revision: 0,
@@ -27,6 +34,7 @@ impl ChatSelectionPresenter {
             value,
             mutation: Mutex::new(()),
             speech_capture,
+            settings,
         }
     }
 
@@ -47,6 +55,18 @@ impl ChatSelectionPresenter {
         ffplay: std::path::PathBuf,
     ) -> Result<(), String> {
         self.start_capture_and_press(expected, ffmpeg, ffplay, false)
+            .await
+    }
+
+    /// Resolve capture behavior from the shared ASR settings, not from a GUI callback.
+    pub async fn start_capture_from_settings(
+        &self,
+        expected: ChatSelection,
+        ffmpeg: std::path::PathBuf,
+        ffplay: std::path::PathBuf,
+    ) -> Result<(), String> {
+        let mode = self.settings.asr.preferences.get().input_mode;
+        self.start_capture_and_press(expected, ffmpeg, ffplay, requires_initial_press(&mode))
             .await
     }
 
@@ -120,5 +140,22 @@ impl ChatSelectionPresenter {
         };
         self.value.send_replace(updated);
         Ok(updated)
+    }
+}
+
+fn requires_initial_press(mode: &str) -> bool {
+    matches!(mode, "radio" | "push_to_talk")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::requires_initial_press;
+
+    #[test]
+    fn capture_input_policy_belongs_to_presenter() {
+        assert!(requires_initial_press("radio"));
+        assert!(requires_initial_press("push_to_talk"));
+        assert!(!requires_initial_press("continuous"));
+        assert!(!requires_initial_press(""));
     }
 }
