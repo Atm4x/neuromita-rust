@@ -255,7 +255,7 @@ pub(crate) struct PresenterProbe {
     voice: VoiceSettingsPresenter,
     guide: OnboardingSettingsPresenter,
     pub(super) conversation: super::ConversationPresenter,
-    presets: super::PresetsPresenter,
+    pub(super) presets: super::PresetsPresenter,
     preset_selection: super::PresetsSettingsPresenter,
     pub(super) settings: std::sync::Arc<super::SettingsPresenter>,
     pub(super) characters: super::CharactersPresenter,

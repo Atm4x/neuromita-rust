@@ -13,7 +13,7 @@ use crate::{
     identity::EventId,
     memory::MemoryCommand,
     request::{RequestId, TimelineFence},
-    settings::{CharacterSettings, Language, StructuredDisplayMode},
+    settings::{CharacterSettings, Language, PresetSelection, StructuredDisplayMode},
     timeline::selection::TimelineSelection,
 };
 
@@ -208,6 +208,17 @@ pub(crate) enum PresenterWrite {
         expected_revision: u64,
         profile: CharacterSettings,
     },
+    CharacterPresetAssignment {
+        character: CharacterId,
+        expected_revision: u64,
+        slot: CharacterPresetSlot,
+        selection: PresetSelection,
+    },
+    CharacterPromptSelection {
+        character: CharacterId,
+        expected_revision: u64,
+        prompt_set: Option<String>,
+    },
     Memory {
         character: CharacterId,
         expected_version: String,
@@ -239,6 +250,15 @@ pub(crate) enum PresenterWrite {
         text: String,
         source: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CharacterPresetSlot {
+    Reply,
+    React,
+    Initiate,
+    All,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
@@ -355,6 +375,28 @@ fn messages_json(
 }
 
 impl PresenterProbe {
+    fn validate_character_profile(
+        &self,
+        character: CharacterId,
+        profile: &CharacterSettings,
+    ) -> Result<(), String> {
+        if let Some(name) = profile.prompt_set.as_deref() {
+            self.prompt_folder.validate_selection(character, name)?;
+        }
+        for selection in [
+            profile.presets.reply,
+            profile.presets.react,
+            profile.presets.initiate,
+        ] {
+            if let PresetSelection::Specific(id) = selection {
+                self.presets
+                    .require(id)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) async fn admin_read(&self, query: PresenterRead) -> Result<Value, String> {
         match query {
             PresenterRead::PromptFolder { character } => {
@@ -1138,6 +1180,7 @@ impl PresenterProbe {
                 if current.revision() != expected_revision {
                     return Err("stale character settings revision".into());
                 }
+                self.validate_character_profile(character, &profile)?;
                 let saved = self
                     .settings
                     .characters
@@ -1145,6 +1188,68 @@ impl PresenterProbe {
                     .map_err(|e| e.to_string())?;
                 Ok(
                     json!({"source":"characters_settings_presenter","character":character,"revision":saved.revision()}),
+                )
+            }
+            PresenterWrite::CharacterPresetAssignment {
+                character,
+                expected_revision,
+                slot,
+                selection,
+            } => {
+                let current = self
+                    .settings
+                    .characters
+                    .profile(character)
+                    .map_err(|e| e.to_string())?;
+                if current.revision() != expected_revision {
+                    return Err("stale character settings revision".into());
+                }
+                let mut edited = current.settings().clone();
+                match slot {
+                    CharacterPresetSlot::Reply => edited.presets.reply = selection,
+                    CharacterPresetSlot::React => edited.presets.react = selection,
+                    CharacterPresetSlot::Initiate => edited.presets.initiate = selection,
+                    CharacterPresetSlot::All => {
+                        edited.presets.reply = selection;
+                        edited.presets.react = selection;
+                        edited.presets.initiate = selection;
+                    }
+                }
+                self.validate_character_profile(character, &edited)?;
+                let saved = self
+                    .settings
+                    .characters
+                    .save_profile(&current, edited)
+                    .map_err(|e| e.to_string())?;
+                Ok(
+                    json!({"source":"characters_settings_presenter","character":character,
+                    "slot":slot,"revision":saved.revision(),"presets":saved.settings().presets}),
+                )
+            }
+            PresenterWrite::CharacterPromptSelection {
+                character,
+                expected_revision,
+                prompt_set,
+            } => {
+                let current = self
+                    .settings
+                    .characters
+                    .profile(character)
+                    .map_err(|e| e.to_string())?;
+                if current.revision() != expected_revision {
+                    return Err("stale character settings revision".into());
+                }
+                let mut edited = current.settings().clone();
+                edited.prompt_set = prompt_set;
+                self.validate_character_profile(character, &edited)?;
+                let saved = self
+                    .settings
+                    .characters
+                    .save_profile(&current, edited)
+                    .map_err(|e| e.to_string())?;
+                Ok(
+                    json!({"source":"characters_settings_presenter","character":character,
+                    "revision":saved.revision(),"prompt_set":saved.settings().prompt_set}),
                 )
             }
             PresenterWrite::Memory {

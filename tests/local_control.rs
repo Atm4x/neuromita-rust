@@ -2628,7 +2628,25 @@ async fn mcp_stdio_probes_the_same_running_core() {
             let result = &response["result"];
             match id {
                 1 => assert_eq!(result["serverInfo"]["name"], "neuromita"),
-                2 => assert_eq!(result["tools"].as_array().unwrap().len(), 46),
+                2 => {
+                    let tools = result["tools"].as_array().unwrap();
+                    assert!(
+                        tools
+                            .iter()
+                            .any(|tool| tool["name"] == "presenter_character_preset")
+                    );
+                    assert!(
+                        tools
+                            .iter()
+                            .any(|tool| tool["name"] == "presenter_character_prompt")
+                    );
+                    let mut names = std::collections::HashSet::new();
+                    assert!(
+                        tools
+                            .iter()
+                            .all(|tool| names.insert(tool["name"].as_str().unwrap()))
+                    );
+                }
                 3 => {
                     let frame = &result["structuredContent"];
                     assert_eq!(frame["type"], "presenter_inspect");
@@ -3660,5 +3678,98 @@ async fn mcp_hardware_refresh_uses_real_hardware_presenter_without_raw_errors() 
     assert!(outcome["result"]["result"]["devices"].is_array());
     assert!(outcome["result"]["result"]["error_count"].is_number());
     assert!(outcome["result"]["result"].get("errors").is_none());
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn presenter_character_assignment_cas_preserves_other_slots_and_validates_catalog() {
+    let fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+    let mut read = command("presenter_admin_read");
+    read["query"] = json!({"query":"character_profile","character":"Crazy"});
+    client.send(read.clone()).await;
+    let before = client
+        .until(|r| r["command_id"] == read["command_id"])
+        .await;
+    assert_eq!(before["type"], "presenter_admin_read", "{before}");
+    let revision = before["snapshot"]["revision"].as_u64().unwrap();
+    assert_eq!(before["snapshot"]["presets"]["reply"], "active");
+    assert_eq!(before["snapshot"]["presets"]["react"], "active");
+    assert_eq!(before["snapshot"]["presets"]["initiate"], "active");
+
+    let mut invalid = command("presenter_admin_write");
+    invalid["change"] = json!({"change":"character_preset_assignment",
+        "character":"Crazy","expected_revision":revision,
+        "slot":"reply","selection":{"specific":999999}});
+    client.send(invalid.clone()).await;
+    let rejected = client
+        .until(|r| r["command_id"] == invalid["command_id"])
+        .await;
+    assert_eq!(rejected["type"], "error", "{rejected}");
+    assert_eq!(rejected["code"], "invalid_value", "{rejected}");
+
+    let mut assign = command("presenter_admin_write");
+    assign["change"] = json!({"change":"character_preset_assignment",
+        "character":"Crazy","expected_revision":revision,
+        "slot":"react","selection":{"specific":0}});
+    client.send(assign.clone()).await;
+    let selected = client
+        .until(|r| r["command_id"] == assign["command_id"])
+        .await;
+    assert_eq!(selected["type"], "presenter_admin_write", "{selected}");
+    assert_eq!(selected["result"]["presets"]["reply"], "active");
+    assert_eq!(
+        selected["result"]["presets"]["react"],
+        json!({"specific":0})
+    );
+    assert_eq!(selected["result"]["presets"]["initiate"], "active");
+    let next_revision = selected["result"]["revision"].as_u64().unwrap();
+    assert!(next_revision > revision);
+
+    client.send(assign.clone()).await;
+    let stale = client
+        .until(|r| r["command_id"] == assign["command_id"])
+        .await;
+    assert_eq!(stale["type"], "error", "{stale}");
+    assert!(stale["error"].as_str().unwrap().contains("stale character"));
+
+    let mut prompt = command("presenter_admin_write");
+    prompt["change"] = json!({"change":"character_prompt_selection",
+        "character":"Crazy","expected_revision":next_revision,
+        "prompt_set":"does-not-exist"});
+    client.send(prompt.clone()).await;
+    let bad_prompt = client
+        .until(|r| r["command_id"] == prompt["command_id"])
+        .await;
+    assert_eq!(bad_prompt["type"], "error", "{bad_prompt}");
+
+    let mut reset = command("presenter_admin_write");
+    reset["change"] = json!({"change":"character_preset_assignment",
+        "character":"Crazy","expected_revision":next_revision,
+        "slot":"all","selection":"active"});
+    client.send(reset.clone()).await;
+    let restored = client
+        .until(|r| r["command_id"] == reset["command_id"])
+        .await;
+    assert_eq!(restored["type"], "presenter_admin_write", "{restored}");
+    assert_eq!(restored["result"]["presets"]["reply"], "active");
+    assert_eq!(restored["result"]["presets"]["react"], "active");
+    assert_eq!(restored["result"]["presets"]["initiate"], "active");
+
+    let mut full = command("presenter_admin_write");
+    full["change"] = json!({"change":"character_profile","character":"Crazy",
+        "expected_revision":restored["result"]["revision"],
+        "profile":{"presets":{"reply":{"specific":999999},"react":"active","initiate":"active"},"prompt_set":null}});
+    client.send(full.clone()).await;
+    let denied = client
+        .until(|r| r["command_id"] == full["command_id"])
+        .await;
+    assert_eq!(denied["type"], "error", "{denied}");
+    client.send(read.clone()).await;
+    let after = client
+        .until(|r| r["command_id"] == read["command_id"])
+        .await;
+    assert_eq!(after["snapshot"]["presets"]["reply"], "active");
+    assert_eq!(after["snapshot"]["presets"]["react"], "active");
     fixture.shutdown().await;
 }

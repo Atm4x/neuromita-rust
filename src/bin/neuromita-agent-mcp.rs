@@ -328,6 +328,22 @@ impl ServerHandler for NeuroMita {
             admin_write_tool("presenter_character_profile_save",
                 "Compare-and-set a complete CharacterSettings profile (prompt and operation preset assignments).",
                 &["character","expected_revision","profile"],json!({"character":{"type":"string"},"expected_revision":{"type":"integer","minimum":0},"profile":{"type":"object"}})),
+            admin_write_tool("presenter_character_preset",
+                "Assign active or a validated catalog preset to one character operation (reply/react/initiate) or all, using an atomic character-profile revision fence. No other slots are changed.",
+                &["character","expected_revision","slot","selection"],json!({
+                    "character":{"type":"string"},
+                    "expected_revision":{"type":"integer","minimum":0},
+                    "slot":{"type":"string","enum":["reply","react","initiate","all"]},
+                    "selection":{"type":"string","enum":["active","specific"]},
+                    "preset_id":{"type":"integer","minimum":0,"maximum":4294967295_u64}
+                })),
+            admin_write_tool("presenter_character_prompt",
+                "Select a real PromptCatalog set by name or clear the character override using null, with atomic revision check. Only catalog-backed names are accepted.",
+                &["character","expected_revision","prompt_set"],json!({
+                    "character":{"type":"string"},
+                    "expected_revision":{"type":"integer","minimum":0},
+                    "prompt_set":{"type":["string","null"],"maxLength":256}
+                })),
             admin_write_tool("presenter_memory_edit",
                 "Apply 1..32 character-owned memory changes against the exact version returned by presenter_memories.",
                 &["character","expected_version","commands"],json!({"character":{"type":"string"},"expected_version":{"type":"string","minLength":64,"maxLength":64},"commands":{"type":"array","minItems":1,"maxItems":32,"items":{"type":"object"}}})),
@@ -477,6 +493,8 @@ impl ServerHandler for NeuroMita {
             request.name.as_ref(),
             "presenter_settings_write"
                 | "presenter_character_profile_save"
+                | "presenter_character_preset"
+                | "presenter_character_prompt"
                 | "presenter_memory_edit"
                 | "presenter_conversation_edit"
                 | "presenter_retry_failed"
@@ -865,6 +883,61 @@ fn command_for_tool(name: &str, mut args: Map<String, Value>) -> Result<Value, E
                 .remove("profile")
                 .ok_or_else(|| ErrorData::invalid_params("missing profile", None))?;
             json!({"command":"presenter_admin_write","change":{"change":"character_profile","character":character,"expected_revision":expected_revision,"profile":profile}})
+        }
+        "presenter_character_preset" => {
+            let character = string(&mut args, "character")?;
+            let revision = args
+                .remove("expected_revision")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| ErrorData::invalid_params("expected_revision must be u64", None))?;
+            let slot = string(&mut args, "slot")?;
+            if !matches!(slot.as_str(), "reply" | "react" | "initiate" | "all") {
+                return Err(ErrorData::invalid_params("invalid slot", None));
+            }
+            let mode = string(&mut args, "selection")?;
+            let preset_id = args.remove("preset_id");
+            let selection = match (mode.as_str(), preset_id) {
+                ("active", None) => json!("active"),
+                ("specific", Some(id)) => {
+                    let id = id
+                        .as_u64()
+                        .and_then(|n| u32::try_from(n).ok())
+                        .ok_or_else(|| ErrorData::invalid_params("preset_id must be u32", None))?;
+                    json!({"specific":id})
+                }
+                _ => {
+                    return Err(ErrorData::invalid_params(
+                        "selection and preset_id are inconsistent",
+                        None,
+                    ));
+                }
+            };
+            json!({"command":"presenter_admin_write","change":{
+                "change":"character_preset_assignment","character":character,
+                "expected_revision":revision,"slot":slot,"selection":selection}})
+        }
+        "presenter_character_prompt" => {
+            let character = string(&mut args, "character")?;
+            let revision = args
+                .remove("expected_revision")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| ErrorData::invalid_params("expected_revision must be u64", None))?;
+            let prompt_set = args
+                .remove("prompt_set")
+                .ok_or_else(|| ErrorData::invalid_params("missing prompt_set", None))?;
+            if !(prompt_set.is_null()
+                || prompt_set
+                    .as_str()
+                    .is_some_and(|s| !s.is_empty() && s.len() <= 256))
+            {
+                return Err(ErrorData::invalid_params(
+                    "prompt_set must be null or nonempty text up to 256 bytes",
+                    None,
+                ));
+            }
+            json!({"command":"presenter_admin_write","change":{
+                "change":"character_prompt_selection","character":character,
+                "expected_revision":revision,"prompt_set":prompt_set}})
         }
         "presenter_memory_edit" => {
             let character = string(&mut args, "character")?;
@@ -1600,6 +1673,49 @@ mod tests {
             command_for_tool(
                 "presenter_conversation_edit",
                 args(json!({"character":"Crazy"}))
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn character_assignments_are_typed_and_reject_ambiguous_values() {
+        let slot = command_for_tool(
+            "presenter_character_preset",
+            args(json!({"character":"Crazy","expected_revision":11,
+                "slot":"react","selection":"specific","preset_id":42})),
+        )
+        .unwrap();
+        assert_eq!(slot["change"]["change"], "character_preset_assignment");
+        assert_eq!(slot["change"]["selection"], json!({"specific":42}));
+        assert_eq!(slot["change"]["slot"], "react");
+        let all = command_for_tool(
+            "presenter_character_preset",
+            args(json!({"character":"Crazy","expected_revision":11,
+                "slot":"all","selection":"active"})),
+        )
+        .unwrap();
+        assert_eq!(all["change"]["selection"], "active");
+        for invalid in [
+            json!({"character":"Crazy","expected_revision":11,"slot":"reply","selection":"specific"}),
+            json!({"character":"Crazy","expected_revision":11,"slot":"reply","selection":"active","preset_id":0}),
+            json!({"character":"Crazy","expected_revision":11,"slot":"reply","selection":"specific","preset_id":-1}),
+            json!({"character":"Crazy","expected_revision":11,"slot":"invalid","selection":"active"}),
+            json!({"character":"Crazy","expected_revision":-1,"slot":"all","selection":"active"}),
+        ] {
+            assert!(command_for_tool("presenter_character_preset", args(invalid)).is_err());
+        }
+        let cleared = command_for_tool(
+            "presenter_character_prompt",
+            args(json!({"character":"Crazy","expected_revision":12,"prompt_set":null})),
+        )
+        .unwrap();
+        assert_eq!(cleared["change"]["change"], "character_prompt_selection");
+        assert!(cleared["change"]["prompt_set"].is_null());
+        assert!(
+            command_for_tool(
+                "presenter_character_prompt",
+                args(json!({"character":"Crazy","expected_revision":12,"prompt_set":""}))
             )
             .is_err()
         );

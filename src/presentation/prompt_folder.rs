@@ -12,6 +12,15 @@ impl PromptFolderPresenter {
     pub fn new(catalog: Option<Arc<PromptCatalog>>, settings: Arc<SettingsPresenter>) -> Self {
         Self { catalog, settings }
     }
+    pub fn validate_selection(&self, character: CharacterId, name: &str) -> Result<(), String> {
+        self.catalog
+            .as_ref()
+            .ok_or("prompt catalog is unavailable")?
+            .resolve_set(character, Some(name))
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
     pub fn locate(&self, character: CharacterId) -> Result<PathBuf, String> {
         let catalog = self
             .catalog
