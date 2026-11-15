@@ -1,4 +1,4 @@
-name: Git Bridge MCP Cycle14B GUI Telegram State Watch
+name: Git Bridge MCP Cycle15 Remote Voice Import
 on:
   push:
     branches:
@@ -16,19 +16,19 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true
-      - name: Import exact locally checked GUI subscription fix
+      - name: Verify local Rust source and stage on PR 446
         shell: bash
         run: |
           set -euo pipefail
-          BASE=81d8ecbec13772a04c00ea7d74502e799cd2688c
-          EXPECTED=fcff568e698753f3784f2516513b77c0b18ea52f
+          BASE=fcff568e698753f3784f2516513b77c0b18ea52f
+          EXPECTED=ae3fb5910e1f473b2b40fa0808621fe45f0f314c
           git fetch origin refs/heads/bridge/ipc-cycle4-candidate-20261114:refs/remotes/origin/ipc-candidate
           test "$(git rev-parse refs/remotes/origin/ipc-candidate)" = "$BASE"
-          base64 -d .bridge/ipc-cycle4-outgoing.b64 > /tmp/cycle14b.bundle
-          echo "9a703e53f3403ac15bccd317272b0978456acc340ee240b83f156db573a682f2  /tmp/cycle14b.bundle" | sha256sum -c -
-          git bundle verify /tmp/cycle14b.bundle
-          git fetch /tmp/cycle14b.bundle refs/heads/ipc-candidate:refs/heads/ipc-cycle14b-imported
-          test "$(git rev-parse refs/heads/ipc-cycle14b-imported)" = "$EXPECTED"
+          base64 -d .bridge/ipc-cycle4-outgoing.b64 > /tmp/cycle15.bundle
+          echo "d60a151ed95b9ca46eabec018b2b97e8aed84efc714ec20deb4fdd0cbde4daaf  /tmp/cycle15.bundle" | sha256sum -c -
+          git bundle verify /tmp/cycle15.bundle
+          git fetch /tmp/cycle15.bundle HEAD:refs/heads/ipc-cycle15-imported
+          test "$(git rev-parse refs/heads/ipc-cycle15-imported)" = "$EXPECTED"
           git merge-base --is-ancestor "$BASE" "$EXPECTED"
           git diff "$BASE" "$EXPECTED" --check
-          git push origin refs/heads/ipc-cycle14b-imported:refs/heads/bridge/ipc-cycle14b-staged-20261115
+          git push origin refs/heads/ipc-cycle15-imported:refs/heads/bridge/ipc-cycle15-staged-20261115
