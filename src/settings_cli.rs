@@ -127,13 +127,13 @@ pub fn run(arguments: Vec<OsString>) -> Result<(), Box<dyn Error>> {
             if approval.is_none() && !preview.skipped_keys.is_empty() {
                 return Err(invalid("unmapped Python settings require exact SHA-256 and --accept-skipped-key approval after preview").into());
             }
-            if let Some(approved) = &approval {
-                if *approved != review {
-                    return Err(invalid(
-                        "Python import approval does not match source, target or skipped keys",
-                    )
-                    .into());
-                }
+            if let Some(approved) = &approval
+                && *approved != review
+            {
+                return Err(invalid(
+                    "Python import approval does not match source, target or skipped keys",
+                )
+                .into());
             }
             let source_backup = if preview.changed {
                 Some(backup_python_source(&source, &destination, &bytes)?)

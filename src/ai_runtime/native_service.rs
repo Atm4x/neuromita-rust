@@ -17,7 +17,8 @@ use super::{
         InstallComponentKind, InstallationOwner, InstallationPermit, InstallationTarget,
     },
     native_download_operation::{
-        NativeDownloadEvent, NativeDownloadOperation, NativeDownloadSelection,
+        NativeDownloadControl, NativeDownloadEvent, NativeDownloadOperation,
+        NativeDownloadSelection,
     },
     native_https::{NativeHttpsOrigin, NativeTransferPhase},
     native_model::{NativeBackend, NativeModelSnapshot},
@@ -33,6 +34,15 @@ struct NativeState {
     download: Option<NativeDownloadOperation>,
     installation: Option<InstallationPermit>,
     claims: HashMap<NativeSpeechKind, WorkerClaim>,
+}
+
+pub(crate) struct NativeSynthesisRequest<'a> {
+    pub model_id: &'a str,
+    pub manifest_sha256: &'a str,
+    pub text: &'a str,
+    pub voice: &'a str,
+    pub language: &'a str,
+    pub volume_percent: u8,
 }
 
 #[derive(Clone, Debug)]
@@ -459,12 +469,7 @@ impl AiHubNativeService {
     pub(crate) async fn synthesize_speech(
         &self,
         permit: &ServiceInferencePermit<'_>,
-        model_id: &str,
-        manifest_sha256: &str,
-        text: &str,
-        voice: &str,
-        language: &str,
-        volume_percent: u8,
+        request: NativeSynthesisRequest<'_>,
     ) -> Result<crate::voice::AudioArtifact, String> {
         if !permit.authorizes(self.registry.as_ref(), super::AiService::Tts) {
             return Err("Inference permit does not belong to the TTS owner".into());
@@ -483,12 +488,12 @@ impl AiHubNativeService {
         };
         session
             .synthesize(
-                model_id,
-                manifest_sha256,
-                text,
-                voice,
-                language,
-                volume_percent,
+                request.model_id,
+                request.manifest_sha256,
+                request.text,
+                request.voice,
+                request.language,
+                request.volume_percent,
             )
             .await
             .map_err(|error| error.to_string())
@@ -621,9 +626,11 @@ impl AiHubNativeService {
             request,
             staging,
             Duration::from_secs(3600),
-            inner_events,
-            permit.cancellation().clone(),
-            permit.operation(),
+            NativeDownloadControl {
+                id: permit.operation(),
+                cancellation: permit.cancellation().clone(),
+                events: inner_events,
+            },
         )
         .map_err(|error| error.to_string())?;
         let id = operation.id();

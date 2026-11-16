@@ -1,9 +1,12 @@
 use std::{
     fs::{self, OpenOptions},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
-    time::{Duration, Instant},
+    process::Command,
+    time::Duration,
 };
+
+#[cfg(unix)]
+use std::{process::Stdio, time::Instant};
 
 use neuromita::ai_runtime::{
     native_controller::{NativeModelController, NativeModelSelection},

@@ -52,6 +52,12 @@ pub struct NativeDownloadOperation {
     task: Option<JoinHandle<bool>>,
 }
 
+pub struct NativeDownloadControl {
+    pub id: Uuid,
+    pub cancellation: CancellationToken,
+    pub events: mpsc::UnboundedSender<NativeDownloadEvent>,
+}
+
 impl NativeDownloadOperation {
     /// The requested digest only identifies a signed release. This method
     /// checks the independent publisher policy before spawning any network work.
@@ -71,9 +77,11 @@ impl NativeDownloadOperation {
             request,
             staging_root,
             file_timeout,
-            events,
-            CancellationToken::new(),
-            Uuid::new_v4(),
+            NativeDownloadControl {
+                id: Uuid::new_v4(),
+                cancellation: CancellationToken::new(),
+                events,
+            },
         )
     }
 
@@ -84,9 +92,7 @@ impl NativeDownloadOperation {
         request: NativeDownloadSelection,
         staging_root: PathBuf,
         file_timeout: Duration,
-        events: mpsc::UnboundedSender<NativeDownloadEvent>,
-        cancellation: CancellationToken,
-        operation_id: Uuid,
+        control: NativeDownloadControl,
     ) -> Result<Self, NativeHttpsError> {
         if !valid_identifier(&request.model_id) {
             return Err(NativeHttpsError::Invalid("invalid model ID"));
@@ -95,7 +101,11 @@ impl NativeDownloadOperation {
         trust.verify(&request.model_id, &digest)?;
         store.verify_download_staging_root(&staging_root)?;
         let transfer = NativeHttpsPackageTransfer::new(file_timeout)?;
-        let id = operation_id;
+        let NativeDownloadControl {
+            id,
+            cancellation,
+            events,
+        } = control;
         let task_cancel = cancellation.clone();
         let task = tokio::spawn(async move {
             let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();

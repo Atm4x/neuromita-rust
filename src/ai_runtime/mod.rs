@@ -532,6 +532,11 @@ struct Activation<'a> {
     check_current: Option<&'a (dyn Fn() -> Result<(), AiRuntimeError> + Send + Sync)>,
 }
 
+pub struct HardwareRecoveryGuard<'a> {
+    pub verify_hardware: &'a (dyn Fn() -> Result<std::fs::File, AiRuntimeError> + Send + Sync),
+    pub check_current: &'a (dyn Fn() -> Result<(), AiRuntimeError> + Send + Sync),
+}
+
 impl AiService {
     pub(crate) fn kind(self) -> &'static str {
         match self {
@@ -953,8 +958,7 @@ impl AiSupervisor {
         composition: &composition::RuntimeComposition,
         models: &[ModelActivation],
         profile: &RuntimeProfile,
-        verify: &(dyn Fn() -> Result<std::fs::File, AiRuntimeError> + Send + Sync),
-        check_current: &(dyn Fn() -> Result<(), AiRuntimeError> + Send + Sync),
+        guard: HardwareRecoveryGuard<'_>,
     ) -> Result<Uuid, AiRuntimeError> {
         if !composition.services().contains(&service)
             || (self.topology == ProcessTopology::Split && composition.services() != [service])
@@ -970,9 +974,9 @@ impl AiSupervisor {
             layers: composition.paths(),
             models,
             profile: Some(profile),
-            verify: Some(verify),
+            verify: Some(guard.verify_hardware),
             expected_failed_generation: Some(expected_generation),
-            check_current: Some(check_current),
+            check_current: Some(guard.check_current),
         })
         .await
         .map_err(|error| match error {

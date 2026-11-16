@@ -282,13 +282,13 @@ fn pinned_archive_on_disk_retains_branch_binary_and_rechecks_every_inventory() {
             .len(),
         1
     );
-    let inventory = inventory_pinned_memory(&empty, &store, &[pin.clone()]).unwrap();
+    let inventory = inventory_pinned_memory(&empty, &store, std::slice::from_ref(&pin)).unwrap();
     assert_eq!(inventory.retained, vec![reference.clone()]);
     assert!(inventory.orphan_candidates.is_empty());
 
     fs::write(&saved, b"valid path, replaced bytes").unwrap();
     assert!(matches!(
-        inventory_pinned_memory(&empty, &store, &[pin.clone()]),
+        inventory_pinned_memory(&empty, &store, std::slice::from_ref(&pin)),
         Err(SessionArchiveError::PinnedArchiveChanged)
     ));
     store.verify(&reference).unwrap();

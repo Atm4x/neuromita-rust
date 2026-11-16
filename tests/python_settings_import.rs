@@ -180,10 +180,7 @@ fn new_target_uses_declared_initial_profile_and_unrelated_fields_are_not_invente
     let applied = repository.import_python(&input).unwrap();
     assert!(applied.backup_path.is_none());
     assert_eq!(repository.load().unwrap().revision, 1);
-    assert_eq!(
-        repository.load().unwrap().settings.interface.hide_private,
-        false
-    );
+    assert!(!repository.load().unwrap().settings.interface.hide_private);
 }
 
 #[test]
@@ -299,7 +296,7 @@ fn unknown_fields_are_rejected_by_default_and_never_overwrite() {
         repo.load().unwrap().settings.interface.language,
         Language::English
     );
-    assert_eq!(fs::read(&applied.backup_path.unwrap()).unwrap(), before);
+    assert_eq!(fs::read(applied.backup_path.unwrap()).unwrap(), before);
 }
 
 #[test]

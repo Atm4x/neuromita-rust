@@ -1968,15 +1968,16 @@ async fn same_branch_queue_refusal_does_not_hide_or_forget_history() {
         test.api.regenerate_same_branch(test.source, test.fence),
         Err(SubmitError::QueueFull)
     ));
-    let owner = test.timeline.lock().unwrap();
-    assert_eq!(owner.anchor(), test.fence.at);
-    assert_eq!(owner.selection(), test.fence.selection);
-    assert!(
-        owner
-            .knows_event_at(CharacterId::Crazy, test.source.accepted_message, None)
-            .unwrap()
-    );
-    drop(owner);
+    {
+        let owner = test.timeline.lock().unwrap();
+        assert_eq!(owner.anchor(), test.fence.at);
+        assert_eq!(owner.selection(), test.fence.selection);
+        assert!(
+            owner
+                .knows_event_at(CharacterId::Crazy, test.source.accepted_message, None)
+                .unwrap()
+        );
+    }
     let _ = test.queue.recv().await;
     let no_preset = fixture(TimelineConfig::Transient, 2, false).await;
     assert!(matches!(

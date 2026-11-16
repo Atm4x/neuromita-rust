@@ -179,27 +179,28 @@ async fn b85_memory_edit_evicts_old_content_without_affecting_other_character() 
     .await
     .unwrap();
     assert_eq!(next.cost.cache_hits, 0);
-    let cache = retriever.cache.lock().unwrap();
-    assert_eq!(cache.entries.len(), 2);
-    assert!(
-        cache
-            .entries
-            .keys()
-            .any(|key| key.character == CharacterId::Crazy && key.content == "private edited")
-    );
-    assert!(
-        cache
-            .entries
-            .keys()
-            .any(|key| key.character == CharacterId::Kind && key.content == "private kind")
-    );
-    assert!(
-        !cache
-            .entries
-            .keys()
-            .any(|key| key.content == "private previous")
-    );
-    drop(cache);
+    {
+        let cache = retriever.cache.lock().unwrap();
+        assert_eq!(cache.entries.len(), 2);
+        assert!(
+            cache
+                .entries
+                .keys()
+                .any(|key| key.character == CharacterId::Crazy && key.content == "private edited")
+        );
+        assert!(
+            cache
+                .entries
+                .keys()
+                .any(|key| key.character == CharacterId::Kind && key.content == "private kind")
+        );
+        assert!(
+            !cache
+                .entries
+                .keys()
+                .any(|key| key.content == "private previous")
+        );
+    }
     assert!(matches!(
         read(
             &retriever,

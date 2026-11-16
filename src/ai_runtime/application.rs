@@ -477,8 +477,10 @@ impl RunningAiApplication {
                 &worker.composition,
                 &worker.models,
                 &selection.selection.profile(),
-                &verify,
-                check_current,
+                super::HardwareRecoveryGuard {
+                    verify_hardware: &verify,
+                    check_current,
+                },
             )
             .await
             .map_err(Into::into)

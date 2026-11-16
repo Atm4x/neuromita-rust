@@ -151,24 +151,22 @@ fn wiki_sections(markdown: &str) -> Result<Vec<WikiSection>, slint::StyledTextFr
         if line.trim_start().starts_with("```") {
             in_code = !in_code;
         }
-        if !in_code {
-            if let Some((next_level, next_title)) = heading(line) {
-                if !title.is_empty() || !body.is_empty() {
-                    flush(&mut sections, &title, &id, level, &body)?;
-                }
-                title = next_title.to_owned();
-                let base = heading_slug(next_title);
-                let count = duplicates.entry(base.clone()).or_default();
-                id = if *count == 0 {
-                    base
-                } else {
-                    format!("{base}-{count}")
-                };
-                *count += 1;
-                level = next_level;
-                body.clear();
-                continue;
+        if !in_code && let Some((next_level, next_title)) = heading(line) {
+            if !title.is_empty() || !body.is_empty() {
+                flush(&mut sections, &title, &id, level, &body)?;
             }
+            title = next_title.to_owned();
+            let base = heading_slug(next_title);
+            let count = duplicates.entry(base.clone()).or_default();
+            id = if *count == 0 {
+                base
+            } else {
+                format!("{base}-{count}")
+            };
+            *count += 1;
+            level = next_level;
+            body.clear();
+            continue;
         }
         body.push_str(line);
         body.push('\n');

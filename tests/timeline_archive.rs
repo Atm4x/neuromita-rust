@@ -246,7 +246,7 @@ fn sqlite_retention_manifest_enumerates_all_canonical_branches() {
     use neuromita::timeline::storage::archive::retention_manifest_sqlite;
     let temp = TestDir::new();
     let assets = TimelineAssetStore::new(temp.path().join("assets"), 1024).unwrap();
-    let mut repository = SqliteTimelineRepository::open(&temp.path().join("timeline.db")).unwrap();
+    let mut repository = SqliteTimelineRepository::open(temp.path().join("timeline.db")).unwrap();
     let (_, _, _, reference, _, _) = build_session(&mut repository, &assets);
     assert_eq!(
         retention_manifest_sqlite(&repository, &[]).unwrap(),
@@ -317,21 +317,21 @@ fn invalid_archive_is_rejected_before_session_publication() {
     let (session, root, fork, _, _, _) = build_session(&mut origin, &assets);
     let archive = export_memory(&origin, session, &assets).unwrap();
     let destination_assets = TimelineAssetStore::new(temp.path().join("target"), 1024).unwrap();
-    let cases: [Box<dyn FnOnce(&mut Value)>; 8] = [
-        Box::new(|x| x["version"] = json!(99)),
-        Box::new(|x| x["unrecognized"] = json!(true)),
-        Box::new(|x| x["created_at_utc"] = json!("2026-01-01T00:00:00+04:00")),
-        Box::new(|x| x["assets"][0]["data_base64"] = json!("eHZj")),
-        Box::new(|x| x["assets"] = json!([])),
-        Box::new(|x| x["branches"][0]["events"][0]["draft"]["id"] = json!(Uuid::new_v4())),
-        Box::new(|x| {
+    let cases: [fn(&mut Value); 8] = [
+        |x| x["version"] = json!(99),
+        |x| x["unrecognized"] = json!(true),
+        |x| x["created_at_utc"] = json!("2026-01-01T00:00:00+04:00"),
+        |x| x["assets"][0]["data_base64"] = json!("eHZj"),
+        |x| x["assets"] = json!([]),
+        |x| x["branches"][0]["events"][0]["draft"]["id"] = json!(Uuid::new_v4()),
+        |x| {
             let first = x["branches"][0]["events"][0].clone();
             x["branches"][0]["events"]
                 .as_array_mut()
                 .unwrap()
                 .push(first);
-        }),
-        Box::new(|x| x["branches"][1]["info"]["checkpoint"] = json!(Uuid::new_v4())),
+        },
+        |x| x["branches"][1]["info"]["checkpoint"] = json!(Uuid::new_v4()),
     ];
     for (number, case) in cases.into_iter().enumerate() {
         let corrupted = bytes_with_change(&archive, case);
@@ -379,15 +379,14 @@ fn sqlite_restore_reopen_and_reexport_match_byte_for_byte() {
     let branch;
     let archive;
     {
-        let mut origin =
-            SqliteTimelineRepository::open(&temp.path().join("origin.sqlite")).unwrap();
+        let mut origin = SqliteTimelineRepository::open(temp.path().join("origin.sqlite")).unwrap();
         (session, root, branch, _, _, _) = build_session(&mut origin, &asset1);
         archive = export_sqlite(&origin, session, &asset1).unwrap();
     }
     let asset2 = TimelineAssetStore::new(temp.path().join("assets2"), 1024).unwrap();
     {
         let mut restored =
-            SqliteTimelineRepository::open(&temp.path().join("restored.sqlite")).unwrap();
+            SqliteTimelineRepository::open(temp.path().join("restored.sqlite")).unwrap();
         assert_eq!(
             import_sqlite(&mut restored, &archive, &asset2).unwrap(),
             session
@@ -395,7 +394,7 @@ fn sqlite_restore_reopen_and_reexport_match_byte_for_byte() {
         assert_eq!(restored.branch(root).unwrap().head_sequence, 2);
         assert_eq!(restored.branch(branch).unwrap().head_sequence, 4);
     }
-    let reopened = SqliteTimelineRepository::open(&temp.path().join("restored.sqlite")).unwrap();
+    let reopened = SqliteTimelineRepository::open(temp.path().join("restored.sqlite")).unwrap();
     assert_eq!(export_sqlite(&reopened, session, &asset2).unwrap(), archive);
 }
 

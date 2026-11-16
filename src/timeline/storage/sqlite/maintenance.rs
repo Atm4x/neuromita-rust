@@ -389,7 +389,7 @@ mod tests {
         conn.exec("PRAGMA foreign_keys = OFF").unwrap();
         conn.write(
             "INSERT INTO timeline_events(branch_id,sequence,fact_json) VALUES(?,?,?)",
-            &[&uuid::Uuid::new_v4().to_string(), &"1", &"{}"],
+            &[&uuid::Uuid::new_v4().to_string(), "1", "{}"],
         )
         .unwrap();
         assert!(matches!(
@@ -421,7 +421,7 @@ mod tests {
         let conn = Connection::open(&db.0).unwrap();
         conn.write(
             "UPDATE timeline_events SET fact_json=? WHERE branch_id=? AND sequence=1",
-            &[&"{}", &branch.0.to_string()],
+            &["{}", &branch.0.to_string()],
         )
         .unwrap();
         assert!(SqliteTimelineRepository::inspect_derived_indexes(&db.0).is_err());

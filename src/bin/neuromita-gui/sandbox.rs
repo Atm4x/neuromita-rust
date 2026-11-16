@@ -22,7 +22,7 @@ use super::{
     runtime::{ChatOrigin, Command, DesktopRuntime, Update},
     view::{
         AppWindow, CharacterCatalog, CharacterOption, ChatRow, ChatStatus, ConversationUi,
-        MemoryUi, SettingsUi,
+        HubInstallPreview, MemoryUi, SettingsUi,
     },
 };
 
@@ -552,6 +552,7 @@ pub(super) fn apply(
     apply_with_pager(window, update, memory_editor, revision, None);
 }
 
+#[cfg(test)]
 pub(super) fn apply_with_pager(
     window: &AppWindow,
     update: Update,
@@ -662,19 +663,16 @@ fn apply_with_catalog(
             stage,
             can_install,
             operation_id,
-        } => {
-            super::ai_hub::install_preview(
-                window,
-                category,
-                id,
-                token,
-                summary,
-                error,
-                stage,
-                can_install,
-                operation_id,
-            );
-        }
+        } => window.set_ai_hub_install_preview(HubInstallPreview {
+            category: category.into(),
+            id: id.into(),
+            token,
+            summary: summary.into(),
+            error: error.into(),
+            stage: stage.into(),
+            can_install,
+            operation_id: operation_id.into(),
+        }),
         Update::NativeModels(snapshot) => super::ai_hub::native_models(window, *snapshot),
         Update::NativeReleaseCatalog(releases, overview) => {
             super::ai_hub::native_release_catalog(window, hub, releases, overview)
@@ -1000,14 +998,13 @@ fn render(window: &AppWindow, snapshot: &ConversationSnapshot, visible: usize) {
     window.set_chat_boredom(format!("{:.1}", snapshot.state.boredom).into());
     window.set_chat_stress(format!("{:.1}", snapshot.state.stress).into());
     window.set_chat_accepted(snapshot.state.accepted_replies.to_string().into());
-    let ongoing = snapshot.requests.requests.iter().filter(|request| {
+    let mut ongoing = snapshot.requests.requests.iter().filter(|request| {
         request.metadata.character_id == snapshot.character && !request.snapshot.state.is_terminal()
     });
     window.set_chat_active(ongoing.clone().count() as i32);
     window.set_chat_active_request_id(
         ongoing
-            .filter(|request| request.snapshot.can_cancel())
-            .last()
+            .rfind(|request| request.snapshot.can_cancel())
             .map(|request| request.metadata.id.to_string())
             .unwrap_or_default()
             .into(),

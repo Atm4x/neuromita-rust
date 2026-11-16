@@ -89,10 +89,9 @@ async fn wait_until_reconciled(
         loop {
             let turn = {
                 let timeline = timeline.lock().unwrap();
-                let turn = timeline
+                timeline
                     .capture_turn(CharacterId::Crazy, None, timeline.anchor())
-                    .unwrap();
-                turn
+                    .unwrap()
             };
             if turn != old && !knowledge.needs_authoritative_refresh(CharacterId::Crazy, turn) {
                 break;

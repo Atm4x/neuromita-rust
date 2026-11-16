@@ -19,10 +19,11 @@ use crate::{
     knowledge::{
         KnowledgeRetrieval,
         document_generation::select_for_generation as select_document_generation,
-        generation_fusion::select_lexical_generation,
+        generation_fusion::{GenerationRetrieval, select_lexical_generation},
         history_generation::render_archived_history_evidence,
         history_retrieval::{
-            HistorySearchConfig, search_archived_history, search_archived_history_fts,
+            HistorySearchConfig, SemanticHistorySearchConfig, search_archived_history,
+            search_archived_history_fts,
         },
         history_window::HistoryWindow,
         retrieval_fusion::{FusionMode, RetrievalMethod},
@@ -299,29 +300,33 @@ impl MessageHandler {
                         &context.view, focus, usize::from(history_policy.active_messages),
                     );
                     let history_query = query.chars().take(512).collect::<String>();
-                    let config = HistorySearchConfig {
-                        limit: if joint_lexical { 32 } else { usize::from(history_policy.max_results) },
+                    let bounds = HistorySearchConfig {
+                        limit: usize::from(history_policy.max_results),
                         max_content_chars: usize::from(history_policy.max_content_chars),
+                    };
+                    let retrieval = GenerationRetrieval {
+                        character: context.character_id,
+                        memories: &context.memories,
+                        islands: &context.memory_islands,
+                        relations: &context.memory_relations,
+                        view: &context.view,
+                        window: &window,
+                        query: &history_query,
+                        bounds,
                     };
                     if joint_semantic {
                         selected = self.knowledge.select_joint_semantic_generation(
-                            context.character_id,
-                            &context.memories,
-                            &context.memory_islands,
-                            &context.memory_relations,
-                            &context.view,
-                            &window,
-                            &history_query,
-                            HistorySearchConfig {
-                                limit: usize::from(history_policy.max_results),
-                                max_content_chars: usize::from(history_policy.max_content_chars),
-                            },
+                            retrieval,
                             history_policy.mode == HistoryGenerationMode::Fusion,
                             context.turn,
                         ).await.map_err(|error| GenerationError::Response(
                             format!("combined semantic generation evidence rejected: {error}")
                         ))?;
                     } else {
+                        let config = HistorySearchConfig {
+                            limit: if joint_lexical { 32 } else { bounds.limit },
+                            ..bounds
+                        };
                         let history_result = match history_policy.mode {
                             HistoryGenerationMode::Off => unreachable!(),
                             HistoryGenerationMode::Keyword => {
@@ -330,16 +335,19 @@ impl MessageHandler {
                             HistoryGenerationMode::Fts => {
                                 search_archived_history_fts(context.character_id, &context.view, &window, &history_query, config)
                             }
-                            HistoryGenerationMode::Vector => {
+                            HistoryGenerationMode::Vector | HistoryGenerationMode::Fusion => {
                                 self.knowledge.search_archived_history_semantic_at(
                                     context.character_id, &context.view, &window, &history_query,
-                                    config, FusionMode::VectorOnly, None, context.turn,
-                                ).await
-                            }
-                            HistoryGenerationMode::Fusion => {
-                                self.knowledge.search_archived_history_semantic_at(
-                                    context.character_id, &context.view, &window, &history_query,
-                                    config, FusionMode::Union, None, context.turn,
+                                    SemanticHistorySearchConfig {
+                                        bounds: config,
+                                        mode: if history_policy.mode == HistoryGenerationMode::Vector {
+                                            FusionMode::VectorOnly
+                                        } else {
+                                            FusionMode::Union
+                                        },
+                                        minimum_cosine: None,
+                                    },
+                                    context.turn,
                                 ).await
                             }
                         }.map_err(|error| GenerationError::Response(format!(
@@ -352,19 +360,9 @@ impl MessageHandler {
                                 RetrievalMethod::Keyword
                             };
                             selected = select_lexical_generation(
-                                context.character_id,
-                                &context.memories,
-                                &context.memory_islands,
-                                &context.memory_relations,
-                                &context.view,
-                                &window,
+                                retrieval,
                                 &history_result,
                                 method,
-                                &history_query,
-                                HistorySearchConfig {
-                                    limit: usize::from(history_policy.max_results),
-                                    max_content_chars: usize::from(history_policy.max_content_chars),
-                                },
                             ).map_err(|error| GenerationError::Response(format!(
                                 "combined generation evidence rejected: {error}"
                             )))?;

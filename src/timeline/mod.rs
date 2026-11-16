@@ -1748,15 +1748,7 @@ impl SessionTimeline {
         #[cfg(feature = "sqlite-system")]
         let selection = if let Some(repository) = &mut self.selection_repository {
             match (player_recipient, admission) {
-                (Some(character), Some(receipt)) => repository.fork_and_select_regenerate_input(
-                    self.branch,
-                    expected_parent_head,
-                    anchor,
-                    character,
-                    child,
-                    expected,
-                    receipt,
-                )?,
+                (Some(_), Some(receipt)) => repository.fork_and_select_regenerate_input(receipt)?,
                 (Some(character), None) => repository.fork_and_select_player_input(
                     self.branch,
                     expected_parent_head,

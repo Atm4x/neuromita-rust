@@ -2,7 +2,7 @@
 
 use std::{
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Output},
 };
 
@@ -106,7 +106,7 @@ impl Fixture {
             .unwrap()
     }
 
-    fn restore_to(&self, output: &PathBuf) -> Output {
+    fn restore_to(&self, output: &Path) -> Output {
         self.command(&[
             "restore",
             "--snapshot",

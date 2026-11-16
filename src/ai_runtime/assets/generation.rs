@@ -444,7 +444,7 @@ mod tests {
             &marker,
         );
         assert!(matches!(
-            run_install_hook(command, &[revision.clone()], Duration::from_secs(5)).await,
+            run_install_hook(command, std::slice::from_ref(&revision), Duration::from_secs(5)).await,
             Err(ModelGenerationError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock
         ));
         assert!(

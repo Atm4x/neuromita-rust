@@ -93,7 +93,7 @@ fn revisioned_forget_reveal_is_not_retroactive_and_does_not_leak() {
             .any(|known| known.fact.draft.id == e2 && known.learned_at == 5)
     );
     assert!(after.iter().any(|known| known.fact.draft.id == reveal));
-    assert_eq!(message_ids(&timeline, crazy, 3).contains(&e2), false);
+    assert!(!message_ids(&timeline, crazy, 3).contains(&e2));
     assert!(message_ids(&timeline, crazy, 5).contains(&e2));
     assert!(message_ids(&timeline, kind, 5).contains(&e2));
     assert_eq!(
@@ -534,10 +534,7 @@ fn same_branch_controls_are_atomic_and_preserve_other_mitas() {
             )
             .unwrap()
     );
-    assert_eq!(
-        message_ids(&timeline, CharacterId::Crazy, head).contains(&initial.accepted_message),
-        true
-    );
+    assert!(message_ids(&timeline, CharacterId::Crazy, head).contains(&initial.accepted_message));
     assert_eq!(
         timeline.store.world(timeline.branch).unwrap().len(),
         old.len() + 2

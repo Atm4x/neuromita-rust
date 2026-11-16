@@ -1083,7 +1083,7 @@ fn python_verified_archive_imports_into_sqlite_and_survives_reopen() {
     let root = std::env::temp_dir().join(format!("nm-python-b31-sqlite-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&root).unwrap();
     let path = root.join("timeline.sqlite");
-    let store = TimelineAssetStore::new(&root.join("assets"), 16 * 1024 * 1024).unwrap();
+    let store = TimelineAssetStore::new(root.join("assets"), 16 * 1024 * 1024).unwrap();
     let session;
     let native_archive;
     {
