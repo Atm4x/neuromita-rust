@@ -179,6 +179,10 @@
     "source": "Песочница / Sandbox",
     "translation": "Sandbox"
   },
+  "page.ai-hub.title": {
+    "source": "AI Hub",
+    "translation": "AI Hub"
+  },
   "preview.action.unavailable": {
     "source": "Макет интерфейса: «{action}» пока не подключено.",
     "translation": "UI preview: {action} is not connected yet."
