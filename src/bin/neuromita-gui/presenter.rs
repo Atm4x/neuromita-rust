@@ -20,7 +20,7 @@ impl Page {
             Self::Home => i18n("page.home.title", "Главная"),
             Self::Settings => i18n("page.settings.title", "Настройки"),
             Self::Sandbox => i18n("page.sandbox.title", "Песочница / Sandbox"),
-            Self::AiHub => i18n("page.ai-hub.title", "AI Hub"),
+            Self::AiHub => i18n("page.ai-hub.title", "Каталог моделей AI Hub"),
             Self::Releases => i18n("page.releases.title", "Релизы NeuroMita"),
             Self::Gallery => i18n("page.gallery.title", "Галерея"),
             Self::Wiki => i18n("page.wiki.title", "Вики"),
