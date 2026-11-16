@@ -1264,6 +1264,7 @@ impl CharacterHandler {
             .inspect_context_at(self.character.id, at)
             .map_err(CharacterError::Internal)?;
         Ok(CharacterView {
+            read_version: captured.read_version,
             character_id: self.character.id,
             description: Arc::clone(&self.character.description),
             prompt: Arc::clone(&self.character.prompt),

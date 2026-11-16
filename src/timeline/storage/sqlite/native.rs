@@ -120,4 +120,28 @@ impl Connection {
             .map_err(|error| storage(error.to_string()))?;
         Ok(())
     }
+
+    pub(super) fn count_matching_text(
+        &self,
+        sql: &str,
+        params: &[&str],
+        matches: impl Fn(&str) -> bool,
+    ) -> Result<u64, TimelineError> {
+        let mut statement = self
+            .0
+            .prepare(sql)
+            .map_err(|error| storage(error.to_string()))?;
+        let mut rows = statement
+            .query(params_from_iter(params.iter()))
+            .map_err(|error| storage(error.to_string()))?;
+        let mut count = 0;
+        while let Some(row) = rows.next().map_err(|error| storage(error.to_string()))? {
+            let value = row
+                .get_ref(0)
+                .and_then(|value| value.as_str().map_err(|_| rusqlite::Error::InvalidQuery))
+                .map_err(|error| storage(error.to_string()))?;
+            count += u64::from(matches(value));
+        }
+        Ok(count)
+    }
 }

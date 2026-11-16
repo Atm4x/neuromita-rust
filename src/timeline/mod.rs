@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
 use tokio::sync::watch;
 
@@ -14,6 +14,7 @@ use crate::{
 pub use crate::identity::EventId;
 #[cfg(test)]
 mod context_read_tests;
+mod context_summary;
 pub mod conversation;
 pub mod domain;
 pub mod file_attachments;
@@ -53,6 +54,8 @@ pub mod selection;
 pub mod storage;
 pub mod view;
 
+pub use context_summary::ContextReadVersion;
+use context_summary::{ContextSummary, ContextSummaryCache};
 use conversation::{ConversationAudience, ConversationMessage, ConversationSpeaker};
 #[cfg(all(test, feature = "sqlite-system"))]
 use domain::{CharacterBehavior, MemoryChange};
@@ -194,6 +197,7 @@ pub(crate) struct GeneratedReply {
 }
 
 pub(crate) struct TimelineContextSnapshot {
+    pub(crate) read_version: ContextReadVersion,
     pub(crate) state: crate::character::CharacterState,
     pub(crate) variables: std::collections::BTreeMap<String, serde_json::Value>,
     pub(crate) working_state: CharacterWorkingState,
@@ -257,6 +261,7 @@ pub(crate) struct SessionTimeline {
     selection_updates: watch::Sender<TimelineSelection>,
     context_updates: HashMap<CharacterId, watch::Sender<u64>>,
     memory_updates: HashMap<CharacterId, watch::Sender<u64>>,
+    context_summaries: RefCell<ContextSummaryCache>,
     #[cfg(feature = "sqlite-system")]
     selection_repository: Option<storage::SqliteTimelineRepository>,
 }
@@ -291,6 +296,7 @@ impl SessionTimeline {
             selection_updates: watch::channel(workspace.selected().expect("selection set")).0,
             context_updates,
             memory_updates: Self::memory_channels(),
+            context_summaries: RefCell::new(ContextSummaryCache::default()),
             workspace,
             #[cfg(feature = "sqlite-system")]
             selection_repository: None,
@@ -344,6 +350,7 @@ impl SessionTimeline {
                     selection_updates: watch::channel(selection).0,
                     context_updates,
                     memory_updates: Self::memory_channels(),
+                    context_summaries: RefCell::new(ContextSummaryCache::default()),
                     selection_repository: Some(selection_repository),
                 })
             }
@@ -1917,21 +1924,7 @@ impl SessionTimeline {
                 "generation context belongs to another timeline branch".into(),
             ));
         }
-        if matches!(position, ContextPosition::At(_)) {
-            let captured_epoch = self
-                .store
-                .context_epoch_at(self.branch, character, Some(anchor.through))
-                .map_err(|error| ContextCaptureError::Invalid(error.to_string()))?;
-            let current_epoch = self
-                .store
-                .context_epoch(self.branch, character)
-                .map_err(|error| ContextCaptureError::Invalid(error.to_string()))?;
-            if captured_epoch != current_epoch {
-                return Err(ContextCaptureError::StaleKnowledge);
-            }
-        }
-        self.inspect_context_at(character, anchor)
-            .map_err(ContextCaptureError::Invalid)
+        self.read_context(character, anchor, true)
     }
 
     /// Read a saved branch without selecting it or changing pending generations.
@@ -1940,8 +1933,67 @@ impl SessionTimeline {
         character: CharacterId,
         at: ContextAnchor,
     ) -> Result<TimelineContextSnapshot, String> {
-        let facts = self.read_prefix(at).map_err(|error| error.to_string())?;
-        let known = domain::character_view(&facts, character);
+        self.read_context(character, at, false)
+            .map_err(|error| error.to_string())
+    }
+
+    fn read_context(
+        &self,
+        character: CharacterId,
+        at: ContextAnchor,
+        require_current_epoch: bool,
+    ) -> Result<TimelineContextSnapshot, ContextCaptureError> {
+        let invalid =
+            |error: domain::TimelineError| ContextCaptureError::Invalid(error.to_string());
+        let branch = self.inspection_branch(at).map_err(invalid)?;
+        let mut cache = self.context_summaries.borrow_mut();
+        #[cfg(feature = "sqlite-system")]
+        let indexed = self
+            .selection_repository
+            .as_ref()
+            .map(|repository| {
+                repository.read_context(character, at, require_current_epoch, &mut cache)
+            })
+            .transpose()
+            .map_err(invalid)?;
+        #[cfg(not(feature = "sqlite-system"))]
+        let indexed = None;
+        let (read_version, summary, known) = if let Some(indexed) = indexed {
+            indexed.ok_or(ContextCaptureError::StaleKnowledge)?
+        } else {
+            let epoch = self
+                .store
+                .context_epoch_at(branch, character, Some(at.through))
+                .map_err(invalid)?;
+            if require_current_epoch
+                && epoch
+                    != self
+                        .store
+                        .context_epoch(branch, character)
+                        .map_err(invalid)?
+            {
+                return Err(ContextCaptureError::StaleKnowledge);
+            }
+            let read_version = ContextReadVersion::new(
+                at,
+                character,
+                self.store.branch(branch).map_err(invalid)?.head_sequence,
+                epoch,
+                self.selection(),
+                None,
+            );
+            let facts = self.read_prefix(at).map_err(invalid)?;
+            let summary = cache
+                .get_or_project(read_version, || {
+                    ContextSummary::from_facts(character, at, &facts)
+                })
+                .map_err(invalid)?;
+            (
+                read_version,
+                summary,
+                domain::character_view(&facts, character),
+            )
+        };
         let history = HistoryView {
             at,
             events: known
@@ -1949,18 +2001,17 @@ impl SessionTimeline {
                 .filter_map(|item| legacy_event(&item.fact, character))
                 .collect(),
         };
-        let view = MitaView::from_known(BranchId(at.branch_id), at.through, character, &known);
-        let state = crate::character::projection::character_state(&facts, character)
-            .map_err(|error| error.to_string())?;
-        let working_state =
-            crate::character::projection::character_working_state_at(&facts, character)
-                .map_err(|error| error.to_string())?;
-        let memories = crate::character::projection::character_memories_at(&facts, character)
-            .map_err(|error| error.to_string())?;
-        let variables = crate::character::projection::character_variables_at(&facts, character)
-            .map_err(|error| error.to_string())?;
-        let (game, game_token) = Self::game_from_facts(character, at, &facts)?;
+        let view = MitaView::from_known(branch, at.through, character, &known);
+        let ContextSummary {
+            state,
+            working_state,
+            variables,
+            memories,
+            game,
+            game_token,
+        } = summary;
         Ok(TimelineContextSnapshot {
+            read_version,
             variables,
             game,
             game_token,

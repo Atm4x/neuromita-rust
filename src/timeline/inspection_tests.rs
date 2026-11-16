@@ -69,6 +69,17 @@ fn inspection_contract(timeline: &mut SessionTimeline) -> ContextAnchor {
         .inspect_context_at(CharacterId::Crazy, fork_at)
         .unwrap();
     assert_eq!(fork.history.at, fork_at);
+    assert_eq!(fork.read_version.anchor, fork_at);
+    assert_eq!(fork.read_version.character, CharacterId::Crazy);
+    assert_eq!(fork.read_version.branch_head, 5);
+    assert_eq!(fork.state.accepted_replies, 1);
+    assert_eq!(
+        timeline
+            .inspect_context_at(CharacterId::Crazy, fork_at)
+            .unwrap()
+            .read_version,
+        fork.read_version
+    );
     assert_eq!(fork.view.branch, alternative);
     assert_eq!(fork.view.through, 5);
     assert_eq!(fork.view.count(), 3);
@@ -80,6 +91,8 @@ fn inspection_contract(timeline: &mut SessionTimeline) -> ContextAnchor {
         .inspect_context_at(CharacterId::Kind, fork_at)
         .unwrap();
     assert_eq!(other_character.view.count(), 0);
+    assert_eq!(other_character.state.accepted_replies, 0);
+    assert_ne!(other_character.read_version, fork.read_version);
     assert_eq!(
         timeline.accepted_replies_at(CharacterId::Kind, fork_at),
         Ok(0)
@@ -115,6 +128,11 @@ fn inspection_contract(timeline: &mut SessionTimeline) -> ContextAnchor {
         )
         .unwrap();
     assert_eq!(forgotten.view.count(), 0);
+    assert_eq!(forgotten.state.accepted_replies, 1);
+    assert_ne!(
+        forgotten.read_version.knowledge_epoch,
+        fork.read_version.knowledge_epoch
+    );
     assert_eq!(fork.view.count(), 3);
     assert_eq!(
         timeline.accepted_replies_at(
@@ -209,12 +227,78 @@ fn saved_branch_remains_readable_after_sqlite_reopen() {
         .inspect_context_at(CharacterId::Crazy, fork_at)
         .unwrap();
     assert_eq!(snapshot.view.messages()[2].content, "fork-only");
+    assert!(snapshot.read_version.storage_revision.is_some());
     assert_eq!(
         reopened.accepted_replies_at(CharacterId::Crazy, fork_at),
         Ok(1)
     );
     assert_eq!(reopened.selection().branch_id, root);
     drop(reopened);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn context_summary_observes_external_effects_without_exposing_them_to_another_character() {
+    let path =
+        std::env::temp_dir().join(format!("neuromita-context-summary-{}.db", Uuid::new_v4()));
+    let root = BranchId::new();
+    let mut timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: path.clone(),
+        session: SessionId::new(),
+        root,
+    })
+    .unwrap();
+    timeline
+        .publish_player_message(CharacterId::Crazy, EventId::new(), Arc::from("old"))
+        .unwrap();
+    let historic = timeline.anchor();
+    let old = timeline
+        .inspect_context_at(CharacterId::Crazy, historic)
+        .unwrap();
+    let mut external = storage::SqliteTimelineRepository::open(&path).unwrap();
+    let mut change = EventDraft::new(EventKind::CharacterStateChanged);
+    change.actor = Some(CharacterId::Crazy.to_string());
+    change.observers.insert(CharacterId::Crazy);
+    change.payload.insert(
+        "state".into(),
+        json!({"attitude": 84.0, "boredom": 10.0, "stress": 5.0}),
+    );
+    external
+        .append(
+            root,
+            historic.through,
+            "context-test:external-effect",
+            json!({}),
+            vec![change],
+        )
+        .unwrap();
+    let at = timeline.anchor();
+    let next = timeline.inspect_context_at(CharacterId::Crazy, at).unwrap();
+    assert!(next.read_version.storage_revision > old.read_version.storage_revision);
+    assert_eq!(next.state.attitude, 84.0);
+    assert_eq!(
+        timeline
+            .inspect_context_at(CharacterId::Kind, at)
+            .unwrap()
+            .state
+            .attitude,
+        60.0
+    );
+    let past = timeline
+        .inspect_context_at(CharacterId::Crazy, historic)
+        .unwrap();
+    assert_eq!(past.state.attitude, old.state.attitude);
+    assert_eq!(past.read_version.anchor, old.read_version.anchor);
+    assert_eq!(
+        past.read_version.storage_revision,
+        next.read_version.storage_revision
+    );
+    assert_ne!(past.read_version.branch_head, old.read_version.branch_head);
+    drop(external);
+    drop(timeline);
     for suffix in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
     }
