@@ -18,8 +18,8 @@ use super::{
     },
     update_check::{NativeUpdateChecker, NativeUpdateCompletion},
     view::{
-        AppWindow, ComponentCard, GuideContentsEntry, GuideFocusTarget, GuideSectionEntry, I18n,
-        LauncherMenuAction, LocaleOption, PageId, ReleaseItem, SettingsUi,
+        AppWindow, CaptureUi, ComponentCard, GuideContentsEntry, GuideFocusTarget,
+        GuideSectionEntry, I18n, LauncherMenuAction, LocaleOption, PageId, ReleaseItem, SettingsUi,
     },
     voice::VoicePreviewMode,
 };
@@ -482,6 +482,14 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
     let handler = dispatch.clone();
     let nav_window = window.as_weak();
     window.on_navigate(move |page| {
+        if page != PageId::Sandbox
+            && let Some(window) = nav_window.upgrade()
+            && window.global::<CaptureUi>().get_open()
+        {
+            let capture = window.global::<CaptureUi>();
+            capture.invoke_discard();
+            capture.set_open(false);
+        }
         handler(ShellCommand::Navigate(from_view(page)));
         if page == PageId::Releases
             && let Some(window) = nav_window.upgrade()

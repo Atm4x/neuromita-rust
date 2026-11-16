@@ -161,6 +161,7 @@ pub enum Command {
     Send(ChatOrigin, String),
     DraftChanged(ChatOrigin, String),
     AttachFile(ChatOrigin, String, String),
+    Capture(ChatOrigin, super::capture::Action),
     Cancel(ChatOrigin, RequestId),
     Retry(ChatOrigin, RequestId),
     Refresh,
@@ -283,6 +284,7 @@ pub enum Update {
     ),
     Sent(ChatOrigin, String),
     FileAttached(ChatOrigin, String, String),
+    VideoCapture(super::capture::View),
     Error(String),
     ChatError(ChatOrigin, String),
 }
@@ -432,6 +434,7 @@ async fn start(
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| directory.join("Prompts"));
     let mut config = config.with_prompt_catalog(neuromita::prompts::PromptCatalog::new(root));
+    config.video_capture = neuromita::video_capture::VideoCapture::for_desktop(directory);
     config.game_link = Some(neuromita::game_link::GameLinkConfig::new(
         "127.0.0.1:12345"
             .parse()
@@ -618,6 +621,8 @@ async fn observe(
     let mut releases = administration.releases.observe();
     let _ = administration.releases.refresh();
     let presenter = &administration.conversation;
+    let mut media = super::capture::State::new(presenter.clone());
+    publish(Update::VideoCapture(media.view()));
     let mut connections = administration.connections.observe();
     let mut memories = MemoryWatch::start(administration, CharacterId::Crazy)?;
     let (recall_updates, mut recall_results) = mpsc::unbounded_channel();
@@ -731,11 +736,18 @@ async fn observe(
                 character = value.character;
                 selection_revision = value.revision;
                 pending = None;
+                media.clear();
+                publish(Update::VideoCapture(media.view()));
                 publish(Update::Selection(value));
                 publish(Update::Confirmation(ChatOrigin {
                     character, selection_revision,
                 }, None));
             },
+            completed = media.next() => {
+                media.complete(completed);
+                publish(Update::VideoCapture(media.view()));
+                refresh_views = false;
+            }
             command = receive.recv() => match command {
                 Some(command @ Command::SaveCharacterProfile(character, ..)) |
                 Some(command @ Command::RetryCharacterProfileSave(character)) => {
@@ -1175,6 +1187,21 @@ async fn observe(
                         Err(error) => publish(Update::ChatError(origin, error)),
                     }
                 },
+                Some(Command::Capture(origin, action)) => {
+                    if chat_fence::accepts(
+                        origin.character.index() as i32,
+                        origin.selection_revision,
+                        character.index() as i32,
+                        selection_revision,
+                    ) {
+                        if let Some(text) = media.action(origin, action) {
+                            publish(Update::Sent(origin, text));
+                        } else {
+                            refresh_views = false;
+                        }
+                        publish(Update::VideoCapture(media.view()));
+                    }
+                },
                 Some(Command::Cancel(origin, id)) => {
                     if !chat_fence::accepts(
                         origin.character.index() as i32,
@@ -1259,7 +1286,11 @@ async fn observe(
             },
             result = settings.changed() => { result.map_err(|_| "Settings observation closed")?; },
             result = presets.changed() => { result.map_err(|_| "Preset observation closed")?; },
-            result = selection.changed() => { result.map_err(|_| "Timeline observation closed")?; },
+            result = selection.changed() => {
+                result.map_err(|_| "Timeline observation closed")?;
+                media.clear();
+                publish(Update::VideoCapture(media.view()));
+            },
             result = async {
                 match runtime_status.as_mut() {
                     Some(receiver) => receiver.changed().await,

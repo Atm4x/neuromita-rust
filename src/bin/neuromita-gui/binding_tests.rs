@@ -666,6 +666,11 @@ fn chat_feedback_and_asr_callbacks_are_scoped_to_selection_revision() {
     assert_eq!(window.get_chat_attachment_path(), "");
     let cancel_id = uuid::Uuid::new_v4();
     window.invoke_chat_cancel(cancel_id.to_string().into());
+    let capture = window.global::<super::super::view::CaptureUi>();
+    capture.invoke_grab_screen(3);
+    capture.invoke_grab_camera(1, 1);
+    capture.invoke_save("chosen photo".into());
+    capture.invoke_discard();
     let recorded = commands.borrow();
     assert!(matches!(&recorded[0], Command::AttachFile(origin, _, _) if *origin == first));
     assert!(
@@ -679,6 +684,23 @@ fn chat_feedback_and_asr_callbacks_are_scoped_to_selection_revision() {
     );
     assert!(
         matches!(&recorded[4], Command::Cancel(origin, id) if origin.character == CharacterId::Crazy && origin.selection_revision == 2 && id.0 == cancel_id)
+    );
+    use super::super::capture::Action;
+    let current = ChatOrigin {
+        character: CharacterId::Crazy,
+        selection_revision: 2,
+    };
+    assert!(
+        matches!(&recorded[5], Command::Capture(origin, Action::Screen(3)) if *origin == current)
+    );
+    assert!(
+        matches!(&recorded[6], Command::Capture(origin, Action::Camera(1, 1)) if *origin == current)
+    );
+    assert!(
+        matches!(&recorded[7], Command::Capture(origin, Action::Save(text)) if *origin == current && text == "chosen photo")
+    );
+    assert!(
+        matches!(&recorded[8], Command::Capture(origin, Action::Discard) if *origin == current)
     );
     window.hide().unwrap();
 }

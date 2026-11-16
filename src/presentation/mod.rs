@@ -50,8 +50,8 @@ pub use chat::{ChatModel, ChatPresenter, PresenterError, RequestView};
 pub use chess::ChessAction;
 pub use connections::ConnectionsPresenter;
 pub use conversation::{
-    ConversationChange, ConversationChangePreview, ConversationError, ConversationHistoryPage,
-    ConversationPresenter, ConversationSnapshot, RegeneratePreview,
+    CapturePreview, ConversationChange, ConversationChangePreview, ConversationError,
+    ConversationHistoryPage, ConversationPresenter, ConversationSnapshot, RegeneratePreview,
 };
 pub(crate) use ipc::{PresenterAction, PresenterActionResult, PresenterProbe, PresenterSurface};
 pub(crate) use ipc_admin::{PresenterRead, PresenterWrite};

@@ -1,5 +1,6 @@
 import { CharacterCatalog } from "../characters/catalog.slint";
 import { ConversationUi } from "admin.slint";
+import { CapturePanel, CaptureUi } from "capture.slint";
 import { ScrollView } from "std-widgets.slint";
 import { SandboxTheme, Fa } from "theme.slint";
 import { Caption, Glyph, GhostButton, Centered, Field } from "controls.slint";
@@ -45,7 +46,8 @@ component ChatComposer inherits VerticalLayout {
     callback send(string);
     callback draft-changed(string);
     callback attach(string, string);
-    height: root.attachment-open ? 171px : 84px; spacing: 4px; padding: 0px;
+    height: 84px + (root.attachment-open ? 87px : 0px) + (CaptureUi.open ? (CaptureUi.frames.length > 0 ? 158px : 84px) : 0px);
+    spacing: 4px; padding: 0px;
     Rectangle {
         height: 58px; border-radius: 20px; border-width: 1px;
         border-color: SandboxTheme.border; background: SandboxTheme.input;
@@ -86,9 +88,14 @@ component ChatComposer inherits VerticalLayout {
                 }
             }
             Centered { width: 32px; ActionSurface {
-                width: 32px; height: 32px; label: I18n.i18n("sandbox.screenshot", "Сделать скриншот экрана");
-                enabled: false; border-radius: 9px;
-                Glyph { text: Fa.camera; color: SandboxTheme.muted; width: parent.width; height: parent.height; font-size: 12px; }
+                width: 32px; height: 32px; label: I18n.i18n("sandbox.capture.open", "Захват экрана и камеры");
+                enabled: root.storage-connected && !root.sending; border-radius: 9px;
+                activated => {
+                    CaptureUi.open = !CaptureUi.open;
+                    if CaptureUi.open && CaptureUi.available { CaptureUi.list-cameras(); }
+                    else { CaptureUi.discard(); }
+                }
+                Glyph { text: Fa.camera; color: parent.enabled ? SandboxTheme.icon : SandboxTheme.muted; width: parent.width; height: parent.height; font-size: 12px; }
             } }
             Centered { width: 42px; ActionSurface {
                 width: 42px; height: 42px;
@@ -154,6 +161,7 @@ component ChatComposer inherits VerticalLayout {
             }
         }
     }
+    if CaptureUi.open: CapturePanel { draft: root.draft; }
     HorizontalLayout {
         padding-left: 6px; padding-right: 8px; spacing: 4px; height: 17px;
         if root.generation-active: HorizontalLayout {

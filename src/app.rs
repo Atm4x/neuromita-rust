@@ -142,6 +142,7 @@ pub struct ApplicationConfig {
     settings_instance: Option<Arc<SettingsInstanceLease>>,
     pub timeline: TimelineConfig,
     pub timeline_assets: Option<Arc<crate::timeline::storage::assets::TimelineAssetStore>>,
+    pub video_capture: Option<crate::video_capture::VideoCapture>,
     pub server: ServerConfig,
     pub game_link: Option<GameLinkConfig>,
     /// Optional, explicitly scoped game Beat Sync; disabled by default.
@@ -176,6 +177,7 @@ impl ApplicationConfig {
             game_beats: None,
             timeline: TimelineConfig::Transient,
             timeline_assets: None,
+            video_capture: None,
             presets,
             prompts: None,
             generator,
@@ -928,6 +930,7 @@ impl ApplicationLifecycle {
             settings_instance,
             timeline,
             timeline_assets,
+            video_capture,
             server,
             game_link,
             game_beats,
@@ -1621,7 +1624,8 @@ impl ApplicationLifecycle {
             Arc::clone(&bindings.settings),
             Arc::clone(&presets),
         )
-        .with_attachment_store(timeline_assets.clone());
+        .with_attachment_store(timeline_assets.clone())
+        .with_video_capture(video_capture);
         let presets_presenter = PresetsPresenter::new(Arc::clone(&presets));
         let graph_presenter =
             crate::presentation::GraphMaintenancePresenter::new(owner.server_stop.clone());

@@ -1,0 +1,97 @@
+import { ComboBox } from "std-widgets.slint";
+import { Caption, GhostButton } from "controls.slint";
+import { SandboxTheme } from "theme.slint";
+import { I18n } from "../i18n.slint";
+
+export global CaptureUi {
+    in-out property <bool> open;
+    in property <bool> available;
+    in property <bool> busy;
+    in property <[string]> cameras;
+    in-out property <int> camera-index: -1;
+    in property <[image]> frames;
+    in property <string> status;
+    callback list-cameras();
+    callback grab-screen(int);
+    callback grab-camera(int, int);
+    callback discard();
+    callback save(string);
+}
+
+export component CapturePanel inherits Rectangle {
+    in property <string> draft;
+    private property <bool> burst;
+    height: CaptureUi.frames.length > 0 ? 154px : 80px;
+    border-radius: 10px;
+    background: #0e101fdc;
+    border-width: 1px;
+    border-color: SandboxTheme.border;
+    VerticalLayout {
+        padding: 8px;
+        spacing: 6px;
+        HorizontalLayout {
+            height: 30px;
+            spacing: 6px;
+            GhostButton {
+                text: I18n.i18n("sandbox.capture.screen-now", "Снимок экрана");
+                enabled: CaptureUi.available;
+                activated => { CaptureUi.grab-screen(root.burst ? 3 : 1); }
+            }
+            ComboBox {
+                horizontal-stretch: 1;
+                min-width: 110px;
+                model: CaptureUi.cameras;
+                current-index <=> CaptureUi.camera-index;
+                enabled: CaptureUi.cameras.length > 0;
+                selected(name) => { CaptureUi.discard(); }
+            }
+            GhostButton {
+                text: I18n.i18n("sandbox.capture.devices", "Камеры");
+                enabled: CaptureUi.available && !CaptureUi.busy;
+                activated => { CaptureUi.list-cameras(); }
+            }
+            GhostButton {
+                text: I18n.i18n("sandbox.capture.camera-now", "Снять с камеры");
+                enabled: CaptureUi.available && CaptureUi.camera-index >= 0;
+                activated => { CaptureUi.grab-camera(CaptureUi.camera-index, root.burst ? 3 : 1); }
+            }
+        }
+        if CaptureUi.frames.length > 0: HorizontalLayout {
+            height: 68px;
+            spacing: 5px;
+            alignment: start;
+            for frame in CaptureUi.frames: Image {
+                width: 106px;
+                source: frame;
+                image-fit: contain;
+            }
+        }
+        HorizontalLayout {
+            height: 28px;
+            spacing: 6px;
+            Caption {
+                horizontal-stretch: 1;
+                text: CaptureUi.status != "" ? CaptureUi.status
+                    : !CaptureUi.available ? I18n.i18n("sandbox.capture.ffmpeg", "Нужен FFmpeg с поддержкой захвата Windows")
+                    : CaptureUi.busy ? I18n.i18n("sandbox.capture.busy", "Захват…")
+                    : CaptureUi.cameras.length == 0 ? I18n.i18n("sandbox.capture.no-cameras", "Нет доступных камер")
+                    : "";
+                color: SandboxTheme.muted;
+                overflow: elide;
+            }
+            GhostButton {
+                text: root.burst ? I18n.i18n("sandbox.capture.three", "3 кадра") : I18n.i18n("sandbox.capture.one", "1 кадр");
+                enabled: CaptureUi.available && !CaptureUi.busy;
+                activated => { root.burst = !root.burst; }
+            }
+            if CaptureUi.frames.length > 0: GhostButton {
+                text: I18n.i18n("sandbox.attachment.save", "В историю");
+                activated => { CaptureUi.save(root.draft); }
+            }
+            GhostButton {
+                text: I18n.i18n("sandbox.capture.close", "Закрыть");
+                activated => { CaptureUi.discard(); CaptureUi.open = false; }
+            }
+        }
+    }
+}

@@ -21,8 +21,8 @@ use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use super::{
     runtime::{ChatOrigin, Command, DesktopRuntime, Update},
     view::{
-        AppWindow, CharacterCatalog, CharacterOption, ChatRow, ChatStatus, ConversationUi,
-        HubInstallPreview, MemoryUi, SettingsUi,
+        AppWindow, CaptureUi, CharacterCatalog, CharacterOption, ChatRow, ChatStatus,
+        ConversationUi, HubInstallPreview, MemoryUi, SettingsUi,
     },
 };
 
@@ -423,6 +423,34 @@ pub(super) fn bind_chat_actions(
             }
         }
     });
+    let send = dispatch.clone();
+    let weak = window.as_weak();
+    let revision = selection_revision.clone();
+    let capture = Rc::new(move |action| {
+        if let Some(window) = weak.upgrade()
+            && let Some(origin) = current_origin(&window, &revision)
+        {
+            send(Command::Capture(origin, action));
+        }
+    });
+    let ui = window.global::<CaptureUi>();
+    let run = Rc::clone(&capture);
+    ui.on_list_cameras(move || run(super::capture::Action::ListCameras));
+    let run = Rc::clone(&capture);
+    ui.on_grab_screen(move |count| {
+        if let Ok(count) = u8::try_from(count) {
+            run(super::capture::Action::Screen(count));
+        }
+    });
+    let run = Rc::clone(&capture);
+    ui.on_grab_camera(move |index, count| {
+        if let (Ok(index), Ok(count)) = (usize::try_from(index), u8::try_from(count)) {
+            run(super::capture::Action::Camera(index, count));
+        }
+    });
+    let run = Rc::clone(&capture);
+    ui.on_discard(move || run(super::capture::Action::Discard));
+    ui.on_save(move |text| capture(super::capture::Action::Save(text.into())));
     let send = dispatch.clone();
     let weak = window.as_weak();
     let revision = selection_revision.clone();
@@ -943,6 +971,35 @@ fn apply_with_catalog(
                     window.set_chat_attachment_path("".into());
                 }
             }
+        }
+        Update::VideoCapture(view) => {
+            let ui = window.global::<CaptureUi>();
+            ui.set_available(view.available);
+            ui.set_busy(view.busy);
+            ui.set_status(view.status.into());
+            let old = ui.get_cameras();
+            if old.row_count() != view.cameras.len()
+                || old
+                    .iter()
+                    .zip(&view.cameras)
+                    .any(|(old, new)| old.as_str() != new)
+            {
+                ui.set_camera_index(-1);
+                ui.set_cameras(ModelRc::new(VecModel::from(
+                    view.cameras
+                        .into_iter()
+                        .map(Into::into)
+                        .collect::<Vec<slint::SharedString>>(),
+                )));
+            }
+            ui.set_frames(ModelRc::new(VecModel::from(
+                view.frames
+                    .iter()
+                    .filter_map(|frame| {
+                        slint::Image::load_from_data(frame.bytes(), Some("jpg")).ok()
+                    })
+                    .collect::<Vec<_>>(),
+            )));
         }
         Update::ChatError(origin, error) => {
             if matches_origin(window, origin, revision) {
