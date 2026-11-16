@@ -1497,6 +1497,127 @@ async fn game_link_semantic_world_events_are_atomic_and_replay_safe() {
 }
 
 #[tokio::test]
+async fn game_link_group_replies_share_the_original_message_without_disclosing_private_turns() {
+    async fn read(
+        reader: &mut BufReader<OwnedReadHalf>,
+        predicate: impl Fn(&Value) -> bool,
+    ) -> Value {
+        bounded(async {
+            loop {
+                let mut buffer = String::new();
+                assert_ne!(reader.read_line(&mut buffer).await.unwrap(), 0);
+                let message: Value = serde_json::from_str(&buffer).unwrap();
+                if predicate(&message) {
+                    return message;
+                }
+            }
+        })
+        .await
+    }
+
+    async fn call(
+        reader: &mut BufReader<OwnedReadHalf>,
+        write: &mut OwnedWriteHalf,
+        mut command: Value,
+    ) -> Value {
+        let id = json!(Uuid::new_v4());
+        command["command_id"] = id.clone();
+        write.write_all(&line(command)).await.unwrap();
+        read(reader, |frame| frame["command_id"] == id).await
+    }
+
+    let mut fixture = Fixture::start(|_| {}).await;
+    let (reader, mut write) = TcpStream::connect(fixture.app.game_link().unwrap().address())
+        .await
+        .unwrap()
+        .into_split();
+    let mut reader = BufReader::new(reader);
+    assert_eq!(
+        call(&mut reader, &mut write, json!({"command":"hello"})).await["type"],
+        "hello_ack"
+    );
+    let group = json!({
+        "targets":[{"character":"Crazy"},{"character":"Kind"}],
+        "participants":["player",{"character":"Crazy"},{"character":"Kind"},{"character":"Cappie"}],
+        "seen_by":["Crazy","Kind"]
+    });
+    let event = Uuid::new_v4();
+    assert_eq!(
+        call(
+            &mut reader,
+            &mut write,
+            json!({
+                "command":"publish_message", "character":"Crazy", "event_id":event,
+                "occurred_at_unix_ms":42, "content":"Hello group", "audience":group
+            })
+        )
+        .await["event_id"],
+        json!(event)
+    );
+
+    let mut response = json!(event);
+    for (character, text) in [("Crazy", "Hello Kind"), ("Kind", "Hello Crazy")] {
+        let accepted = call(
+            &mut reader,
+            &mut write,
+            json!({
+                "command":"reply", "character":character, "message_id":response, "audience":group
+            }),
+        )
+        .await;
+        assert_eq!(accepted["type"], "request_accepted");
+        let generation = fixture.call().await;
+        assert!(
+            generation
+                .context
+                .view
+                .messages()
+                .iter()
+                .any(|m| json!(m.event_id.0) == response)
+        );
+        generation.finish(text);
+        let finished = read(&mut reader, |f| {
+            f["type"] == "request_completed" && f["request_id"] == accepted["request_id"]
+        })
+        .await;
+        response = finished["event_id"].clone();
+    }
+    assert_eq!(fixture.app.at().through, 3);
+    assert_eq!(
+        call(
+            &mut reader,
+            &mut write,
+            json!({
+                "command":"reply", "character":"Cappie", "message_id":response
+            })
+        )
+        .await["type"],
+        "error"
+    );
+
+    let private = Uuid::new_v4();
+    assert_eq!(call(&mut reader, &mut write, json!({
+        "command":"publish_message", "character":"Crazy", "event_id":private,
+        "occurred_at_unix_ms":43, "content":"Private", "audience":{
+            "targets":[{"character":"Crazy"}], "participants":["player",{"character":"Crazy"}], "seen_by":["Crazy"]
+        }
+    })).await["type"], "published");
+    assert_eq!(
+        call(
+            &mut reader,
+            &mut write,
+            json!({
+                "command":"reply", "character":"Kind", "message_id":private
+            })
+        )
+        .await["type"],
+        "error"
+    );
+    assert_eq!(fixture.app.at().through, 4);
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
 async fn game_link_resume_replaces_old_tcp_connection() {
     let fixture = Fixture::start(|_| {}).await;
     let address = fixture.app.game_link().unwrap().address();

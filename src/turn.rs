@@ -103,7 +103,6 @@ impl ResponseSegment {
             || !self.interactions.is_empty()
             || !self.face_params.is_empty()
             || !self.intents.is_empty()
-            || self.target.is_some()
             || self.hint.is_some()
             || self.allow_sleep.is_some()
     }

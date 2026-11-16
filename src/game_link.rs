@@ -554,6 +554,8 @@ enum GameCommand {
         occurred_at_unix_ms: u64,
         content: Value,
         character: CharacterId,
+        #[serde(default)]
+        audience: Option<ConversationAudience>,
     },
     PublishEvents {
         events: Vec<GameWorldEvent>,
@@ -561,17 +563,23 @@ enum GameCommand {
     Reply {
         character: CharacterId,
         message_id: Uuid,
+        #[serde(default)]
+        audience: Option<ConversationAudience>,
     },
     React {
         character: CharacterId,
         event_id: Uuid,
         #[serde(default)]
         instruction: String,
+        #[serde(default)]
+        audience: Option<ConversationAudience>,
     },
     Initiate {
         character: CharacterId,
         #[serde(default)]
         instruction: String,
+        #[serde(default)]
+        audience: Option<ConversationAudience>,
     },
     Cancel {
         request_id: Uuid,
@@ -887,7 +895,7 @@ async fn client(
                         continue;
                     }
                     match command {
-                        GameCommand::PublishMessage {event_id,occurred_at_unix_ms,content,character} => {
+                        GameCommand::PublishMessage {event_id,occurred_at_unix_ms,content,character,audience} => {
                             if let Err(reason) = sessions.can_record(session,config.max_requests_per_session) {
                                 tx.send(error(Some(id),"capacity",reason)).await.map_err(io::Error::other)?;
                                 continue;
@@ -895,7 +903,11 @@ async fn client(
                             let mut message = ConversationMessage::new(event_id.to_string(),ConversationSpeaker::Player,content,[character]);
                             message.id=EventId(event_id);
                             message.occurred_at_unix_ms=occurred_at_unix_ms;
-                            message.audience=ConversationAudience::player_to(character);
+                            message.audience=audience.unwrap_or_else(|| ConversationAudience::player_to(character));
+                            if !message.audience.seen_by.contains(&character) {
+                                tx.send(error(Some(id),"invalid_audience","selected respondent did not witness the player message")).await.map_err(io::Error::other)?;
+                                continue;
+                            }
                             match api.chat.publish_conversation_message(message) {
                                 Err(e)=>tx.send(error(Some(id),"publish_failed",e)).await.map_err(io::Error::other)?,
                                 Ok(event)=>match sessions.record(session,id,fingerprint,Receipt::Published(event),config.max_requests_per_session) {
@@ -942,7 +954,7 @@ async fn client(
                                 }
                             }
                         }
-                        GameCommand::Reply {character,message_id} | GameCommand::React {character,event_id:message_id,instruction:_} => {
+                        GameCommand::Reply {character,message_id,..} | GameCommand::React {character,event_id:message_id,..} => {
                             if let Err(reason) = sessions.can_record(session,config.max_requests_per_session) {
                                 tx.send(error(Some(id),"capacity",reason)).await.map_err(io::Error::other)?;
                                 continue;
@@ -950,18 +962,25 @@ async fn client(
                             let source = RequestSource::Game(session);
                             let game_context = sessions.context(session).map_err(io::Error::other)?;
                             let result = match command {
-                                GameCommand::Reply {..} => api.chat.send(ReplyRequest::new(character,EventId(message_id),source).with_game_context(Arc::clone(&game_context))),
-                                GameCommand::React {instruction,..} => api.chat.send(ReactRequest::new(character,EventId(message_id),instruction,source).with_game_context(game_context)),
+                                GameCommand::Reply {audience,..} => api.chat.send(ReplyRequest::new(character,EventId(message_id),source)
+                                    .with_audience(audience.unwrap_or_else(|| ConversationAudience::private_to(character)))
+                                    .with_game_context(Arc::clone(&game_context))),
+                                GameCommand::React {instruction,audience,..} => api.chat.send(ReactRequest::new(character,EventId(message_id),instruction,source)
+                                    .with_audience(audience.unwrap_or_else(|| ConversationAudience::private_to(character)))
+                                    .with_game_context(game_context)),
                                 _=> unreachable!(),
                             };
                             accept_request(result,session,id,fingerprint,config.max_requests_per_session,&sessions,&tx).await?;
                         }
-                        GameCommand::Initiate {character,instruction} => {
+                        GameCommand::Initiate {character,instruction,audience} => {
                             if let Err(reason) = sessions.can_record(session,config.max_requests_per_session) {
                                 tx.send(error(Some(id),"capacity",reason)).await.map_err(io::Error::other)?;
                                 continue;
                             }
-                            accept_request(api.chat.send(InitiateRequest::new(character,instruction,RequestSource::Game(session)).with_game_context(sessions.context(session).map_err(io::Error::other)?)),session,id,fingerprint,config.max_requests_per_session,&sessions,&tx).await?;
+                            let request = InitiateRequest::new(character,instruction,RequestSource::Game(session))
+                                .with_audience(audience.unwrap_or_else(|| ConversationAudience::private_to(character)))
+                                .with_game_context(sessions.context(session).map_err(io::Error::other)?);
+                            accept_request(api.chat.send(request),session,id,fingerprint,config.max_requests_per_session,&sessions,&tx).await?;
                         }
                         GameCommand::Cancel {request_id} => {
                             let handle = sessions.0.lock().expect("game sessions poisoned").get(&session).and_then(|s| s.receipts.values().find_map(|(_,receipt)| match receipt {Receipt::Request(h) if h.id().0==request_id=>Some(h.clone()),_=>None}));

@@ -110,6 +110,18 @@ impl StructuredResponse {
                 "structured intent has empty type".into(),
             ));
         }
+        if self.segments.iter().any(|segment| {
+            segment.target.as_deref().is_some_and(|target| {
+                !target.eq_ignore_ascii_case("player")
+                    && !crate::identity::CharacterId::ALL
+                        .iter()
+                        .any(|character| target.eq_ignore_ascii_case(character.as_str()))
+            })
+        }) {
+            return Err(GenerationError::Response(
+                "structured segment names an unknown speech recipient".into(),
+            ));
+        }
         if self
             .working_state
             .as_ref()
@@ -505,7 +517,7 @@ mod tests {
     fn structured_fields_roundtrip_without_executing_actions() {
         let data = json!({
             "segments": [{"text":"hello", "intents":[{"type":"inventory.collect", "payload":"{\"object\":\"apple\"}"}],
-                "emotions":["happy"], "target":"KindMita"}],
+                "emotions":["happy"], "target":"Kind"}],
             "memory_add":["high|Player prefers tea"],
             "tool_call":{"name":"search", "args":"{\"query\":\"tea\"}"},
             "working_state":{"focus":"conversation"}
@@ -516,7 +528,7 @@ mod tests {
         assert!(parsed.ensure_supported_effects().is_err());
         assert_eq!(
             serde_json::to_value(&parsed).unwrap()["segments"][0]["target"],
-            "KindMita"
+            "Kind"
         );
     }
 

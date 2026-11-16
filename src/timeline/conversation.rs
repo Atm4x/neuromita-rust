@@ -31,7 +31,8 @@ impl ConversationSpeaker {
 }
 
 /// Routing metadata is distinct from knowledge. Only seen_by controls MitaView.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConversationAudience {
     pub targets: BTreeSet<ConversationSpeaker>,
     pub participants: BTreeSet<ConversationSpeaker>,
