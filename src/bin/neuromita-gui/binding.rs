@@ -85,10 +85,11 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
     if !catalog.contains_locale(&options.locale) {
         return Err(LocalizationError::UnknownLocale(options.locale.to_string()).into());
     }
-    slint::BackendSelector::new()
-        .backend_name("winit".into())
-        .renderer_name("femtovg".into())
-        .select()?;
+    let mut backend = slint::BackendSelector::new().backend_name("winit".into());
+    if std::env::var_os("SLINT_BACKEND").is_none() {
+        backend = backend.renderer_name("femtovg".into());
+    }
+    backend.select()?;
     let window = AppWindow::new()?;
     let onboarding = neuromita::onboarding::startup_state(&options.data_directory)?;
     let requires_consent = onboarding.requires_consent;

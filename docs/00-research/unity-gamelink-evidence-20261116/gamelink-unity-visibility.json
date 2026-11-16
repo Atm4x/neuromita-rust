@@ -1,0 +1,34 @@
+[
+  {
+    "command_id": "3a7cb363-efd9-4b87-8e4f-67ce4731166b",
+    "evidence_level": "core_ipc_only",
+    "scope": "character",
+    "snapshot": {
+      "branch_id": "e61472f0-56af-4936-8bda-27506c2207fb",
+      "character": "Crazy",
+      "event_visible": true,
+      "head_sequence": 22,
+      "privacy": "observer-only visibility projection; no payload or hidden-fact inventory",
+      "queried_event_id": "f88cca24-b888-41a1-a776-1b1cfbae51c3",
+      "visible_messages": 4,
+      "visible_world_events": 0
+    },
+    "type": "debug_inspect"
+  },
+  {
+    "command_id": "423d8724-6609-4b78-8ab7-1a064814575c",
+    "evidence_level": "core_ipc_only",
+    "scope": "character",
+    "snapshot": {
+      "branch_id": "e61472f0-56af-4936-8bda-27506c2207fb",
+      "character": "Mila",
+      "event_visible": false,
+      "head_sequence": 22,
+      "privacy": "observer-only visibility projection; no payload or hidden-fact inventory",
+      "queried_event_id": "f88cca24-b888-41a1-a776-1b1cfbae51c3",
+      "visible_messages": 0,
+      "visible_world_events": 0
+    },
+    "type": "debug_inspect"
+  }
+]

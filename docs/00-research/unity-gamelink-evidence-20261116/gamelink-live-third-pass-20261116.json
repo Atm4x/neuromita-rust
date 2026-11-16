@@ -1,0 +1,98 @@
+{
+  "captured_at": "2026-11-16T14:13:13Z",
+  "unity": {
+    "repository": "C:/Development/NeuroMita-Unity-URP",
+    "branch": "GameLink tracking atm4x/GameLink",
+    "commit": "0e1605705f8656aecc9ac1ebb9a99dac6ee78810",
+    "editor": "Unity 6000.3.12f1, Play Mode, CrazyHouse",
+    "working_tree": "local light-event publisher patch retained in RuntimeEventReporter, RustGameLinkClient, RustGameLinkRuntime, and Switcher"
+  },
+  "rust": {
+    "repository": "C:/Development/NeuromitaRust/.worktrees/unity-rust-acceptance",
+    "branch": "codex/python-preset-numeric-import-20261116",
+    "commit": "0abb4c1e",
+    "binary": "E:/NeuroMita-Acceptance/rust-target/debug/neuromita-gui.exe",
+    "profile": "E:/NeuroMita-Acceptance/rust-profile",
+    "process_id": 4160,
+    "local_control_port": 64585,
+    "game_link_port": 12345
+  },
+  "timeline": {
+    "session_id": "296972f0-35c8-4d9d-9cba-68e6c679fcc5",
+    "branch_id": "e61472f0-56af-4936-8bda-27506c2207fb",
+    "head_sequence": 48,
+    "selection_matches_head": true
+  },
+  "guide_persistence": {
+    "settings_revision": 4,
+    "persisted_revision": 4,
+    "guide_completed": true,
+    "eula_accepted": true,
+    "source": "inspect_onboarding through the live Core"
+  },
+  "idle_empty_structured_response": {
+    "dialogue_submission_id": "284f8810125d4185aa3f21a9bd7e8337",
+    "generation_request_id": "d38359b8-cbee-4707-a65b-4db82f7cc3ac",
+    "player_inactive": {
+      "sequence": 43,
+      "event_id": "6c693265-104d-4592-8c1e-5acd9ac02a53",
+      "kind": "PlayerInactive",
+      "event_type": "idle_timeout",
+      "observers": ["Crazy"]
+    },
+    "reply": {
+      "sequence": 44,
+      "event_id": "c13f0b2f-a668-406f-8fcc-82c70aa1ab6f",
+      "kind": "CharacterMessage",
+      "actor": "Crazy",
+      "observers": ["Crazy"],
+      "linked_to_sequence_43": true
+    },
+    "receipt": {
+      "operation_key": "reply:d38359b8-cbee-4707-a65b-4db82f7cc3ac",
+      "draft_count": 3,
+      "draft_kinds": ["CharacterMessage", "GameEnded", "GameStateCaptured"],
+      "commit_sequences": [44, 45, 46]
+    },
+    "presenter": {
+      "request_id": "d38359b8-cbee-4707-a65b-4db82f7cc3ac",
+      "event_id": "c13f0b2f-a668-406f-8fcc-82c70aa1ab6f",
+      "state": "finished",
+      "outcome": "success",
+      "terminal": true
+    },
+    "observed_result": "The empty structured response was retried and accepted once; no new no-spoken-segments failure was observed."
+  },
+  "three_actor_witness": {
+    "switch_id": "1a1247c5-bd61-4f2f-8dc4-06fc1267342d",
+    "all_three_in_visibility": {
+      "sequence": 47,
+      "event_id": "82dfffcc-3347-4f32-8146-42b6c16567f4",
+      "kind": "UnityEvent",
+      "event_type": "player_light_changed",
+      "actor": "player",
+      "observers": ["Crazy", "Kind", "Cappie"],
+      "is_on": false
+    },
+    "crazy_active_but_out_of_visibility": {
+      "sequence": 48,
+      "event_id": "00c4dfaa-447a-44c3-9750-8184bf29134b",
+      "kind": "UnityEvent",
+      "event_type": "player_light_changed",
+      "actor": "player",
+      "observers": ["Kind", "Cappie"],
+      "is_on": true,
+      "core_visibility": {
+        "Kind": true,
+        "Cappie": true,
+        "Crazy": false
+      }
+    },
+    "cleanup": "Kind and Cappie were returned inactive; Crazy was restored to the scene position used before the test."
+  },
+  "remaining_gaps": [
+    "Only the light producer has been verified among the semantic Unity producers required by issue #13.",
+    "Replay, restart durability, conflicting retries, cancel/reset, playback effects, and missing-ACK recovery still need the remaining issue #442 acceptance cases.",
+    "A GameLink ACK is protocol evidence and does not by itself prove visible Unity rendering."
+  ]
+}

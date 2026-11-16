@@ -1,0 +1,48 @@
+{
+  "captured_at": "2026-11-16T11:35:00Z",
+  "unity": {
+    "repository": "C:/Development/NeuroMita-Unity-URP",
+    "branch": "GameLink tracking atm4x/GameLink",
+    "commit": "0e1605705f8656aecc9ac1ebb9a99dac6ee78810",
+    "working_tree": "local light-event publisher patch (RuntimeEventReporter, RustGameLinkClient, RustGameLinkRuntime, Switcher)",
+    "editor": "Unity 6000.3.12f1, Play Mode, CrazyHouse"
+  },
+  "rust": {
+    "repository": "C:/Development/NeuromitaRust/.worktrees/unity-rust-acceptance",
+    "commit": "fc971655728f9c7788479c51d592172b113b1865",
+    "binary": "E:/NeuroMita-Acceptance/rust-target/debug/neuromita-gui.exe",
+    "profile": "E:/NeuroMita-Acceptance/rust-profile"
+  },
+  "session_id": "296972f0-35c8-4d9d-9cba-68e6c679fcc5",
+  "branch_id": "e61472f0-56af-4936-8bda-27506c2207fb",
+  "checks": {
+    "startup_and_reconnect": "Unity GameLink ready=true after Core restart; session resumed on the existing branch",
+    "light_producer": {
+      "switch_id": "1a1247c5-bd61-4f2f-8dc4-06fc1267342d",
+      "world_id": "CrazyHouse",
+      "room": "MainHall",
+      "observers": ["Crazy"],
+      "off_sequence": 32,
+      "on_sequence": 33,
+      "event_ids": [
+        "007f9905-bb54-4098-a440-ef511688d7a4",
+        "eba493fa-c0d2-48a1-922b-4e63f9bdabb6"
+      ]
+    },
+    "player_message": {
+      "request_id": "e2584053665345a6bb60cfece1115e29",
+      "player_sequence": 34,
+      "player_event_id": "ce4c63d5-d010-4af6-a00f-726d22f9e6b8",
+      "reply_sequence": 35,
+      "reply_event_id": "30f339de-866b-4dc7-840e-8ff8111a5596",
+      "reply_to": "ce4c63d5-d010-4af6-a00f-726d22f9e6b8",
+      "reply_text": "Ты опять увлечен своей игрой... Ну-ка, брось это хоть на минуту.",
+      "state_change_sequence": 36
+    }
+  },
+  "notes": [
+    "Unity toggled the real MainHall Switcher through its Toggle method; RuntimeEventReporter published player_light_changed with presence-derived observers.",
+    "The reply is linked by reply_to and caused_by links; only one PlayerMessage and one CharacterMessage were written for the request.",
+    "The model also started a SeaBattle game (sequences 37-38) in response to the acceptance message; this remains model behavior to review, not an IPC failure."
+  ]
+}

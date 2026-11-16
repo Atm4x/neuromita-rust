@@ -1,0 +1,23 @@
+{
+  "ack_semantics": "receipt confirms GameLink ACK was accepted, not that Unity rendered output",
+  "connected_sessions": 1,
+  "enabled": true,
+  "evidence_level": "core_gamelink_tcp_only",
+  "full_stack_e2e_verified": false,
+  "privacy": "no session tokens, request text, audio, or Unity error content",
+  "request": null,
+  "schema_version": 1,
+  "session": {
+    "connected": true,
+    "context_revision": 1,
+    "delivery_acks": 1,
+    "observed": true,
+    "playback_reports": 0,
+    "ptt_active": false,
+    "receipts": 4,
+    "resume_count": 0,
+    "session_id": "cdbf5618-f84f-456a-a0ad-b7ab7061f6a2"
+  },
+  "session_count": 2,
+  "source": "game_link_protocol_session_owner"
+}

@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-11-16T17:42:45+03:00",
+  "environment": {
+    "unity_editor": "6000.3.12f1",
+    "unity_scene": "CrazyHouse",
+    "unity_instance": "NeuroMita-Unity-URP@185d19e2",
+    "core_before_pid": 4160,
+    "core_before_started_at": "2026-11-16T16:55:21.2407698+03:00",
+    "core_after_pid": 32636,
+    "core_after_started_at": "2026-11-16T17:42:41.2434813+03:00",
+    "core_after_local_control": "127.0.0.1:51441",
+    "core_data_dir": "E:\\NeuroMita-Acceptance\\rust-profile"
+  },
+  "producer": {
+    "component": "Switcher",
+    "switch_id": "1a1247c5-bd61-4f2f-8dc4-06fc1267342d",
+    "position": "(2.00, 1.81, 3.28)",
+    "state_before": true,
+    "state_after": false
+  },
+  "outbox": {
+    "path": "C:/Users/Dmitry/AppData/LocalLow/NeuroMita Devs/NeuroMita/game-link/world-events",
+    "count_while_core_stopped": 1,
+    "file_while_core_stopped": "438b1bc4-592c-4213-9817-a38d92fabd15.json",
+    "count_after_reconnect": 0,
+    "persisted_before_core_restart": true,
+    "removed_after_ack": true
+  },
+  "canonical_timeline": {
+    "branch_id": "e61472f0-56af-4936-8bda-27506c2207fb",
+    "head_sequence": 51,
+    "event_id": "438b1bc4-592c-4213-9817-a38d92fabd15",
+    "kind": "UnityEvent",
+    "event_type": "player_light_changed",
+    "actor": "player",
+    "world_id": "CrazyHouse",
+    "room": "MainHall",
+    "is_on": false,
+    "switch_id": "1a1247c5-bd61-4f2f-8dc4-06fc1267342d",
+    "observers": ["Crazy"],
+    "occurrence_count": 1,
+    "event_visible_to_crazy": true
+  },
+  "captures": {
+    "gui_exact_window": {
+      "path": "C:/Users/Dmitry/.codex/visualizations/2026/11/16/01a1e39b-f3be-74c0-befc-173a31e4afbc/gui-exact-window.png",
+      "sha256": "9A7889A3AC62B8800A81E8BD1C1F5FDAC592A89B3D0F33A6636DABB88AA4C931"
+    },
+    "unity_game_view": "C:/Development/NeuroMita-Unity-URP/Captures/acceptance-exact-gameview.png"
+  }
+}

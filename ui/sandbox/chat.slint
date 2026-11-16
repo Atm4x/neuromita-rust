@@ -205,9 +205,20 @@ export component SandboxChat inherits Rectangle {
         ConversationStrip { character: root.character; refresh => { root.refresh(); } }
         Rectangle {
             vertical-stretch: 1; background: #090915; border-radius: 12px; clip: true;
-            ScrollView {
+            message-scroll := ScrollView {
                 width: parent.width; height: parent.height;
                 content-width: self.width;
+                property <length> tail-y: min(0px, self.visible-height - self.content-height);
+                init => { self.content-y = self.tail-y; }
+                changed content-height => {
+                    if root.follow-tail { self.content-y = self.tail-y; }
+                }
+                changed visible-height => {
+                    if root.follow-tail { self.content-y = self.tail-y; }
+                }
+                scrolled => {
+                    root.follow-tail = self.content-y >= self.tail-y - 8px;
+                }
                 VerticalLayout {
                     padding-left: 6px; padding-right: 6px; padding-top: 4px; padding-bottom: 4px;
                     spacing: 4px; alignment: start;

@@ -1,0 +1,26 @@
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "{\"command_id\":\"49f1282d-600a-4e0a-8e7e-e82247a5a24b\",\"snapshot\":{\"ack_semantics\":\"receipt confirms GameLink ACK was accepted, not that Unity rendered output\",\"connected_sessions\":0,\"enabled\":true,\"evidence_level\":\"core_gamelink_tcp_only\",\"full_stack_e2e_verified\":false,\"privacy\":\"no session tokens, request text, audio, or Unity error content\",\"request\":null,\"schema_version\":1,\"session\":null,\"session_count\":0,\"source\":\"game_link_protocol_session_owner\"},\"type\":\"game_link_inspect\"}"
+    }
+  ],
+  "structuredContent": {
+    "command_id": "49f1282d-600a-4e0a-8e7e-e82247a5a24b",
+    "snapshot": {
+      "ack_semantics": "receipt confirms GameLink ACK was accepted, not that Unity rendered output",
+      "connected_sessions": 0,
+      "enabled": true,
+      "evidence_level": "core_gamelink_tcp_only",
+      "full_stack_e2e_verified": false,
+      "privacy": "no session tokens, request text, audio, or Unity error content",
+      "request": null,
+      "schema_version": 1,
+      "session": null,
+      "session_count": 0,
+      "source": "game_link_protocol_session_owner"
+    },
+    "type": "game_link_inspect"
+  },
+  "isError": false
+}

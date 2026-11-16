@@ -170,7 +170,7 @@ pub(crate) async fn execute(
                 .get("expression")
                 .and_then(Value::as_str)
                 .ok_or_else(|| invalid("expression must be a string"))?;
-            let value = evaluate(expression).map_err(&invalid)?;
+            let value = evaluate(expression).map_err(invalid)?;
             Ok(format!("{value}"))
         }
         "memory_search" => {

@@ -1561,13 +1561,13 @@ fn command_for_tool(name: &str, mut args: Map<String, Value>) -> Result<Value, E
                             ErrorData::invalid_params("preferences must be object", None)
                         })?;
                     payload["preferences"] = preferences;
-                    if action == "save_asr" {
-                        if let Some(language) = args.remove("language") {
-                            if !language.as_str().is_some_and(|s| s.len() <= 32) {
-                                return Err(ErrorData::invalid_params("invalid language", None));
-                            }
-                            payload["language"] = language;
+                    if action == "save_asr"
+                        && let Some(language) = args.remove("language")
+                    {
+                        if !language.as_str().is_some_and(|s| s.len() <= 32) {
+                            return Err(ErrorData::invalid_params("invalid language", None));
                         }
+                        payload["language"] = language;
                     }
                 }
                 "select_asr_recognizer" => {

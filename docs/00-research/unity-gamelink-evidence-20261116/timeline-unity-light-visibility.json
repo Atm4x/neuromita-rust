@@ -1,0 +1,22 @@
+[
+  {
+    "branch_id": "e61472f0-56af-4936-8bda-27506c2207fb",
+    "character": "Crazy",
+    "event_visible": true,
+    "head_sequence": 28,
+    "privacy": "observer-only visibility projection; no payload or hidden-fact inventory",
+    "queried_event_id": "0ebbb937-ae8a-4dd9-aca9-768e9a6498f5",
+    "visible_messages": 6,
+    "visible_world_events": 3
+  },
+  {
+    "branch_id": "e61472f0-56af-4936-8bda-27506c2207fb",
+    "character": "Mila",
+    "event_visible": false,
+    "head_sequence": 28,
+    "privacy": "observer-only visibility projection; no payload or hidden-fact inventory",
+    "queried_event_id": "0ebbb937-ae8a-4dd9-aca9-768e9a6498f5",
+    "visible_messages": 0,
+    "visible_world_events": 0
+  }
+]

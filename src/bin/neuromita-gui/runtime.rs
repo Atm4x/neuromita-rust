@@ -388,6 +388,7 @@ async fn start(
     telegram_voice: Arc<DynamicTelegramVoice>,
     telegram_admin: Arc<TelegramAdmin>,
 ) -> Result<ApplicationLifecycle, String> {
+    tracing::debug!(directory = %directory.display(), "desktop application initialization started");
     let provider: Arc<dyn GenerationProvider> =
         Arc::new(GeminiProvider::new().map_err(|e| e.to_string())?);
     let generator = ResponseGenerator::new([
@@ -396,6 +397,7 @@ async fn start(
             as Arc<dyn GenerationProvider>,
     ])
     .map_err(|e| e.to_string())?;
+    tracing::debug!("desktop generation providers initialized");
     let limits = RuntimeLimits {
         request_queue: NonZeroUsize::new(16).unwrap(),
         discovery_buffer: NonZeroUsize::new(128).unwrap(),
@@ -443,6 +445,7 @@ async fn start(
     config.voice = telegram_voice;
     config.telegram_admin = Some(telegram_admin);
     config.remote_voice_store = Some(directory.join("remote_voice.rust.json"));
+    tracing::debug!("desktop application configuration prepared");
     ApplicationLifecycle::start(config)
         .await
         .map_err(|e| e.to_string())
@@ -455,6 +458,7 @@ async fn run(
     stop: CancellationToken,
     publish: impl Fn(Update) + Send + Sync,
 ) {
+    tracing::debug!(directory = %directory.display(), "desktop runtime thread started");
     publish(Update::Connecting);
     let catalog = SpeechModelCatalog::for_desktop(directory.clone());
     let telegram_voice = Arc::new(DynamicTelegramVoice::default());
@@ -470,7 +474,10 @@ async fn run(
     )
     .await
     {
-        Ok(app) => app,
+        Ok(app) => {
+            tracing::debug!(server = %app.server().address(), "desktop application initialized");
+            app
+        }
         Err(error) => {
             publish(Update::Error(error));
             publish(Update::Stopped);
