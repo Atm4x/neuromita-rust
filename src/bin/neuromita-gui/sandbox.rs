@@ -443,9 +443,13 @@ pub(super) fn bind_chat_actions(
         }
     });
     let run = Rc::clone(&capture);
-    ui.on_grab_camera(move |index, count| {
-        if let (Ok(index), Ok(count)) = (usize::try_from(index), u8::try_from(count)) {
-            run(super::capture::Action::Camera(index, count));
+    ui.on_grab_camera(move |inventory, index, count| {
+        if let (Ok(inventory), Ok(index), Ok(count)) = (
+            uuid::Uuid::parse_str(&inventory),
+            usize::try_from(index),
+            u8::try_from(count),
+        ) {
+            run(super::capture::Action::Camera(inventory, index, count));
         }
     });
     let run = Rc::clone(&capture);
@@ -977,14 +981,17 @@ fn apply_with_catalog(
             ui.set_available(view.available);
             ui.set_busy(view.busy);
             ui.set_status(view.status.into());
+            let camera_inventory: slint::SharedString = view.camera_inventory.to_string().into();
             let old = ui.get_cameras();
-            if old.row_count() != view.cameras.len()
+            if ui.get_camera_inventory() != camera_inventory
+                || old.row_count() != view.cameras.len()
                 || old
                     .iter()
                     .zip(&view.cameras)
                     .any(|(old, new)| old.as_str() != new)
             {
                 ui.set_camera_index(-1);
+                ui.set_camera_inventory(camera_inventory);
                 ui.set_cameras(ModelRc::new(VecModel::from(
                     view.cameras
                         .into_iter()

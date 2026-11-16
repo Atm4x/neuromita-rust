@@ -667,8 +667,9 @@ fn chat_feedback_and_asr_callbacks_are_scoped_to_selection_revision() {
     let cancel_id = uuid::Uuid::new_v4();
     window.invoke_chat_cancel(cancel_id.to_string().into());
     let capture = window.global::<super::super::view::CaptureUi>();
+    let camera_inventory = uuid::Uuid::new_v4();
     capture.invoke_grab_screen(3);
-    capture.invoke_grab_camera(1, 1);
+    capture.invoke_grab_camera(camera_inventory.to_string().into(), 1, 1);
     capture.invoke_save("chosen photo".into());
     capture.invoke_discard();
     let recorded = commands.borrow();
@@ -694,7 +695,7 @@ fn chat_feedback_and_asr_callbacks_are_scoped_to_selection_revision() {
         matches!(&recorded[5], Command::Capture(origin, Action::Screen(3)) if *origin == current)
     );
     assert!(
-        matches!(&recorded[6], Command::Capture(origin, Action::Camera(1, 1)) if *origin == current)
+        matches!(&recorded[6], Command::Capture(origin, Action::Camera(inventory, 1, 1)) if *origin == current && *inventory == camera_inventory)
     );
     assert!(
         matches!(&recorded[7], Command::Capture(origin, Action::Save(text)) if *origin == current && text == "chosen photo")

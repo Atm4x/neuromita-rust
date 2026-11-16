@@ -9,13 +9,14 @@ use neuromita::{
     video_capture::{CameraDevice, CapturedJpeg, VideoSource},
 };
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use super::runtime::ChatOrigin;
 
 pub enum Action {
     ListCameras,
     Screen(u8),
-    Camera(usize, u8),
+    Camera(Uuid, usize, u8),
     Discard,
     Save(String),
 }
@@ -23,6 +24,7 @@ pub enum Action {
 pub struct View {
     pub available: bool,
     pub cameras: Vec<String>,
+    pub camera_inventory: Uuid,
     pub busy: bool,
     pub frames: Arc<[CapturedJpeg]>,
     pub status: String,
@@ -38,6 +40,7 @@ type Job = Pin<Box<dyn Future<Output = JobResult> + Send>>;
 pub struct State {
     presenter: ConversationPresenter,
     cameras: Vec<CameraDevice>,
+    camera_inventory: Uuid,
     preview: Option<CapturePreview>,
     job: Option<Job>,
     status: String,
@@ -48,6 +51,7 @@ impl State {
         Self {
             presenter,
             cameras: Vec::new(),
+            camera_inventory: Uuid::new_v4(),
             preview: None,
             job: None,
             status: String::new(),
@@ -68,6 +72,7 @@ impl State {
                 .iter()
                 .map(|camera| camera.name.clone())
                 .collect(),
+            camera_inventory: self.camera_inventory,
             busy: self.job.is_some(),
             frames: self
                 .preview
@@ -84,6 +89,7 @@ impl State {
             Action::ListCameras => {
                 self.clear();
                 self.cameras.clear();
+                self.camera_inventory = Uuid::new_v4();
                 let presenter = self.presenter.clone();
                 self.job = Some(Box::pin(async move {
                     JobResult::Cameras(
@@ -95,10 +101,13 @@ impl State {
                 }));
             }
             Action::Screen(count) => self.grab(origin, VideoSource::Screen, count),
-            Action::Camera(index, count) => {
+            Action::Camera(inventory, index, count) if inventory == self.camera_inventory => {
                 if let Some(camera) = self.cameras.get(index).cloned() {
                     self.grab(origin, VideoSource::Camera(camera), count);
                 }
+            }
+            Action::Camera(..) => {
+                self.status = "Список камер изменился. Выберите источник снова".into()
             }
             Action::Save(text) => {
                 if let Some(preview) = self.preview.take() {

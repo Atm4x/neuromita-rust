@@ -8,12 +8,13 @@ export global CaptureUi {
     in property <bool> available;
     in property <bool> busy;
     in property <[string]> cameras;
+    in property <string> camera-inventory;
     in-out property <int> camera-index: -1;
     in property <[image]> frames;
     in property <string> status;
     callback list-cameras();
     callback grab-screen(int);
-    callback grab-camera(int, int);
+    callback grab-camera(string, int, int);
     callback discard();
     callback save(string);
 }
@@ -33,7 +34,7 @@ export component CapturePanel inherits Rectangle {
             height: 30px;
             spacing: 6px;
             GhostButton {
-                text: I18n.i18n("sandbox.capture.screen-now", "Снимок экрана");
+                text: I18n.i18n("sandbox.screenshot", "Сделать скриншот экрана");
                 enabled: CaptureUi.available;
                 activated => { CaptureUi.grab-screen(root.burst ? 3 : 1); }
             }
@@ -53,7 +54,7 @@ export component CapturePanel inherits Rectangle {
             GhostButton {
                 text: I18n.i18n("sandbox.capture.camera-now", "Снять с камеры");
                 enabled: CaptureUi.available && CaptureUi.camera-index >= 0;
-                activated => { CaptureUi.grab-camera(CaptureUi.camera-index, root.burst ? 3 : 1); }
+                activated => { CaptureUi.grab-camera(CaptureUi.camera-inventory, CaptureUi.camera-index, root.burst ? 3 : 1); }
             }
         }
         if CaptureUi.frames.length > 0: HorizontalLayout {
