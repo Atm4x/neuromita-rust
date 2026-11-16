@@ -164,11 +164,6 @@ export component MessageRow inherits VerticalLayout {
             }
         }
     }
-    if root.item.sequence != "": HorizontalLayout {
-        padding-left: root.item.user ? 0px : 52px; padding-right: 44px; spacing: 6px; height: 14px;
-        Rectangle { horizontal-stretch: 1; }
-        Caption { text: root.item.sequence; color: root.item.user ? #ffffff8c : #ffffff6b; font-size: SandboxTheme.chat-time-size; }
-    }
     if root.item.status != ChatStatus.history && root.item.status != ChatStatus.success: HorizontalLayout {
         padding-left: root.item.user ? 0px : 52px; padding-right: 44px; spacing: 6px; height: 25px;
         StatusText { status: root.item.status; streaming-preview: root.item.status == ChatStatus.text && root.item.text != ""; tool-name: root.item.tool-name; tool-executing: root.item.tool-executing; horizontal-stretch: 1; min-width: 0px; }
