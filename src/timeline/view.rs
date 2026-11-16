@@ -3,8 +3,8 @@ use serde_json::{Map, Value};
 use crate::identity::CharacterId;
 
 use super::domain::{
-    BranchId, CharacterMessageProjection, CharacterWorldProjection, MessageRole, ProjectedMessage,
-    ProjectedWorldEvent, TimelineError, TimelineRepository, character_view,
+    BranchId, CharacterMessageProjection, CharacterWorldProjection, KnownEvent, MessageRole,
+    ProjectedMessage, ProjectedWorldEvent, TimelineError, TimelineRepository,
 };
 
 fn provider_document(message: ProjectedMessage) -> Map<String, Value> {
@@ -82,16 +82,26 @@ impl MitaView {
         character: CharacterId,
         facts: &[super::domain::TimelineFact],
     ) -> Self {
+        let prefix = &facts[..facts.partition_point(|fact| fact.sequence <= through)];
+        Self::from_known(
+            branch,
+            through,
+            character,
+            &super::domain::character_view(prefix, character),
+        )
+    }
+
+    pub(crate) fn from_known(
+        branch: BranchId,
+        through: u64,
+        character: CharacterId,
+        known: &[KnownEvent],
+    ) -> Self {
         let mut projection = CharacterMessageProjection::new(character);
         let mut world = CharacterWorldProjection::new();
-        let prefix = facts
-            .iter()
-            .filter(|fact| fact.sequence <= through)
-            .cloned()
-            .collect::<Vec<_>>();
-        for known in character_view(&prefix, character) {
-            projection.observe(&known);
-            world.observe(&known);
+        for event in known {
+            projection.observe(event);
+            world.observe(event);
         }
         Self {
             branch,
@@ -160,7 +170,7 @@ impl MitaView {
 pub struct TimelineMessageQueries;
 
 impl TimelineMessageQueries {
-    /// Scans direct witnesses through a fixed head in bounded repository pages.
+    /// Projects observer knowledge at a fixed repository position.
     pub fn capture(
         repository: &dyn TimelineRepository,
         branch: BranchId,
@@ -174,16 +184,7 @@ impl TimelineMessageQueries {
                 "context position exceeds branch head",
             ));
         }
-        let mut facts = Vec::new();
-        let mut cursor = 0_u64;
-        loop {
-            let page = repository.read(branch, cursor, Some(head), 128, None)?;
-            if page.is_empty() {
-                break;
-            }
-            cursor = page.last().expect("nonempty page").sequence;
-            facts.extend(page);
-        }
-        Ok(MitaView::from_facts(branch, head, character, &facts))
+        let known = repository.view(branch, character, Some(head))?;
+        Ok(MitaView::from_known(branch, head, character, &known))
     }
 }

@@ -1957,7 +1957,7 @@ impl SessionTimeline {
                 .filter_map(|item| legacy_event(&item.fact, character))
                 .collect(),
         };
-        let view = MitaView::from_facts(BranchId(at.branch_id), at.through, character, &facts);
+        let view = MitaView::from_known(BranchId(at.branch_id), at.through, character, &known);
         let state = crate::character::projection::character_state(&facts, character)
             .map_err(|error| error.to_string())?;
         let working_state =
