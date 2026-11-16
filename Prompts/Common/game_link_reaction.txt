@@ -1,0 +1,4 @@
+React to the current event using the character and scene context above. Write one brief, in-character spoken reaction. Base it on the event provided to this request.
+
+Return one JSON object with a non-empty `segments` array. Each segment must contain non-empty `text`.
+For this reaction, produce text only. Do not include animation, action, command, movement, hint, or state changes.

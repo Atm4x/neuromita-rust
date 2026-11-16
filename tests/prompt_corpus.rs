@@ -144,6 +144,23 @@ fn supplied_prompt_corpus_all_seed_paths_are_interpretable() {
 }
 
 #[test]
+fn shipped_prompt_sets_have_a_renderable_reaction_entry() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Prompts");
+    let catalog = PromptCatalog::new(root);
+    for character in CharacterId::ALL {
+        for info in catalog.list(character).unwrap() {
+            let snapshot = catalog
+                .capture(character, Some(&info.name))
+                .unwrap()
+                .unwrap();
+            snapshot
+                .render(Default::default(), "react_template.txt")
+                .unwrap_or_else(|error| panic!("{character}/{} reaction: {error}", info.name));
+        }
+    }
+}
+
+#[test]
 fn supplied_postdsl_rules_match_python_reference() {
     use neuromita::{generation::StructuredResponse, prompts::PostDslProgram};
     use serde_json::{Map, json};

@@ -48,6 +48,12 @@ The in-process session registry is intentionally transient. Restoring active net
 
 World-event receipts have a separate lifetime. The selected Timeline branch identifies a `publish_events` batch by its ordered list of event IDs. After opening a new GameLink session or restarting Core with the same branch, a client can resend the same batch and get `events_published` with `replayed: true`. An event's observers form a set. Ordering and repeated observers do not affect identity. Reusing the event identities with different semantic content is rejected. This receipt covers canonical world facts; the GameLink request registry and acknowledgments of presented replies still follow the session lifetime above.
 
+### Dialogue audience
+
+`publish_message`, `reply`, `react` and `initiate` can carry an explicit `audience` with `targets`, `participants` and `seen_by`. The first two are sets of speaker identities (`"player"` or `{"character":"Kind"}`); `seen_by` is the set of character IDs that heard the utterance. Only `seen_by` grants knowledge. For `publish_message`, the selected respondent must be among its witnesses. A client omitting `audience` uses the single-character command semantics. Set order and repeated members do not change the command fingerprint.
+
+Unity captures player witnesses at submission, using local hearing for group input and an explicit private audience for a named recipient. The response has its own witnesses around the actual speaker at dispatch. An explicit `@все` asks Unity to continue the group dialogue through its existing speaker order and turn limits. Each next speaker must have heard the last reply. Unity sends its canonical `event_id` as `message_id` in `reply`; Core does not append a second player message. A model segment can name a known `target`; this addressing does not extend who witnessed the response.
+
 ## Integration boundary
 
 The Rust contract tests cover framing, reconnect, ownership, event publication, retry, admission-time GameContext, voice origin, playback/PTT feedback and chunked audio transfer. The Unity repository still needs its client implementation for this new protocol and real engine-to-engine acceptance tests. Physical gameplay execution remains Unity's responsibility; Unity applies the typed result segments and acknowledges acceptance.
