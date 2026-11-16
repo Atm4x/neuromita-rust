@@ -73,13 +73,13 @@ Treat **world fact**, **character observation**, **generation trigger**, and **T
 | G. Game settings | `get_game_settings` and push update | Dynamic update without polling, reconnect and settings revision |
 | H. BeatSync | Bind a typed BeatSync operation/stream after #29 | Started/chunk/ready/error and cancellation/retry scenarios |
 
-## 6. Exact blockers before closing #1
+## 6. Initial audit follow-up
 
 1. **Unity source pin:** establish an upstream Git bundle, branch and exact SHA matching the provided ZIP (or choose a newer explicitly verified Unity revision). An archive SHA-256 is insufficient to establish Git provenance.
 2. **Runtime reachability:** verify actual Unity initialization and callsites for every current handler (including `get_task_status` absence in the visible network tree), and account for any external mod/third-party consumers.
 3. **Unity↔Rust E2E:** perform at least one real Unity session handshake → player event → reply → typed result → audio/playback feedback → application acknowledgment, then reconnect and re-test; belongs primarily to #13/#25/#26.
 
-The source audit establishes the **semantics and migration mapping**. New client implementation and external E2E remain separately tracked. This document is not a claim of wire compatibility between the old Unity client and new Rust server.
+Sections 7 and 8 record the source pins and runtime checks that follow this initial audit. Playback, effects and complete product acceptance are tracked in [#442](https://github.com/Atm4x/neuromita-rust/issues/442).
 
 ## 7. Live verification, 2026-11-16
 
@@ -91,6 +91,18 @@ Confirmed in the live process:
 - Player message request `e2584053665345a6bb60cfece1115e29` created exactly one `PlayerMessage` (sequence 34) and one linked `CharacterMessage` (35, `reply_to` and `caused_by`) plus `CharacterStateChanged` (36).
 - A real `Switcher.Toggle()` in `MainHall` with `GetCharactersObserving` returning `Crazy` published `player_light_changed` as canonical `UnityEvent` facts at sequences 32 and 33, with `switch_id`, `world_id`, `room`, `is_on`, UTC time, event IDs and `observers=["Crazy"]`. A later three-actor run recorded `Crazy, Kind, Cappie` at sequence 47; after Crazy moved outside 10 m while remaining active, sequence 48 contained only `Kind, Cappie`, and the Core visibility projection matched those observers.
 - A production idle path exercised the empty structured-response retry: request `d38359b8-cbee-4707-a65b-4db82f7cc3ac` produced `PlayerInactive` at sequence 43 and one linked `CharacterMessage` at sequence 44, with a three-draft receipt and a successful terminal Presenter outcome.
-- Idle TCP reconnect, an in-flight request reconnect, and Core restart were previously verified in `acceptance.md` with the same client code.
+- Idle TCP reconnect, an in-flight request reconnect, and Core restart were verified in the [live acceptance report](unity-gamelink-acceptance-20261116.md).
 
 Still open for #13/#442: other semantic Unity producers, presence facts beyond the verified light event, conflicting retry payloads, receipt durability across a Core restart, playback/effect acknowledgement, missing-ACK recovery, and provider presentation of structured world facts.
+
+## 8. Pinned source comparison and merged-checkout verification, 2026-11-16
+
+The historical reference pair is [Unity `82b754b83` from PR #400](https://github.com/NeuroMita/NeuroMita-Unity/commit/82b754b83d919ad5bcd27883dae27d4e7b919a58) and [Python `5f3d061f`](https://github.com/Atm4x/NeuroMita/commit/5f3d061f523d9abefa6a264bb2953048a935fa65). Both Git trees were inspected directly. The supplied old Windows player contains the historical `create_task` protocol string in its IL2CPP metadata. Its exact build commit is unknown.
+
+| Path | Historical production source at the pinned revisions | Current Unity GameLink source |
+|---|---|---|
+| Startup and readiness | `NetworkBootstrapStep` → `NetworkRuntime` → `GameConnectionSession` → `NetworkController.SendGameHello`. Python `ServerController.start_server` starts `ChatServerNew`, which dispatches the registered actions in `src/game_connections/handlers/__init__.py`. | `NetworkBootstrapStep` → `NetworkRuntime.Initialize` → `RustGameLinkRuntime.Initialize`. Readiness follows `RustGameLinkClient`, including `hello_ack` and `resume`. |
+| Text and result | `PlayerMessageSubmission` → `DialogueApi` → `DialogueTaskWorkflow` → `SendCreateTaskAsync`. Python `create_task.py` handles `req_id` and per-turn retry data, then `server.py:354` pushes `task_update` to the `TaskOrchestrator` handler. `get_task_status` is registered on the Python side. No request sender was found in the pinned Unity gameplay tree. | `DialogueTaskWorkflow` sends through the GameLink runtime. `RustGameLinkClient.TurnAsync` publishes the original message, correlates the pushed result and acknowledges the presentation callback. |
+| Other senders and consumers | `NetworkController` sends `get_settings`, `speech_state`, `asr_ptt_state` and `get_music_beats`. Unity registers `loaded_settings`, `asr_text` and music beat handlers. These paths and field mappings are listed in sections 1–4. | `RustGameLinkClient` handles settings, typed world facts, playback notifications and PTT state. Game microphone audio and recognition transcripts still need a Unity transport. External mod consumers were outside the inspected source trees. |
+
+The merged Unity checkout `16ce6359785e12792a288a1ac0cda68d4b906386` (PR #400 follow-up plus [VinerX GameLink `64e575d8a`](https://github.com/VinerX/NeuroMita-Unity/commit/64e575d8a0113de01e3f1ee10ad4b2ebc6af3e27)) was checked in Unity 6000.3.12f1 Play Mode. The [Rust `807b83b6` acceptance build](https://github.com/VinerX/neuromita-rust/commit/807b83b6a16f2e7741c22d9da0b3f8ffb7b97487) reported one live GameLink session through MCP. Unity reported `RustGameLinkRuntime.IsReady=true` in `CappieHouse`. The isolated Timeline contained one `CharacterJoined` for Cappie, then one `player_entered_room` for `MainHall` witnessed by Cappie. Standalone player verification remains tracked in #442.

@@ -20,11 +20,11 @@ use crate::{
     },
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use ring::digest::{SHA256, digest};
+use ring::digest::{Context, SHA256, digest};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     io,
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -510,8 +510,17 @@ struct GameWorldEvent {
     occurred_at_unix_ms: u64,
     #[serde(default)]
     actor: Option<String>,
-    observers: Vec<CharacterId>,
+    observers: BTreeSet<CharacterId>,
     payload: serde_json::Map<String, Value>,
+}
+
+fn world_event_operation_id(events: &[GameWorldEvent]) -> String {
+    // Event identities survive client and Core session changes. Preserve batch order.
+    let mut hash = Context::new(&SHA256);
+    for event in events {
+        hash.update(event.event_id.as_bytes());
+    }
+    format!("game-world:{}", STANDARD.encode(hash.finish().as_ref()))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -908,24 +917,28 @@ async fn client(
                                 tx.send(error(Some(id),"capacity",reason)).await.map_err(io::Error::other)?;
                                 continue;
                             }
-                            let batch = SemanticBatch::new(format!("game:{session}:{id}"), events.into_iter().map(|e| {
+                            let operation_id = world_event_operation_id(&events);
+                            let batch = SemanticBatch::new(operation_id, events.into_iter().map(|e| {
                                 SemanticEvent {
                                     id: EventId(e.event_id), kind: e.kind.into(), actor: e.actor,
-                                    observers: e.observers.into_iter().collect(), payload: e.payload,
+                                    observers: e.observers, payload: e.payload,
                                     occurred_at_unix_ms: e.occurred_at_unix_ms,
                                 }
                             }).collect());
                             let result = api.timeline.lock().map_err(|_| io::Error::other("timeline poisoned"))
                                 .and_then(|mut timeline| {
                                     let selected = timeline.selection();
-                                    timeline.ingest_semantic_events(selected,batch).map_err(io::Error::other)
+                                    let head = timeline.anchor().through;
+                                    let facts = timeline.ingest_semantic_events(selected,batch).map_err(io::Error::other)?;
+                                    let replayed = facts.iter().all(|fact| fact.sequence <= head);
+                                    Ok((facts, replayed))
                                 });
                             match result {
                                 Err(e)=> tx.send(error(Some(id),"publish_failed",e)).await.map_err(io::Error::other)?,
-                                Ok(facts)=> {
+                                Ok((facts, replayed))=> {
                                     let ids = facts.into_iter().map(|f| f.draft.id).collect::<Vec<_>>();
                                     sessions.record(session,id,fingerprint,Receipt::Events(ids.clone()),config.max_requests_per_session).map_err(io::Error::other)?;
-                                    tx.send(json!({"type":"events_published","command_id":id,"event_ids":ids.iter().map(|e|e.0).collect::<Vec<_>>(),"replayed":false})).await.map_err(io::Error::other)?;
+                                    tx.send(json!({"type":"events_published","command_id":id,"event_ids":ids.iter().map(|e|e.0).collect::<Vec<_>>(),"replayed":replayed})).await.map_err(io::Error::other)?;
                                 }
                             }
                         }

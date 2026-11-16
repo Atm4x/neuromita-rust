@@ -1414,11 +1414,13 @@ async fn game_link_semantic_world_events_are_atomic_and_replay_safe() {
         "command": "publish_events",
         "events": [{
             "event_id": event_id, "kind": "unity_event", "occurred_at_unix_ms": 42,
-            "actor": "Player", "observers": ["Crazy"],
+            "actor": "Player", "observers": ["Crazy", "Kind"],
             "payload": {"name": "DoorOpened"}
         }]
     });
-    write.write_all(&line(batch.clone())).await.unwrap();
+    let mut retry = batch.clone();
+    retry["events"][0]["observers"] = json!(["Kind", "Crazy", "Kind"]);
+    write.write_all(&line(retry)).await.unwrap();
     buffer.clear();
     bounded(reader.read_line(&mut buffer)).await.unwrap();
     let receipt: Value = serde_json::from_str(&buffer).unwrap();
@@ -1429,13 +1431,50 @@ async fn game_link_semantic_world_events_are_atomic_and_replay_safe() {
     bounded(reader.read_line(&mut buffer)).await.unwrap();
     let receipt: Value = serde_json::from_str(&buffer).unwrap();
     assert_eq!(receipt["replayed"], true);
-    let mut conflicting = batch;
+    let mut conflicting = batch.clone();
     conflicting["events"][0]["payload"]["name"] = json!("WindowOpened");
     write.write_all(&line(conflicting)).await.unwrap();
     buffer.clear();
     bounded(reader.read_line(&mut buffer)).await.unwrap();
     let rejection: Value = serde_json::from_str(&buffer).unwrap();
     assert_eq!(rejection["code"], "command_id_conflict");
+
+    let (read, mut replay_write) = bounded(TcpStream::connect(address))
+        .await
+        .unwrap()
+        .into_split();
+    let mut replay_reader = BufReader::new(read);
+    replay_write
+        .write_all(&line(
+            json!({"command_id":Uuid::new_v4(),"command":"hello"}),
+        ))
+        .await
+        .unwrap();
+    buffer.clear();
+    bounded(replay_reader.read_line(&mut buffer)).await.unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&buffer).unwrap()["type"],
+        "hello_ack"
+    );
+    let mut retry = batch;
+    retry["command_id"] = json!(Uuid::new_v4());
+    replay_write.write_all(&line(retry.clone())).await.unwrap();
+    buffer.clear();
+    bounded(replay_reader.read_line(&mut buffer)).await.unwrap();
+    let receipt: Value = serde_json::from_str(&buffer).unwrap();
+    assert_eq!(receipt["event_ids"], json!([event_id]));
+    assert_eq!(receipt["replayed"], true);
+    retry["command_id"] = json!(Uuid::new_v4());
+    retry["events"][0]["observers"] = json!(["Crazy"]);
+    replay_write.write_all(&line(retry)).await.unwrap();
+    buffer.clear();
+    bounded(replay_reader.read_line(&mut buffer)).await.unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&buffer).unwrap()["code"],
+        "publish_failed"
+    );
+    assert_eq!(fixture.app.at().through, 1);
+
     write
         .write_all(&line(json!({
             "command_id": Uuid::new_v4(), "command": "react", "character": "Crazy",
@@ -1448,6 +1487,11 @@ async fn game_link_semantic_world_events_are_atomic_and_replay_safe() {
     let accepted: Value = serde_json::from_str(&buffer).unwrap();
     assert_eq!(accepted["type"], "request_accepted");
     let call = fixture.call().await;
+    let cause = call.context.focus.reaction.as_ref().unwrap();
+    assert_eq!(cause.event_id.0, event_id);
+    let world = call.context.view.world_events();
+    assert_eq!(world.len(), 1);
+    assert_eq!(world[0].payload["name"], "DoorOpened");
     call.finish("door acknowledged");
     fixture.shutdown().await;
 }

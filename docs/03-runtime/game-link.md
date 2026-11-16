@@ -46,6 +46,8 @@ Frames are bounded while reading, before the complete line is accumulated. A slo
 
 The in-process session registry is intentionally transient. Restoring active network state following a full Core restart belongs to the deferred durable recovery work (#54). Transport-level `resume` restores state during the same application process lifetime.
 
+World-event receipts have a separate lifetime. The selected Timeline branch identifies a `publish_events` batch by its ordered list of event IDs. After opening a new GameLink session or restarting Core with the same branch, a client can resend the same batch and get `events_published` with `replayed: true`. An event's observers form a set. Ordering and repeated observers do not affect identity. Reusing the event identities with different semantic content is rejected. This receipt covers canonical world facts; the GameLink request registry and acknowledgments of presented replies still follow the session lifetime above.
+
 ## Integration boundary
 
 The Rust contract tests cover framing, reconnect, ownership, event publication, retry, admission-time GameContext, voice origin, playback/PTT feedback and chunked audio transfer. The Unity repository still needs its client implementation for this new protocol and real engine-to-engine acceptance tests. Physical gameplay execution remains Unity's responsibility; Unity applies the typed result segments and acknowledges acceptance.
