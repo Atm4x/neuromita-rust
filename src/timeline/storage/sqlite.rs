@@ -13,7 +13,9 @@ use crate::timeline::selection::{
     SessionWorkspace, TimelineSelection, TimelineSelectionRepository, TimelineTurn,
 };
 use crate::timeline::{
-    KnowledgeDispatchSource, PersistentTimelineObservation, RegenerateAdmissionReceipt,
+    ContextAnchor, ContextReadVersion, KnowledgeDispatchSource, PersistentTimelineObservation,
+    RegenerateAdmissionReceipt,
+    context_summary::{ContextSummary, ContextSummaryCache, IndexedContext},
 };
 
 mod backup;
@@ -62,6 +64,10 @@ CREATE TABLE IF NOT EXISTS timeline_events(
 CREATE INDEX IF NOT EXISTS timeline_regenerate_events_by_request
     ON timeline_events(branch_id, json_extract(fact_json,'$.draft.payload.request_id'), sequence)
     WHERE json_extract(fact_json,'$.draft.payload.request_id') IS NOT NULL;
+CREATE INDEX IF NOT EXISTS timeline_context_actor_kind
+    ON timeline_events(branch_id, json_extract(fact_json,'$.draft.actor'),
+        json_extract(fact_json,'$.draft.kind'), sequence)
+    WHERE json_extract(fact_json,'$.draft.actor') IS NOT NULL;
 CREATE INDEX IF NOT EXISTS timeline_regenerate_markers_by_character
     ON timeline_events(json_extract(fact_json,'$.draft.payload.regenerate_admission.character'),branch_id,sequence)
     WHERE json_extract(fact_json,'$.draft.payload.regenerate_admission.character') IS NOT NULL;
@@ -484,6 +490,50 @@ impl SqliteTimelineRepository {
         result
     }
 
+    pub(in crate::timeline) fn read_context(
+        &self,
+        character: CharacterId,
+        at: ContextAnchor,
+        require_current_epoch: bool,
+        cache: &mut ContextSummaryCache,
+    ) -> Result<Option<IndexedContext>, TimelineError> {
+        self.read_snapshot(|connection| {
+            let branch = BranchId(at.branch_id);
+            let selection = read_selection(connection)?.ok_or(TimelineError::NotFound)?;
+            if require_current_epoch && selection.branch_id != branch {
+                return Err(TimelineError::ConcurrentWrite);
+            }
+            let head = branch_info(connection, branch)?.head_sequence;
+            let world = IndexedWorld::through(connection, branch, Some(at.through))?;
+            let epoch = world.latest_reset(character)?;
+            if require_current_epoch
+                && at.through != head
+                && epoch
+                    != IndexedWorld::through(connection, branch, Some(head))?
+                        .latest_reset(character)?
+            {
+                return Ok(None);
+            }
+            let version = ContextReadVersion::new(
+                at,
+                character,
+                head,
+                epoch,
+                selection,
+                Some(revision(connection)?),
+            );
+            let summary = cache.get_or_project(version, || {
+                ContextSummary::from_effects(
+                    character,
+                    at,
+                    &world.context_facts(character)?,
+                    world.count_replies(character)?,
+                )
+            })?;
+            Ok(Some((version, summary, world.view(character)?)))
+        })
+    }
+
     pub(crate) fn observe_changes(
         &self,
         previous: Option<(TimelineSelection, u64)>,
@@ -756,6 +806,65 @@ impl<'a> IndexedWorld<'a> {
                 })
             })
             .collect()
+    }
+
+    fn context_facts(&self, character: CharacterId) -> Result<Vec<TimelineFact>, TimelineError> {
+        let mut facts = Vec::new();
+        for (branch, cutoff) in &self.lineage {
+            let rows = self.connection.query(
+                "SELECT fact_json FROM timeline_events
+                 WHERE branch_id=?1 AND sequence<=?2
+                   AND json_extract(fact_json,'$.draft.actor')=?3
+                   AND json_extract(fact_json,'$.draft.actor') IS NOT NULL
+                   AND json_extract(fact_json,'$.draft.kind') IN (
+                     'CharacterStateChanged', 'CharacterWorkingStateReplaced',
+                     'CharacterMemoryChanged', 'CharacterVariablesChanged',
+                     'GameStateCaptured')",
+                &[
+                    &branch.0.to_string(),
+                    &cutoff.to_string(),
+                    character.as_str(),
+                ],
+            )?;
+            for row in rows {
+                facts.push(decode::<TimelineFact>(&row[0])?);
+            }
+        }
+        if let Some(reset) = self.max_position("timeline_resets", character, None)? {
+            let (branch, _) = self.lineage[0];
+            facts.extend(read_page(
+                self.connection,
+                branch,
+                reset - 1,
+                Some(reset),
+                1,
+                None,
+            )?);
+        }
+        facts.sort_unstable_by_key(|fact| fact.sequence);
+        Ok(facts)
+    }
+
+    fn count_replies(&self, character: CharacterId) -> Result<u64, TimelineError> {
+        let mut count = 0_u64;
+        for (branch, cutoff) in &self.lineage {
+            count += self.connection.count_matching_text(
+                "SELECT json_extract(fact_json,'$.draft.payload.request_id')
+                 FROM timeline_events
+                 WHERE branch_id=?1 AND sequence<=?2
+                   AND json_extract(fact_json,'$.draft.actor')=?3
+                   AND json_extract(fact_json,'$.draft.actor') IS NOT NULL
+                   AND json_extract(fact_json,'$.draft.kind')='CharacterMessage'
+                   AND json_type(fact_json,'$.draft.payload.request_id')='text'",
+                &[
+                    &branch.0.to_string(),
+                    &cutoff.to_string(),
+                    character.as_str(),
+                ],
+                |id| Uuid::parse_str(id).is_ok(),
+            )?;
+        }
+        Ok(count)
     }
 
     fn latest_reset(&self, character: CharacterId) -> Result<u64, TimelineError> {

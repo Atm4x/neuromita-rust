@@ -13,6 +13,14 @@ pub(crate) fn character_state(
     character: CharacterId,
 ) -> Result<CharacterState, TimelineError> {
     let count = domain::accepted_reply_count(facts, character)?;
+    character_state_with_reply_count(facts, character, count)
+}
+
+pub(crate) fn character_state_with_reply_count(
+    facts: &[TimelineFact],
+    character: CharacterId,
+    count: u64,
+) -> Result<CharacterState, TimelineError> {
     let behavior = character_behavior_at(facts, character)?;
     Ok(CharacterState {
         accepted_replies: count,

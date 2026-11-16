@@ -73,14 +73,20 @@ pub fn compose_local_file_message(
     text: String,
     part: TimelineMessagePart,
 ) -> Result<ConversationMessage, LocalAttachmentError> {
+    compose_attachment_message(character, text, vec![part])
+}
+
+pub(crate) fn compose_attachment_message(
+    character: CharacterId,
+    text: String,
+    mut parts: Vec<TimelineMessagePart>,
+) -> Result<ConversationMessage, LocalAttachmentError> {
     if text.len() > 64 * 1024 {
         return Err(LocalAttachmentError::TextTooLarge);
     }
-    let mut parts = Vec::with_capacity(2);
     if !text.trim().is_empty() {
-        parts.push(TimelineMessagePart::Text { text });
+        parts.insert(0, TimelineMessagePart::Text { text });
     }
-    parts.push(part);
     let mut message = ConversationMessage::new(
         "local-attachment",
         ConversationSpeaker::Player,

@@ -4,6 +4,7 @@ mod ai_engine;
 mod ai_hub;
 mod asr;
 mod binding;
+mod capture;
 mod chess;
 mod launcher_ui;
 mod memory;

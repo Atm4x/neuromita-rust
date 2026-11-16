@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use thiserror::Error;
 use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 
 use super::{BoundProperty, CharactersPresenter, ChatModel, ChatPresenter, PresenterError};
 use crate::{
@@ -14,6 +15,7 @@ use crate::{
         domain::{MessageRole, ProjectedMessage},
         selection::TimelineSelection,
     },
+    video_capture::{CameraDevice, CaptureError, CapturedJpeg, VideoCapture, VideoSource},
 };
 
 #[derive(Debug, Error)]
@@ -139,6 +141,18 @@ pub struct ConversationSnapshot {
     pub model: Result<String, PresetCatalogError>,
 }
 
+pub struct CapturePreview {
+    character: CharacterId,
+    fence: TimelineFence,
+    frames: Arc<[CapturedJpeg]>,
+}
+
+impl CapturePreview {
+    pub fn frames(&self) -> Arc<[CapturedJpeg]> {
+        Arc::clone(&self.frames)
+    }
+}
+
 #[derive(Clone)]
 pub struct ConversationPresenter {
     chat: ChatPresenter,
@@ -148,6 +162,7 @@ pub struct ConversationPresenter {
     presets: Arc<PresetCatalog>,
     volume: BoundProperty<Volume>,
     assets: Option<Arc<crate::timeline::storage::assets::TimelineAssetStore>>,
+    video_capture: Option<VideoCapture>,
 }
 
 impl ConversationPresenter {
@@ -270,6 +285,7 @@ impl ConversationPresenter {
             presets,
             volume,
             assets: None,
+            video_capture: None,
         }
     }
 
@@ -279,6 +295,94 @@ impl ConversationPresenter {
     ) -> Self {
         self.assets = assets;
         self
+    }
+
+    pub(crate) fn with_video_capture(mut self, capture: Option<VideoCapture>) -> Self {
+        self.video_capture = capture;
+        self
+    }
+
+    pub fn can_capture_video(&self) -> bool {
+        self.video_capture.is_some() && self.assets.is_some()
+    }
+
+    pub async fn list_cameras(
+        &self,
+        cancelled: &CancellationToken,
+    ) -> Result<Vec<CameraDevice>, CaptureError> {
+        self.video_capture
+            .as_ref()
+            .ok_or(CaptureError::Unavailable)?
+            .cameras(cancelled)
+            .await
+    }
+
+    pub async fn prepare_capture(
+        &self,
+        character: CharacterId,
+        source: VideoSource,
+        count: u8,
+        cancelled: &CancellationToken,
+    ) -> Result<CapturePreview, String> {
+        let capture = self
+            .video_capture
+            .as_ref()
+            .filter(|_| self.assets.is_some())
+            .ok_or_else(|| CaptureError::Unavailable.to_string())?;
+        let settings = self
+            .settings
+            .snapshot::<crate::settings::CaptureSettings>()
+            .map_err(|error| error.to_string())?;
+        let fence = self.current_fence()?;
+        let frames = capture
+            .capture(&source, count, &settings.value, cancelled)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.check_attachment_fence(fence)?;
+        Ok(CapturePreview {
+            character,
+            fence,
+            frames: frames.into(),
+        })
+    }
+
+    pub fn commit_capture(
+        &self,
+        preview: &CapturePreview,
+        text: String,
+    ) -> Result<crate::identity::EventId, String> {
+        self.check_attachment_fence(preview.fence)?;
+        if text.len() > 64 * 1024 {
+            return Err("attachment text exceeds 64 KiB".into());
+        }
+        let assets = self
+            .assets
+            .as_ref()
+            .ok_or("Timeline asset owner is unavailable")?;
+        let parts = preview
+            .frames
+            .iter()
+            .map(|frame| {
+                assets
+                    .import("image/jpeg", frame.bytes())
+                    .map(|asset| crate::timeline::domain::TimelineMessagePart::Image { asset })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        let message = crate::timeline::file_attachments::compose_attachment_message(
+            preview.character,
+            text,
+            parts,
+        )
+        .map_err(|error| error.to_string())?;
+        self.commit_attachment(message, preview.fence)
+    }
+
+    fn check_attachment_fence(&self, fence: TimelineFence) -> Result<(), String> {
+        if self.current_fence()? != fence {
+            return Err("Timeline selection changed before attachment commit".into());
+        }
+        Ok(())
     }
 
     /// Capture the current Timeline anchor and selection atomically for GUI commands.
@@ -302,10 +406,7 @@ impl ConversationPresenter {
         source: &std::path::Path,
         fence: TimelineFence,
     ) -> Result<crate::identity::EventId, String> {
-        use crate::timeline::{
-            domain::parse_message_content,
-            file_attachments::{compose_local_file_message, import_local_file},
-        };
+        use crate::timeline::file_attachments::{compose_local_file_message, import_local_file};
         let assets = self
             .assets
             .as_ref()
@@ -313,10 +414,24 @@ impl ConversationPresenter {
         if text.len() > 64 * 1024 {
             return Err("attachment text exceeds 64 KiB".into());
         }
+        self.check_attachment_fence(fence)?;
         let part = import_local_file(assets, source).map_err(|e| e.to_string())?;
         let message =
             compose_local_file_message(character, text, part).map_err(|e| e.to_string())?;
-        let parts = parse_message_content(&message.content).map_err(|e| e.to_string())?;
+        self.commit_attachment(message, fence)
+    }
+
+    fn commit_attachment(
+        &self,
+        message: crate::timeline::conversation::ConversationMessage,
+        fence: TimelineFence,
+    ) -> Result<crate::identity::EventId, String> {
+        let assets = self
+            .assets
+            .as_ref()
+            .ok_or("Timeline asset owner is unavailable")?;
+        let parts = crate::timeline::domain::parse_message_content(&message.content)
+            .map_err(|e| e.to_string())?;
         if !parts.iter().any(|part| part.asset().is_some()) {
             return Err("attachment reference missing".into());
         }
@@ -600,5 +715,87 @@ impl ConversationPresenter {
             preset_name,
             model,
         })
+    }
+}
+
+#[cfg(all(test, feature = "sqlite-system"))]
+mod capture_tests {
+    use super::*;
+    use crate::{
+        app::{ApplicationConfig, ApplicationLifecycle, RuntimeLimits},
+        generation::{GenerationProvider, ResponseGenerator, gemini::GeminiProvider},
+        timeline::domain::parse_message_content,
+    };
+
+    #[tokio::test]
+    #[ignore = "requires ffmpeg in PATH"]
+    async fn synthetic_capture_stages_frames_then_commits_one_visible_message() {
+        let directory =
+            std::env::temp_dir().join(format!("neuromita-capture-{}", uuid::Uuid::new_v4()));
+        let provider: Arc<dyn GenerationProvider> = Arc::new(GeminiProvider::new().unwrap());
+        let limit = std::num::NonZeroUsize::new(8).unwrap();
+        let mut config = ApplicationConfig::persistent_unconfigured(
+            ResponseGenerator::new([provider]).unwrap(),
+            RuntimeLimits {
+                request_queue: limit,
+                discovery_buffer: limit,
+                character_commands: limit,
+                presenter_updates: limit,
+                retained_finished: limit,
+            },
+            "127.0.0.1:0".parse().unwrap(),
+            &directory,
+        )
+        .unwrap();
+        config.video_capture = Some(VideoCapture::test_ffmpeg());
+        let app = ApplicationLifecycle::start(config).await.unwrap();
+        let presenter = &app.presenter().conversation;
+        let stop = CancellationToken::new();
+        let before = presenter.current_fence().unwrap();
+        let preview = presenter
+            .prepare_capture(CharacterId::Crazy, VideoSource::Fixture, 3, &stop)
+            .await
+            .unwrap();
+        assert_eq!(preview.frames().len(), 3);
+        assert_eq!(presenter.current_fence().unwrap(), before);
+        assert!(!directory.join("TimelineAssets/objects").exists());
+        let event = presenter
+            .commit_capture(&preview, "test frame".into())
+            .unwrap();
+        assert!(
+            presenter
+                .commit_capture(&preview, "stale frame".into())
+                .is_err()
+        );
+        let event = presenter
+            .snapshot(CharacterId::Crazy)
+            .await
+            .unwrap()
+            .messages
+            .into_iter()
+            .find(|message| message.event_id == event)
+            .unwrap();
+        let parts = parse_message_content(&event.fields["content"]).unwrap();
+        assert_eq!(
+            parts.iter().filter(|part| part.asset().is_some()).count(),
+            3
+        );
+        assert!(
+            presenter
+                .snapshot(CharacterId::Kind)
+                .await
+                .unwrap()
+                .messages
+                .is_empty()
+        );
+        stop.cancel();
+        assert!(
+            presenter
+                .prepare_capture(CharacterId::Crazy, VideoSource::Fixture, 3, &stop)
+                .await
+                .is_err()
+        );
+        app.shutdown().await.unwrap();
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 }

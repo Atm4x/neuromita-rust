@@ -2,6 +2,7 @@ import { ScrollView } from "std-widgets.slint";
 import { CharacterCatalog } from "characters/catalog.slint";
 import { MemoryUi, MemoryItem } from "sandbox/memory.slint";
 import { ConversationUi } from "sandbox/admin.slint";
+import { CaptureUi } from "sandbox/capture.slint";
 import { Theme, Icons } from "theme.slint";
 import { Label, ActionSurface } from "components/controls.slint";
 import { GuideMedia, GuideFocusTarget } from "components/guide-media.slint";
@@ -28,6 +29,7 @@ export { NativeRevisionRow, NativeReleaseRow, HubModel, AiEngineUi, AiHardwareDe
 export struct GuideSectionEntry { first: int, last: int, title: string }
 export { HubImplementation }
 export { ChessUi, ChessCell }
+export { CaptureUi }
 
 export component AppWindow inherits Window {
     title: I18n.i18n("app.window.title", "Чат с NeuroMita");

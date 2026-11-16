@@ -5,7 +5,7 @@ use crate::{
     identity::CharacterId,
     interaction::TurnIntent,
     timeline::{
-        ContextAnchor, EventId, HistoryView,
+        ContextAnchor, ContextReadVersion, EventId, HistoryView,
         domain::{CharacterWorkingState, EventKind, MemoryRecord},
         selection::TimelineTurn,
         view::MitaView,
@@ -172,6 +172,7 @@ pub struct CharacterContext {
 
 #[derive(Debug, Clone)]
 pub struct CharacterView {
+    pub read_version: ContextReadVersion,
     pub game: Option<GameProjection>,
     pub character_id: CharacterId,
     pub description: Arc<str>,
