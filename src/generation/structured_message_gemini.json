@@ -10,6 +10,10 @@
             "description": "Text of this segment (required)",
             "type": "string"
           },
+          "hint": {
+            "description": "Optional player-facing HUD hint accompanying this segment in the game",
+            "type": "string"
+          },
           "emotions": {
             "type": "array",
             "items": {

@@ -50,14 +50,16 @@ async fn bounded<T>(future: impl Future<Output = T>) -> T {
 
 struct GenerationCall {
     context: neuromita::generation::GenerationInput,
-    reply: oneshot::Sender<Result<Arc<str>, GenerationError>>,
+    reply: oneshot::Sender<StructuredResponse>,
 }
 
 impl GenerationCall {
     fn finish(self, text: &str) {
-        self.reply
-            .send(Ok(Arc::from(text)))
-            .expect("generation still running");
+        self.finish_structured(StructuredResponse::spoken(text));
+    }
+
+    fn finish_structured(self, response: StructuredResponse) {
+        self.reply.send(response).expect("generation still running");
     }
 }
 
@@ -80,8 +82,7 @@ impl GenerationProvider for ControlledGeneration {
                 .map_err(|_| GenerationError::Transport("fixture stopped".into()))?;
             receive
                 .await
-                .map_err(|_| GenerationError::Transport("fixture response dropped".into()))?
-                .map(|text| StructuredResponse::spoken(text.to_string()))
+                .map_err(|_| GenerationError::Transport("fixture response dropped".into()))
         })
     }
 }
@@ -1736,6 +1737,67 @@ impl GameClient {
 }
 
 #[tokio::test]
+async fn game_link_delivers_one_canonical_hint_and_rejects_invalid_segment_actions() {
+    let mut fixture = Fixture::start(|_| {}).await;
+    let mut game = GameClient::connect(fixture.app.game_link().unwrap().address()).await;
+    game.hello().await;
+
+    for (segment, outcome) in [
+        (
+            json!({"text":"Here you go", "hint":" Check the console ", "intents":[
+                {"type":"hint.show", "payload":{"text":"Check the console"}}
+            ]}),
+            "request_completed",
+        ),
+        (
+            json!({"text":"Here you go", "intents":[
+                {"type":"hint.show", "payload":{"message":" Check the console "}}
+            ]}),
+            "request_completed",
+        ),
+        (
+            json!({"text":"Here you go", "hint":"Different text", "intents":[
+                {"type":"hint.show", "payload":{"text":"Check the console"}}
+            ]}),
+            "request_failed",
+        ),
+        (
+            json!({"text":"Here you go", "intents":[
+                {"type":"hint.show", "payload":{"text":false}}
+            ]}),
+            "request_failed",
+        ),
+        (
+            json!({"text":"Here you go", "hint":"Check the console", "intents":[
+                {"type":"unknown.action", "payload":{}}
+            ]}),
+            "request_failed",
+        ),
+    ] {
+        let previous_head = fixture.app.at().through;
+        game.send(json!({"command":"initiate","command_id":Uuid::new_v4(),"character":"Crazy"}))
+            .await;
+        let request = game.until("request_accepted").await;
+        let response =
+            StructuredResponse::parse(&json!({"segments":[segment]}).to_string()).unwrap();
+        fixture.call().await.finish_structured(response);
+        let result = game.until(outcome).await;
+        assert_eq!(result["request_id"], request["request_id"]);
+        if outcome == "request_completed" {
+            assert_eq!(
+                result["segments"],
+                json!([{"text":"Here you go","hint":"Check the console"}])
+            );
+            assert_eq!(fixture.app.at().through, previous_head + 1);
+        } else {
+            assert!(result["event_id"].is_null());
+            assert_eq!(fixture.app.at().through, previous_head);
+        }
+    }
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
 async fn game_link_captures_world_context_at_admission_and_restores_revision() {
     let mut fixture = Fixture::start(|_| {}).await;
     let address = fixture.app.game_link().unwrap().address();
@@ -2237,7 +2299,12 @@ async fn tcp_reply_reset_cancels_inflight_without_erasing_other_character_and_ne
     );
     let cancelled = client.terminal(request).await;
     assert_eq!(cancelled["state"], "cancelled", "{cancelled}");
-    assert!(pending.reply.send(Ok(Arc::from("stale reply"))).is_err());
+    assert!(
+        pending
+            .reply
+            .send(StructuredResponse::spoken("stale reply"))
+            .is_err()
+    );
     assert_eq!(fixture.app.at().through, 2);
 
     let crazy = fixture

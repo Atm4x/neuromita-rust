@@ -16,6 +16,8 @@ GameLink binds to loopback. The default limits are 32 concurrent connections, 16
 
 The client applies structured result segments according to the game action contract. A successful result contains `text`, `event_id`, and validated `segments`. A voice synthesis failure preserves the already accepted text and event ID.
 
+`segments[].hint` carries optional player-facing HUD text for Unity to display. Core normalizes a model's `hint.show` intent into this field before accepting the reply. An intent must carry one nonempty string in `payload.text`, `payload.message` or `payload.value`. Conflicting hints in one segment reject the response. The field uses ordinary segment delivery, independently of the `update_context` capability strings.
+
 ## Canonical event ingress
 
 - `publish_message` takes `event_id`, `occurred_at_unix_ms`, `character` and `content` and publishes a player message addressed to that character.

@@ -91,8 +91,6 @@ impl ResponseSegment {
         }
     }
 
-    /// Game commands are the only executable segment fields the core accepts;
-    /// everything else still has no executor.
     pub(crate) fn has_unsupported_non_game_content(&self) -> bool {
         !self.animations.is_empty()
             || !self.idle_animations.is_empty()
@@ -103,7 +101,6 @@ impl ResponseSegment {
             || !self.interactions.is_empty()
             || !self.face_params.is_empty()
             || !self.intents.is_empty()
-            || self.hint.is_some()
             || self.allow_sleep.is_some()
     }
 

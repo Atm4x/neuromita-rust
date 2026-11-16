@@ -246,10 +246,11 @@ impl ProposedResponse {
     /// The caller must capture the active memory policy with the generation request.
     /// This conversion is side-effect free; Timeline acceptance owns the write.
     pub fn from_structured_with_memory_policy(
-        structured: StructuredResponse,
+        mut structured: StructuredResponse,
         policy: ModelMemoryAddPolicy,
     ) -> Result<Self, GenerationError> {
         structured.validate()?;
+        structured.normalize_segment_hints()?;
         structured.ensure_supported_effects()?;
         let text = structured.full_text();
         let effects = structured.proposed_effects_with_memory_policy(policy)?;
@@ -418,11 +419,9 @@ impl ResponseGenerator {
                     "intermediate tool response must not propose state changes".into(),
                 ));
             }
-            if output
-                .segments
-                .iter()
-                .any(|part| !part.intents.is_empty() || !part.emotions.is_empty())
-            {
+            if output.segments.iter().any(|part| {
+                part.hint.is_some() || !part.intents.is_empty() || !part.emotions.is_empty()
+            }) {
                 return Err(GenerationError::Response(
                     "intermediate tool response must not include segment actions".into(),
                 ));

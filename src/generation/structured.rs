@@ -392,6 +392,40 @@ impl StructuredResponse {
         )
     }
 
+    pub(crate) fn normalize_segment_hints(&mut self) -> Result<(), GenerationError> {
+        for segment in &mut self.segments {
+            let mut hint = segment.hint.as_deref().map(str::trim);
+            if hint == Some("") {
+                return Err(GenerationError::Response("segment hint is empty".into()));
+            }
+            for intent in segment
+                .intents
+                .iter()
+                .filter(|intent| intent.kind == "hint.show")
+            {
+                let text = ["text", "message", "value"]
+                    .iter()
+                    .find_map(|key| intent.payload.get(*key).and_then(Value::as_str))
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty() && intent.payload.len() == 1)
+                    .ok_or_else(|| {
+                        GenerationError::Response(
+                            "hint.show requires one nonempty text value".into(),
+                        )
+                    })?;
+                if hint.is_some_and(|hint| hint != text) {
+                    return Err(GenerationError::Response(
+                        "conflicting hints in one segment".into(),
+                    ));
+                }
+                hint = Some(text);
+            }
+            segment.hint = hint.map(str::to_owned);
+            segment.intents.retain(|intent| intent.kind != "hint.show");
+        }
+        Ok(())
+    }
+
     pub fn ensure_supported_effects(&self) -> Result<(), GenerationError> {
         if self
             .segments
