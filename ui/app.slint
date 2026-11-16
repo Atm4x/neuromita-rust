@@ -596,7 +596,7 @@ export component AppWindow inherits Window {
                     ActionSurface {
                         width: 105px; height: 38px; label: "Close"; background: Theme.hover;
                         Label { text: root.onboarding-language == "ru" ? "Закрыть" : "Close"; horizontal-alignment: center; }
-                        activated => { root.onboarding-guide-visible = false; }
+                        activated => { root.onboarding-guide-finish(); }
                     }
                 }
             }
