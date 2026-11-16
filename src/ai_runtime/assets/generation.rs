@@ -540,7 +540,16 @@ mod tests {
         };
         let (root, revision) = layer_fixture();
         let command = python_command(
-            "import os,pathlib,subprocess,sys,time; child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(120)'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); pathlib.Path(sys.argv[1]).write_text(str(os.getpid())+' '+str(child.pid)); time.sleep(120)",
+            r#"import os, pathlib, subprocess, sys, time
+child = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(120)"],
+    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+)
+marker = pathlib.Path(sys.argv[1])
+pending = marker.with_suffix(".tmp")
+pending.write_text(f"{os.getpid()} {child.pid}")
+pending.replace(marker)
+time.sleep(120)"#,
             Path::new(&marker),
         );
         let _ = run_install_hook(command, &[revision], Duration::from_secs(125)).await;
