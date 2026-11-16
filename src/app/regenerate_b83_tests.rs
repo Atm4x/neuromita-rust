@@ -150,15 +150,14 @@ async fn b83_foreign_knowledge_change_rejects_post_dispatch_acceptance(
             .outcome,
         crate::timeline::RegenerateRecoveryOutcome::MayHaveDispatched(_)
     ));
-    assert_eq!(
+    assert!(
         reopened
             .knows_event_at(
                 CharacterId::Crazy,
                 fixture.source.original_input,
                 Some(fixture.fence.at.through)
             )
-            .unwrap(),
-        true
+            .unwrap()
     );
     assert!(matches!(
         handle.cancel(),

@@ -1,6 +1,10 @@
 #![cfg(feature = "sqlite-system")]
 
-use std::{fs, path::PathBuf, process::Command};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use neuromita::{
     character::CharacterId,
@@ -77,7 +81,7 @@ impl Fixture {
         }
     }
 
-    fn call(&self, output: &PathBuf) -> std::process::Output {
+    fn call(&self, output: &Path) -> std::process::Output {
         Command::new(env!("CARGO_BIN_EXE_neuromita"))
             .args([
                 "timeline-backup",

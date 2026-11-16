@@ -365,13 +365,13 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
     });
     let guide_window = window.as_weak();
     window.on_onboarding_guide_select_image_mode(move |mode| {
-        if let Some(window) = guide_window.upgrade() {
-            if (0..=2).contains(&mode) {
-                window.set_onboarding_guide_sizing_mode(mode);
-                window.set_onboarding_guide_zoom(1.0);
-                window.set_onboarding_guide_pan_x(0.0);
-                window.set_onboarding_guide_pan_y(0.0);
-            }
+        if let Some(window) = guide_window.upgrade()
+            && (0..=2).contains(&mode)
+        {
+            window.set_onboarding_guide_sizing_mode(mode);
+            window.set_onboarding_guide_zoom(1.0);
+            window.set_onboarding_guide_pan_x(0.0);
+            window.set_onboarding_guide_pan_y(0.0);
         }
     });
     let guide_window = window.as_weak();
@@ -473,10 +473,10 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
     });
     let reject_window = window.as_weak();
     window.on_onboarding_reject(move || {
-        if let Err(error) = slint::quit_event_loop() {
-            if let Some(window) = reject_window.upgrade() {
-                window.set_notice(format!("Cannot exit after EULA rejection: {error}").into());
-            }
+        if let Err(error) = slint::quit_event_loop()
+            && let Some(window) = reject_window.upgrade()
+        {
+            window.set_notice(format!("Cannot exit after EULA rejection: {error}").into());
         }
     });
     let handler = dispatch.clone();
@@ -838,7 +838,7 @@ fn render(window: &AppWindow, presenter: &ShellPresenter, catalog: &Localizer) {
     if !window.get_onboarding_required() {
         if !window.get_onboarding_guide_visible() {
             let locale = presenter.locale().as_str();
-            if window.get_onboarding_language().to_string() != locale {
+            if window.get_onboarding_language().as_str() != locale {
                 window.set_onboarding_language(locale.into());
                 reset_guide_image_view(window);
             }

@@ -804,7 +804,9 @@ async fn scoped_retrieval_requires_explicit_forgotten_visibility_and_preserves_t
     use neuromita::{
         knowledge::{
             retrieval_fusion::FusionMode,
-            semantic_memory::{MemoryRetrievalScope, RetrievalStatus, SemanticRetrievalFilter},
+            semantic_memory::{
+                MemoryRetrievalScope, MemoryScopeAt, RetrievalStatus, SemanticRetrievalFilter,
+            },
         },
         memory::{CharacterMemories, MemoryChange, MemoryKind, MemoryState},
     };
@@ -848,8 +850,10 @@ async fn scoped_retrieval_requires_explicit_forgotten_visibility_and_preserves_t
             CharacterId::Crazy,
             &snapshot,
             "fact",
-            100,
-            scope,
+            MemoryScopeAt {
+                scope,
+                as_of_unix_ms: 100,
+            },
             SemanticRetrievalFilter::all(),
             FusionMode::Union,
         )
@@ -887,7 +891,9 @@ async fn forgotten_only_mode_is_empty_without_forgotten_and_never_falls_back_on_
     use neuromita::{
         knowledge::{
             retrieval_fusion::FusionMode,
-            semantic_memory::{MemoryRetrievalScope, RetrievalStatus, SemanticRetrievalFilter},
+            semantic_memory::{
+                MemoryRetrievalScope, MemoryScopeAt, RetrievalStatus, SemanticRetrievalFilter,
+            },
         },
         memory::{CharacterMemories, MemoryChange, MemoryState},
     };
@@ -909,8 +915,10 @@ async fn forgotten_only_mode_is_empty_without_forgotten_and_never_falls_back_on_
             CharacterId::Crazy,
             &snapshot,
             "tea",
-            0,
-            scope,
+            MemoryScopeAt {
+                scope,
+                as_of_unix_ms: 0,
+            },
             SemanticRetrievalFilter::all(),
             FusionMode::VectorOnly,
         )
@@ -933,8 +941,10 @@ async fn forgotten_only_mode_is_empty_without_forgotten_and_never_falls_back_on_
                 CharacterId::Crazy,
                 &snapshot,
                 "tea",
-                0,
-                MemoryRetrievalScope::ForgottenOnly,
+                MemoryScopeAt {
+                    scope: MemoryRetrievalScope::ForgottenOnly,
+                    as_of_unix_ms: 0
+                },
                 SemanticRetrievalFilter::all(),
                 FusionMode::VectorOnly,
             )

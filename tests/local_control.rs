@@ -140,6 +140,14 @@ struct Fixture {
     _serial: MutexGuard<'static, ()>,
 }
 
+#[derive(Default)]
+struct FixtureOptions {
+    telegram: bool,
+    remote_voice: bool,
+    settings_repository: Option<Arc<dyn SettingsRepository>>,
+    prompt_root: Option<std::path::PathBuf>,
+}
+
 impl Fixture {
     async fn start(configure: impl FnOnce(&mut ServerConfig)) -> Self {
         Self::with_queue(8, configure).await
@@ -162,20 +170,59 @@ impl Fixture {
     }
 
     async fn with_remote_voice() -> Self {
-        Self::with_voice_hub_telegram(8, |_| {}, false, None, false, true, None, None).await
+        Self::with_options(
+            8,
+            |_| {},
+            false,
+            None,
+            FixtureOptions {
+                remote_voice: true,
+                ..FixtureOptions::default()
+            },
+        )
+        .await
     }
 
     async fn with_telegram() -> Self {
-        Self::with_voice_hub_telegram(8, |_| {}, false, None, true, false, None, None).await
+        Self::with_options(
+            8,
+            |_| {},
+            false,
+            None,
+            FixtureOptions {
+                telegram: true,
+                ..FixtureOptions::default()
+            },
+        )
+        .await
     }
 
     async fn with_prompt_catalog(root: std::path::PathBuf) -> Self {
-        Self::with_voice_hub_telegram(8, |_| {}, false, None, false, false, None, Some(root)).await
+        Self::with_options(
+            8,
+            |_| {},
+            false,
+            None,
+            FixtureOptions {
+                prompt_root: Some(root),
+                ..FixtureOptions::default()
+            },
+        )
+        .await
     }
 
     async fn with_settings_repository(repository: Arc<dyn SettingsRepository>) -> Self {
-        Self::with_voice_hub_telegram(8, |_| {}, false, None, false, false, Some(repository), None)
-            .await
+        Self::with_options(
+            8,
+            |_| {},
+            false,
+            None,
+            FixtureOptions {
+                settings_repository: Some(repository),
+                ..FixtureOptions::default()
+            },
+        )
+        .await
     }
 
     async fn with_voice_and_hub(
@@ -184,22 +231,29 @@ impl Fixture {
         enabled: bool,
         hub_root: Option<std::path::PathBuf>,
     ) -> Self {
-        Self::with_voice_hub_telegram(
-            queue, configure, enabled, hub_root, false, false, None, None,
+        Self::with_options(
+            queue,
+            configure,
+            enabled,
+            hub_root,
+            FixtureOptions::default(),
         )
         .await
     }
 
-    async fn with_voice_hub_telegram(
+    async fn with_options(
         queue: usize,
         configure: impl FnOnce(&mut ServerConfig),
         enabled: bool,
         hub_root: Option<std::path::PathBuf>,
-        telegram: bool,
-        remote_voice: bool,
-        settings_repository: Option<Arc<dyn SettingsRepository>>,
-        prompt_root: Option<std::path::PathBuf>,
+        options: FixtureOptions,
     ) -> Self {
+        let FixtureOptions {
+            telegram,
+            remote_voice,
+            settings_repository,
+            prompt_root,
+        } = options;
         let serial = APPLICATION.lock().await;
         let preset = GenerationPreset::new(ProviderTemplate::Gemini(
             GeminiTemplate::google(
@@ -2286,7 +2340,7 @@ async fn debug_inspection_is_canonical_read_only_and_correlated() {
         assert_eq!(response["type"], "debug_inspect", "{response}");
         assert_eq!(response["scope"], scope);
         assert_eq!(response["evidence_level"], "core_ipc_only");
-        assert!(response["snapshot"][key].is_null() == false, "{response}");
+        assert!(!response["snapshot"][key].is_null(), "{response}");
     }
     let mut cmd = command("debug_inspect");
     cmd["scope"] = json!("character");
@@ -3106,8 +3160,8 @@ async fn presenter_admin_reads_settings_memory_and_history_with_versioned_mutati
         .until(|r| r["command_id"] == invalid_visibility["command_id"])
         .await;
     assert_eq!(rejected["code"], "invalid_value", "{rejected}");
-    assert_eq!(
-        fixture
+    assert!(
+        !fixture
             .app
             .presenter()
             .settings
@@ -3116,8 +3170,7 @@ async fn presenter_admin_reads_settings_memory_and_history_with_versioned_mutati
             .values
             .interface
             .visibility
-            .is_visible(neuromita::settings::SettingsArea::Api),
-        false
+            .is_visible(neuromita::settings::SettingsArea::Api)
     );
 
     let mut wait = command("presenter_admin_read");
@@ -4386,7 +4439,7 @@ async fn full_chat_trace_uses_presenter_and_denies_unprivileged_core_reads() {
 
 #[tokio::test]
 async fn presenter_speech_draft_is_single_reactive_owner_for_gui_and_mcp() {
-    let mut fixture = Fixture::start(|_| {}).await;
+    let fixture = Fixture::start(|_| {}).await;
     let mut client = fixture.connect().await;
     let mut observer = fixture.app.presenter().speech_chat.observe();
     let mut read = command("presenter_admin_read");

@@ -132,6 +132,25 @@ struct DownloadSpec<'a> {
     backend: NativeBackend,
 }
 
+struct DownloadControl<'a> {
+    cancellation: &'a CancellationToken,
+    progress: Option<&'a mpsc::UnboundedSender<NativeTransferProgress>>,
+}
+
+struct DownloadSize {
+    exact: Option<u64>,
+    maximum: u64,
+}
+
+impl DownloadSize {
+    fn exact(bytes: u64) -> Self {
+        Self {
+            exact: Some(bytes),
+            maximum: bytes,
+        }
+    }
+}
+
 /// Downloads a specifically authorized native revision to an exclusive, disposable
 /// staging directory. The local installer still performs a second full hash pass
 /// and publishes the model directory last. Cancellation is honored until that
@@ -201,8 +220,10 @@ impl NativeHttpsPackageTransfer {
             },
             &request.origin.0,
             staging_root,
-            cancellation,
-            Some(progress),
+            DownloadControl {
+                cancellation,
+                progress: Some(progress),
+            },
         )
         .await
     }
@@ -222,8 +243,10 @@ impl NativeHttpsPackageTransfer {
             spec,
             origin,
             staging_root,
-            cancellation,
-            None,
+            DownloadControl {
+                cancellation,
+                progress: None,
+            },
         )
         .await
     }
@@ -235,9 +258,12 @@ impl NativeHttpsPackageTransfer {
         spec: DownloadSpec<'_>,
         origin: &Url,
         staging_root: &Path,
-        cancellation: &CancellationToken,
-        progress: Option<&mpsc::UnboundedSender<NativeTransferProgress>>,
+        control: DownloadControl<'_>,
     ) -> Result<NativePackageInstallResult, NativeHttpsError> {
+        let DownloadControl {
+            cancellation,
+            progress,
+        } = control;
         let DownloadSpec {
             model_id,
             manifest_sha256,
@@ -264,8 +290,10 @@ impl NativeHttpsPackageTransfer {
             manifest_url,
             &manifest_path,
             &manifest_sha256,
-            None,
-            MAX_MANIFEST_BYTES,
+            DownloadSize {
+                exact: None,
+                maximum: MAX_MANIFEST_BYTES,
+            },
             cancellation,
             None,
         )
@@ -311,8 +339,7 @@ impl NativeHttpsPackageTransfer {
                 url,
                 &dest,
                 &expected,
-                Some(file.size_bytes),
-                file.size_bytes,
+                DownloadSize::exact(file.size_bytes),
                 cancellation,
                 progress.map(|sink| (sink, transferred, planned)),
             )
@@ -334,8 +361,7 @@ impl NativeHttpsPackageTransfer {
                 url,
                 &dest,
                 &expected,
-                Some(file.size_bytes),
-                file.size_bytes,
+                DownloadSize::exact(file.size_bytes),
                 cancellation,
                 progress.map(|sink| (sink, transferred, planned)),
             )
@@ -369,11 +395,14 @@ impl NativeHttpsPackageTransfer {
         url: Url,
         dest: &Path,
         expected_digest: &[u8; 32],
-        exact_size: Option<u64>,
-        max_size: u64,
+        size: DownloadSize,
         cancellation: &CancellationToken,
         observation: Option<(&mpsc::UnboundedSender<NativeTransferProgress>, u64, u64)>,
     ) -> Result<(), NativeHttpsError> {
+        let DownloadSize {
+            exact: exact_size,
+            maximum: max_size,
+        } = size;
         ensure_not_cancelled(cancellation)?;
         let future = async {
             let mut response = self
@@ -907,8 +936,10 @@ mod tests {
                 },
                 &server.base,
                 &fixture.staging,
-                &token,
-                Some(&tx),
+                DownloadControl {
+                    cancellation: &token,
+                    progress: Some(&tx),
+                },
             )
             .await
             .unwrap();
@@ -965,8 +996,10 @@ mod tests {
                 },
                 &server.base,
                 &fixture.staging,
-                &token,
-                Some(&tx),
+                DownloadControl {
+                    cancellation: &token,
+                    progress: Some(&tx)
+                },
             ),
             cancel,
         );

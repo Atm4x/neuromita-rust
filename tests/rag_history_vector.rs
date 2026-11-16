@@ -12,7 +12,8 @@ use neuromita::{
         },
         history_retrieval::{
             HistorySearchConfig, HistorySearchError, HistorySearchStatus,
-            search_archived_history_semantic, search_history, search_history_semantic,
+            SemanticHistorySearchConfig, search_archived_history_semantic, search_history,
+            search_history_semantic,
         },
         history_window::HistoryWindow,
         retrieval_fusion::{FusionMode, RetrievalMethod},
@@ -537,9 +538,11 @@ async fn vector_archived_window_only_embeds_excluded_history_and_never_active() 
         &view,
         &window,
         "warm",
-        HistorySearchConfig::default(),
-        FusionMode::VectorOnly,
-        Some(0.8),
+        SemanticHistorySearchConfig {
+            bounds: HistorySearchConfig::default(),
+            mode: FusionMode::VectorOnly,
+            minimum_cosine: Some(0.8),
+        },
     )
     .await
     .unwrap();
@@ -552,9 +555,11 @@ async fn vector_archived_window_only_embeds_excluded_history_and_never_active() 
         &view,
         &window,
         "warm",
-        HistorySearchConfig::default(),
-        FusionMode::Union,
-        Some(0.8),
+        SemanticHistorySearchConfig {
+            bounds: HistorySearchConfig::default(),
+            mode: FusionMode::Union,
+            minimum_cosine: Some(0.8),
+        },
     )
     .await
     .unwrap();
@@ -572,9 +577,11 @@ async fn vector_archived_window_only_embeds_excluded_history_and_never_active() 
         &view,
         &focused,
         "warm",
-        HistorySearchConfig::default(),
-        FusionMode::VectorOnly,
-        Some(0.8),
+        SemanticHistorySearchConfig {
+            bounds: HistorySearchConfig::default(),
+            mode: FusionMode::VectorOnly,
+            minimum_cosine: Some(0.8),
+        },
     )
     .await
     .unwrap();

@@ -352,12 +352,14 @@ impl TtsWorker for RustTtsWorker {
             self.0
                 .synthesize_speech(
                     permit,
-                    &model.model_id,
-                    revision,
-                    &text,
-                    &options.voice,
-                    &speech.tts.local_language,
-                    options.volume.get(),
+                    super::native_service::NativeSynthesisRequest {
+                        model_id: &model.model_id,
+                        manifest_sha256: revision,
+                        text: &text,
+                        voice: &options.voice,
+                        language: &speech.tts.local_language,
+                        volume_percent: options.volume.get(),
+                    },
                 )
                 .await
                 .map_err(VoiceError::Generation)

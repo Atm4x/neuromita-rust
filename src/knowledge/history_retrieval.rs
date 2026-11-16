@@ -40,6 +40,13 @@ impl Default for HistorySearchConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SemanticHistorySearchConfig {
+    pub bounds: HistorySearchConfig,
+    pub mode: FusionMode,
+    pub minimum_cosine: Option<f64>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HistorySearchStatus {
     EmptyCorpus,
@@ -363,9 +370,12 @@ pub async fn search_history_semantic(
         character,
         view,
         query,
-        config,
-        mode,
-        minimum_cosine,
+        SemanticHistorySearchConfig {
+            bounds: config,
+            mode,
+            minimum_cosine,
+        },
+        None,
         None,
     )
     .await
@@ -377,9 +387,7 @@ pub async fn search_archived_history_semantic(
     view: &MitaView,
     window: &HistoryWindow,
     query: &str,
-    config: HistorySearchConfig,
-    mode: FusionMode,
-    minimum_cosine: Option<f64>,
+    config: SemanticHistorySearchConfig,
 ) -> Result<HistorySearchResult, HistorySearchError> {
     search_history_semantic_with_window(
         retriever,
@@ -387,9 +395,8 @@ pub async fn search_archived_history_semantic(
         view,
         query,
         config,
-        mode,
-        minimum_cosine,
         Some(window),
+        None,
     )
     .await
 }
@@ -400,19 +407,15 @@ pub(crate) async fn search_archived_history_semantic_at(
     view: &MitaView,
     window: &HistoryWindow,
     query: &str,
-    config: HistorySearchConfig,
-    mode: FusionMode,
-    minimum_cosine: Option<f64>,
+    config: SemanticHistorySearchConfig,
     turn: crate::timeline::selection::TimelineTurn,
 ) -> Result<HistorySearchResult, HistorySearchError> {
-    search_history_semantic_with_window_at(
+    search_history_semantic_with_window(
         retriever,
         character,
         view,
         query,
         config,
-        mode,
-        minimum_cosine,
         Some(window),
         Some(turn),
     )
@@ -424,36 +427,15 @@ async fn search_history_semantic_with_window(
     character: CharacterId,
     view: &MitaView,
     query: &str,
-    config: HistorySearchConfig,
-    mode: FusionMode,
-    minimum_cosine: Option<f64>,
-    window: Option<&HistoryWindow>,
-) -> Result<HistorySearchResult, HistorySearchError> {
-    search_history_semantic_with_window_at(
-        retriever,
-        character,
-        view,
-        query,
-        config,
-        mode,
-        minimum_cosine,
-        window,
-        None,
-    )
-    .await
-}
-
-async fn search_history_semantic_with_window_at(
-    retriever: &SemanticMemoryRetriever,
-    character: CharacterId,
-    view: &MitaView,
-    query: &str,
-    config: HistorySearchConfig,
-    mode: FusionMode,
-    minimum_cosine: Option<f64>,
+    config: SemanticHistorySearchConfig,
     window: Option<&HistoryWindow>,
     turn: Option<crate::timeline::selection::TimelineTurn>,
 ) -> Result<HistorySearchResult, HistorySearchError> {
+    let SemanticHistorySearchConfig {
+        bounds: config,
+        mode,
+        minimum_cosine,
+    } = config;
     validate(character, view, query, config)?;
     if minimum_cosine.is_some_and(|value| !value.is_finite() || !(-1.0..=1.0).contains(&value)) {
         return Err(HistorySearchError::Configuration(

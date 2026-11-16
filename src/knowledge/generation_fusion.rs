@@ -77,21 +77,35 @@ fn keyword_generation_facts<'a>(
     ranked.into_iter().map(|(record, _)| record).collect()
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct GenerationRetrieval<'a> {
+    pub character: CharacterId,
+    pub memories: &'a [MemoryRecord],
+    pub islands: &'a [MemoryRecord],
+    pub relations: &'a [MemoryRelation],
+    pub view: &'a MitaView,
+    pub window: &'a HistoryWindow,
+    pub query: &'a str,
+    pub bounds: HistorySearchConfig,
+}
+
 /// Choose one bounded set of source-qualified candidates *before* rendering
 /// Memory and archived History. This operation is used only for lexical
 /// Keyword/FTS generation; semantic modes have a separate candidate pipeline.
 pub(crate) fn select_lexical_generation(
-    character: CharacterId,
-    memories: &[MemoryRecord],
-    islands: &[MemoryRecord],
-    relations: &[MemoryRelation],
-    view: &MitaView,
-    window: &HistoryWindow,
+    retrieval: GenerationRetrieval<'_>,
     history: &HistorySearchResult,
     history_method: RetrievalMethod,
-    query: &str,
-    config: HistorySearchConfig,
 ) -> Result<Option<String>, GenerationFusionError> {
+    let GenerationRetrieval {
+        character,
+        memories,
+        view,
+        window,
+        query,
+        bounds: config,
+        ..
+    } = retrieval;
     if view.character() != character
         || !window.matches(view)
         || history.branch != view.branch
@@ -190,9 +204,7 @@ pub(crate) fn select_lexical_generation(
         },
     )?;
 
-    render_generation_selection(
-        character, memories, islands, relations, view, window, query, config, combined, None,
-    )
+    render_generation_selection(retrieval, combined, None)
 }
 
 /// Single semantic admission: one embedding query, one cross-source RRF, and one
@@ -201,17 +213,19 @@ pub(crate) fn select_lexical_generation(
 pub(crate) async fn select_semantic_generation(
     retriever: &SemanticMemoryRetriever,
     memory_mode: FusionMode,
-    character: CharacterId,
-    memories: &[MemoryRecord],
-    islands: &[MemoryRecord],
-    relations: &[MemoryRelation],
-    view: &MitaView,
-    window: &HistoryWindow,
-    query: &str,
-    config: HistorySearchConfig,
+    retrieval: GenerationRetrieval<'_>,
     history_fusion: bool,
     turn: crate::timeline::selection::TimelineTurn,
 ) -> Result<Option<String>, GenerationFusionError> {
+    let GenerationRetrieval {
+        character,
+        memories,
+        view,
+        window,
+        query,
+        bounds: config,
+        ..
+    } = retrieval;
     if view.character() != character || !window.matches(view) {
         return Err(GenerationFusionError::StaleSelection);
     }
@@ -349,7 +363,15 @@ pub(crate) async fn select_semantic_generation(
         .rerank_fused(query, &mut combined, Some(turn))
         .await?;
     combined.truncate(config.limit);
-    render_generation_selection(
+    render_generation_selection(retrieval, combined, Some((space, cost)))
+}
+
+fn render_generation_selection(
+    retrieval: GenerationRetrieval<'_>,
+    selected: Vec<FusedHit>,
+    semantic: Option<(EmbeddingSpace, RetrievalCost)>,
+) -> Result<Option<String>, GenerationFusionError> {
+    let GenerationRetrieval {
         character,
         memories,
         islands,
@@ -357,24 +379,8 @@ pub(crate) async fn select_semantic_generation(
         view,
         window,
         query,
-        config,
-        combined,
-        Some((space, cost)),
-    )
-}
-
-fn render_generation_selection(
-    character: CharacterId,
-    memories: &[MemoryRecord],
-    islands: &[MemoryRecord],
-    relations: &[MemoryRelation],
-    view: &MitaView,
-    window: &HistoryWindow,
-    query: &str,
-    config: HistorySearchConfig,
-    selected: Vec<FusedHit>,
-    semantic: Option<(EmbeddingSpace, RetrievalCost)>,
-) -> Result<Option<String>, GenerationFusionError> {
+        bounds: config,
+    } = retrieval;
     if view.character() != character || !window.matches(view) {
         return Err(GenerationFusionError::StaleSelection);
     }

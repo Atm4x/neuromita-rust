@@ -23,6 +23,12 @@ pub use backup::{VerifiedTimelineBackup, VerifiedTimelineRestore};
 pub use maintenance::{DerivedIndexDrift, DerivedIndexPreview};
 use native::Connection;
 
+enum ForkAnchor<'a> {
+    Checkpoint(EventId),
+    PlayerInput(EventId, CharacterId),
+    Regenerate(&'a RegenerateAdmissionReceipt),
+}
+
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS timeline_schema(version INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS timeline_revision(
@@ -297,11 +303,9 @@ impl SqliteTimelineRepository {
         self.fork_and_select_anchor(
             parent,
             expected_parent_head,
-            checkpoint,
-            None,
+            ForkAnchor::Checkpoint(checkpoint),
             child,
             expected,
-            None,
         )
     }
 
@@ -318,32 +322,25 @@ impl SqliteTimelineRepository {
         self.fork_and_select_anchor(
             parent,
             expected_parent_head,
-            input,
-            Some(character),
+            ForkAnchor::PlayerInput(input, character),
             child,
             expected,
-            None,
         )
     }
 
     pub(crate) fn fork_and_select_regenerate_input(
         &mut self,
-        parent: BranchId,
-        expected_parent_head: u64,
-        input: EventId,
-        character: CharacterId,
-        child: BranchId,
-        expected: TimelineSelection,
         receipt: &RegenerateAdmissionReceipt,
     ) -> Result<TimelineSelection, TimelineError> {
         self.fork_and_select_anchor(
-            parent,
-            expected_parent_head,
-            input,
-            Some(character),
-            child,
-            expected,
-            Some(receipt),
+            receipt.parent_branch,
+            receipt.parent_head,
+            ForkAnchor::Regenerate(receipt),
+            receipt.child_branch,
+            TimelineSelection {
+                branch_id: receipt.parent_branch,
+                generation: receipt.parent_generation,
+            },
         )
     }
 
@@ -354,11 +351,9 @@ impl SqliteTimelineRepository {
         &mut self,
         parent: BranchId,
         expected_parent_head: u64,
-        anchor: EventId,
-        player_recipient: Option<CharacterId>,
+        anchor: ForkAnchor<'_>,
         child: BranchId,
         expected: TimelineSelection,
-        admission: Option<&RegenerateAdmissionReceipt>,
     ) -> Result<TimelineSelection, TimelineError> {
         self.with_write(|connection, store| {
             if expected.branch_id != parent || read_selection(connection)? != Some(expected) {
@@ -370,22 +365,18 @@ impl SqliteTimelineRepository {
             if store.branch(child).is_ok() {
                 return Err(TimelineError::Conflict);
             }
-            match (player_recipient, admission) {
-                (Some(character), Some(receipt)) => {
-                    if receipt.parent_head != expected_parent_head
-                        || receipt.parent_generation != expected.generation
-                    {
-                        return Err(TimelineError::ConcurrentWrite);
-                    }
-                    store.fork_at_regenerate_input(parent, anchor, character, child, receipt)?
-                }
-                (Some(character), None) => {
+            match anchor {
+                ForkAnchor::Regenerate(receipt) => store.fork_at_regenerate_input(
+                    parent,
+                    receipt.original_input,
+                    receipt.character,
+                    child,
+                    receipt,
+                )?,
+                ForkAnchor::PlayerInput(anchor, character) => {
                     store.fork_at_player_input(parent, anchor, character, child)?
                 }
-                (None, None) => store.fork(parent, anchor, child)?,
-                (None, Some(_)) => {
-                    return Err(TimelineError::Invalid("regenerate requires player input"));
-                }
+                ForkAnchor::Checkpoint(anchor) => store.fork(parent, anchor, child)?,
             };
             save_branch(connection, store, child)?;
             select_branch_in_transaction(connection, child, Some(expected))
@@ -2163,7 +2154,7 @@ mod tests {
         let original = encode(&facts[0]).unwrap();
         conn.write(
             "UPDATE timeline_events SET fact_json=? WHERE branch_id=? AND sequence=1",
-            &[&"{}", &branch.0.to_string()],
+            &["{}", &branch.0.to_string()],
         )
         .unwrap();
         assert!(matches!(

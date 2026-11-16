@@ -267,6 +267,18 @@ pub enum MemoryRetrievalScope {
     ForgottenOnly,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryScopeAt {
+    pub scope: MemoryRetrievalScope,
+    pub as_of_unix_ms: u64,
+}
+
+struct MemoryFusionOptions {
+    filter: SemanticRetrievalFilter,
+    mode: FusionMode,
+    include_forgotten: bool,
+}
+
 impl MemoryRetrievalScope {
     fn admits(self, record: &MemoryRecord, as_of_unix_ms: u64) -> bool {
         match (self, record.state) {
@@ -306,6 +318,13 @@ pub struct RetrievedMemory {
     pub cost: RetrievalCost,
 }
 
+type DispatchAuthority = dyn Fn(
+        TimelineTurn,
+        Vec<KnowledgeDispatchSource>,
+    ) -> super::embedding::EmbeddingFuture<'static, KnowledgeDispatchLease>
+    + Send
+    + Sync;
+
 /// A bounded, derived embedding cache. Membership always comes from the captured Timeline projection.
 /// No network await is performed while holding the cache lock.
 pub struct SemanticMemoryRetriever {
@@ -314,17 +333,7 @@ pub struct SemanticMemoryRetriever {
     instance: uuid::Uuid,
     max_entries: usize,
     reranker: Option<(Arc<dyn RerankProvider>, RerankPolicy)>,
-    dispatch_authority: OnceLock<
-        Arc<
-            dyn Fn(
-                    TimelineTurn,
-                    Vec<KnowledgeDispatchSource>,
-                )
-                    -> super::embedding::EmbeddingFuture<'static, KnowledgeDispatchLease>
-                + Send
-                + Sync,
-        >,
-    >,
+    dispatch_authority: OnceLock<Arc<DispatchAuthority>>,
 }
 
 impl SemanticMemoryRetriever {
@@ -351,15 +360,7 @@ impl SemanticMemoryRetriever {
     /// remains explicitly caller-scoped; generation never trusts cache membership.
     pub(crate) fn bind_dispatch_authority(
         &self,
-        authority: Arc<
-            dyn Fn(
-                    TimelineTurn,
-                    Vec<KnowledgeDispatchSource>,
-                )
-                    -> super::embedding::EmbeddingFuture<'static, KnowledgeDispatchLease>
-                + Send
-                + Sync,
-        >,
+        authority: Arc<DispatchAuthority>,
     ) -> Result<(), EmbeddingError> {
         self.dispatch_authority.set(authority).map_err(|_| {
             EmbeddingError::Configuration("semantic retriever already belongs to a Core".into())
@@ -609,8 +610,18 @@ impl SemanticMemoryRetriever {
             })
             .cloned()
             .collect();
-        self.retrieve_admitted_with_fusion(character, admitted, query, filter, mode, false, turn)
-            .await
+        self.retrieve_admitted_with_fusion(
+            character,
+            admitted,
+            query,
+            MemoryFusionOptions {
+                filter,
+                mode,
+                include_forgotten: false,
+            },
+            turn,
+        )
+        .await
     }
 
     /// Opt-in read of a single character's captured authoritative memory projection.
@@ -624,11 +635,14 @@ impl SemanticMemoryRetriever {
         character: CharacterId,
         snapshot: &CharacterMemories,
         query: &str,
-        as_of_unix_ms: u64,
-        scope: MemoryRetrievalScope,
+        scope_at: MemoryScopeAt,
         filter: SemanticRetrievalFilter,
         mode: FusionMode,
     ) -> Result<RetrievedMemory, EmbeddingError> {
+        let MemoryScopeAt {
+            scope,
+            as_of_unix_ms,
+        } = scope_at;
         let admitted = snapshot
             .all()
             .into_iter()
@@ -641,9 +655,11 @@ impl SemanticMemoryRetriever {
             character,
             admitted,
             query,
-            filter,
-            mode,
-            scope != MemoryRetrievalScope::ActiveOnly,
+            MemoryFusionOptions {
+                filter,
+                mode,
+                include_forgotten: scope != MemoryRetrievalScope::ActiveOnly,
+            },
             None,
         )
         .await
@@ -662,9 +678,11 @@ impl SemanticMemoryRetriever {
             character,
             records,
             query,
-            SemanticRetrievalFilter::all(),
-            mode,
-            true,
+            MemoryFusionOptions {
+                filter: SemanticRetrievalFilter::all(),
+                mode,
+                include_forgotten: true,
+            },
             None,
         )
         .await
@@ -926,11 +944,14 @@ impl SemanticMemoryRetriever {
         character: CharacterId,
         memories: Vec<MemoryRecord>,
         query: &str,
-        filter: SemanticRetrievalFilter,
-        mode: FusionMode,
-        include_forgotten: bool,
+        options: MemoryFusionOptions,
         turn: Option<TimelineTurn>,
     ) -> Result<RetrievedMemory, EmbeddingError> {
+        let MemoryFusionOptions {
+            filter,
+            mode,
+            include_forgotten,
+        } = options;
         let filter = filter.validate()?;
         let config = FusionConfig {
             mode,

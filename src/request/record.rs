@@ -22,6 +22,13 @@ pub(crate) struct RequestRecord {
     regenerate_protocol: Option<RegenerateProtocol>,
 }
 
+#[derive(Default)]
+pub(crate) struct AdmittedConfiguration {
+    pub settings: Option<Arc<crate::settings::SettingsSnapshot>>,
+    pub preset: Option<crate::generation::GenerationPreset>,
+    pub prompt: Option<Arc<crate::prompts::PromptSetSnapshot>>,
+}
+
 struct Execution {
     snapshot: Arc<RequestSnapshot>,
     dataset: DatasetCapture,
@@ -119,37 +126,11 @@ impl RequestObserver {
 }
 
 impl RequestRecord {
-    #[cfg(test)]
     pub(crate) fn new(
         message: Box<dyn GenerationCommand>,
         id: RequestId,
         admission: TimelineAdmission,
-        settings_snapshot: Option<Arc<crate::settings::SettingsSnapshot>>,
-        admitted_preset: Option<crate::generation::GenerationPreset>,
-        admitted_prompt: Option<Arc<crate::prompts::PromptSetSnapshot>>,
-        registry: Weak<RegistryInner>,
-        cancel_ingress: Option<Arc<dyn super::RegenerateCancellation>>,
-    ) -> Arc<Self> {
-        Self::new_with_protocol(
-            message,
-            id,
-            admission,
-            settings_snapshot,
-            admitted_preset,
-            admitted_prompt,
-            registry,
-            cancel_ingress,
-            None,
-        )
-    }
-
-    pub(crate) fn new_with_protocol(
-        message: Box<dyn GenerationCommand>,
-        id: RequestId,
-        admission: TimelineAdmission,
-        settings_snapshot: Option<Arc<crate::settings::SettingsSnapshot>>,
-        admitted_preset: Option<crate::generation::GenerationPreset>,
-        admitted_prompt: Option<Arc<crate::prompts::PromptSetSnapshot>>,
+        configuration: AdmittedConfiguration,
         registry: Weak<RegistryInner>,
         cancel_ingress: Option<Arc<dyn super::RegenerateCancellation>>,
         regenerate_protocol: Option<RegenerateProtocol>,
@@ -196,9 +177,9 @@ impl RequestRecord {
             cancellation: CancellationToken::new(),
             registry,
             admission,
-            settings_snapshot,
-            admitted_preset,
-            admitted_prompt,
+            settings_snapshot: configuration.settings,
+            admitted_preset: configuration.preset,
+            admitted_prompt: configuration.prompt,
             cancel_ingress,
             regenerate_protocol,
         })

@@ -129,11 +129,10 @@ async fn b84_crash_gap_orphan_requires_explicit_abandonment_and_survives_archive
     assert!(api.registry.get(request).is_none());
     assert!(ingress_dispatch_denied(&reopened, request, admission));
     let owner = reopened.lock().unwrap();
-    assert_eq!(
-        owner
+    assert!(
+        !owner
             .knows_event_at(CharacterId::Crazy, source.accepted_message, None)
-            .unwrap(),
-        false
+            .unwrap()
     );
     assert!(
         owner

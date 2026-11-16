@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 
 use super::{
     DiagnosticScope, DiagnosticsAccess, GenerationCommand, RegenerateProtocol, RequestDiscovery,
-    RequestHandle, RequestRegistry, SubmitError,
+    RequestHandle, RequestRegistry, SubmitError, record::AdmittedConfiguration,
 };
 use crate::{
     generation::PresetCatalog,
@@ -343,9 +343,11 @@ impl ChatApiState {
             Box::new(request),
             id,
             admission,
-            Some(settings),
-            Some(preset),
-            prompt,
+            AdmittedConfiguration {
+                settings: Some(settings),
+                preset: Some(preset),
+                prompt,
+            },
             protocol,
             protocol.map(|_| Arc::clone(&self.ingress) as Arc<dyn RegenerateCancellation>),
         );

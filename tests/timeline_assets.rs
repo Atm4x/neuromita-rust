@@ -710,17 +710,18 @@ fn verification_streams_multi_chunk_content_and_still_rejects_same_length_corrup
         store.inventory(std::slice::from_ref(&reference)),
         Err(TimelineAssetError::Corrupt)
     ));
-    assert!(matches!(
-        store.append_checked(
-            &mut timeline,
-            branch,
-            1,
-            "corrupt",
-            json!({}),
-            vec![attachment(&reference, &[CharacterId::Crazy])],
-        ),
-        Err(_)
-    ));
+    assert!(
+        store
+            .append_checked(
+                &mut timeline,
+                branch,
+                1,
+                "corrupt",
+                json!({}),
+                vec![attachment(&reference, &[CharacterId::Crazy])],
+            )
+            .is_err()
+    );
     assert_eq!(timeline.branch(branch).unwrap().head_sequence, 1);
 }
 
@@ -802,7 +803,6 @@ fn multimodal_projection_preserves_text_across_revision_in_memory() {
 fn multimodal_projection_preserves_text_across_revision_in_sqlite() {
     use neuromita::timeline::storage::SqliteTimelineRepository;
     let temp = TempDir::new();
-    let mut timeline =
-        SqliteTimelineRepository::open(&temp.path().join("timeline.sqlite")).unwrap();
+    let mut timeline = SqliteTimelineRepository::open(temp.path().join("timeline.sqlite")).unwrap();
     mixed_content_projection_contract(&mut timeline);
 }

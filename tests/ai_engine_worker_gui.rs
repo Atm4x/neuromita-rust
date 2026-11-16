@@ -75,7 +75,9 @@ fn actual_ai_engine_workspace_renders_independent_failure_and_recovery_states() 
         std::fs::create_dir_all(&folder).unwrap();
         for (name, pixels) in [("failed", failed), ("recovered", recovered)] {
             let mut ppm = format!("P6\n{} {}\n255\n", pixels.width(), pixels.height()).into_bytes();
-            for pixel in pixels.as_bytes().chunks_exact(4) {
+            let (rgba, remainder) = pixels.as_bytes().as_chunks::<4>();
+            assert!(remainder.is_empty());
+            for pixel in rgba {
                 ppm.extend_from_slice(&pixel[..3]);
             }
             std::fs::write(folder.join(format!("ai-engine-{name}.ppm")), ppm).unwrap();

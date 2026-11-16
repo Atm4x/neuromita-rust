@@ -1,7 +1,7 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use neuromita::ai_runtime::{
-    AiService, ModelActivation, ProcessTopology, PythonHostConfig,
+    AiService, HardwareRecoveryGuard, ModelActivation, ProcessTopology, PythonHostConfig,
     application::{AiApplicationConfig, AiWorkerSelection},
     backend::{BackendInstaller, BackendKind, LockedBackend},
     composition::{RuntimeComposition, ServiceSelection},
@@ -737,8 +737,12 @@ async fn hardware_worker_crash_recovery_requires_same_persisted_profile_and_repr
                 &plan.workers[0].composition,
                 &plan.workers[0].models,
                 &mismatched_profile,
-                &|| unreachable!("mismatched profile must be rejected before candidate launch"),
-                &|| Ok(()),
+                HardwareRecoveryGuard {
+                    verify_hardware: &|| unreachable!(
+                        "mismatched profile must be rejected before candidate launch"
+                    ),
+                    check_current: &|| Ok(()),
+                },
             )
             .await,
         Err(AiRuntimeError::ActivationSuperseded)

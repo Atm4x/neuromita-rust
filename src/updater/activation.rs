@@ -1026,7 +1026,8 @@ mod tests {
     fn readonly_installed_executable_does_not_block_candidate_sync() {
         let fixture = Fixture::new();
         let target = fixture.target();
-        let mut permissions = fs::metadata(&target).unwrap().permissions();
+        let original_permissions = fs::metadata(&target).unwrap().permissions();
+        let mut permissions = original_permissions.clone();
         permissions.set_readonly(true);
         fs::set_permissions(&target, permissions).unwrap();
 
@@ -1038,9 +1039,7 @@ mod tests {
         assert!(fs::metadata(&candidate).unwrap().permissions().readonly());
 
         for path in [target, candidate] {
-            let mut permissions = fs::metadata(&path).unwrap().permissions();
-            permissions.set_readonly(false);
-            fs::set_permissions(path, permissions).unwrap();
+            fs::set_permissions(path, original_permissions.clone()).unwrap();
         }
     }
 

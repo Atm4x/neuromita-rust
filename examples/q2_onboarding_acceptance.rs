@@ -37,9 +37,13 @@ fn assert_changed(before: &[u8], after: &[u8], scenario: &str) -> Result<(), Str
             "{scenario}: rendered buffer dimensions changed unexpectedly"
         ));
     }
+    let (before, remainder) = before.as_chunks::<4>();
+    if !remainder.is_empty() {
+        return Err(format!("{scenario}: invalid RGBA buffer size"));
+    }
     let changed = before
-        .chunks_exact(4)
-        .zip(after.chunks_exact(4))
+        .iter()
+        .zip(after.as_chunks::<4>().0)
         .filter(|(a, b)| a != b)
         .count();
     if changed < 500 {

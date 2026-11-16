@@ -635,10 +635,9 @@ async fn reranker_infer_failure_is_terminal_and_restart_recovers(crash: bool) {
             .contains(reason)
     );
     assert!(
-        tokio::fs::try_exists(root.join("mock_reranker/block_first_rerank.flag"))
+        !tokio::fs::try_exists(root.join("mock_reranker/block_first_rerank.flag"))
             .await
             .unwrap()
-            == false
     );
     supervisor.stop(AiService::Reranker).await.unwrap();
     let next_generation = supervisor.start(AiService::Reranker).await.unwrap();

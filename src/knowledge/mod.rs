@@ -183,24 +183,14 @@ impl KnowledgeRetrieval {
         view: &crate::timeline::view::MitaView,
         window: &history_window::HistoryWindow,
         query: &str,
-        config: history_retrieval::HistorySearchConfig,
-        mode: FusionMode,
-        minimum_cosine: Option<f64>,
+        config: history_retrieval::SemanticHistorySearchConfig,
         turn: crate::timeline::selection::TimelineTurn,
     ) -> Result<history_retrieval::HistorySearchResult, history_retrieval::HistorySearchError> {
         let KnowledgeMode::Semantic { retriever, .. } = &self.mode else {
             return Err(history_retrieval::HistorySearchError::BackendUnavailable);
         };
         history_retrieval::search_archived_history_semantic_at(
-            retriever,
-            character,
-            view,
-            window,
-            query,
-            config,
-            mode,
-            minimum_cosine,
-            turn,
+            retriever, character, view, window, query, config, turn,
         )
         .await
     }
@@ -211,22 +201,13 @@ impl KnowledgeRetrieval {
         view: &crate::timeline::view::MitaView,
         window: &history_window::HistoryWindow,
         query: &str,
-        config: history_retrieval::HistorySearchConfig,
-        mode: FusionMode,
-        minimum_cosine: Option<f64>,
+        config: history_retrieval::SemanticHistorySearchConfig,
     ) -> Result<history_retrieval::HistorySearchResult, history_retrieval::HistorySearchError> {
         let KnowledgeMode::Semantic { retriever, .. } = &self.mode else {
             return Err(history_retrieval::HistorySearchError::BackendUnavailable);
         };
         history_retrieval::search_archived_history_semantic(
-            retriever,
-            character,
-            view,
-            window,
-            query,
-            config,
-            mode,
-            minimum_cosine,
+            retriever, character, view, window, query, config,
         )
         .await
     }
@@ -257,14 +238,7 @@ impl KnowledgeRetrieval {
     /// caller-owned and source-derived, with one shared reranker and budget.
     pub(crate) async fn select_joint_semantic_generation(
         &self,
-        character: CharacterId,
-        memories: &[MemoryRecord],
-        islands: &[MemoryRecord],
-        relations: &[MemoryRelation],
-        view: &crate::timeline::view::MitaView,
-        window: &history_window::HistoryWindow,
-        query: &str,
-        config: history_retrieval::HistorySearchConfig,
+        retrieval: generation_fusion::GenerationRetrieval<'_>,
         history_fusion: bool,
         turn: crate::timeline::selection::TimelineTurn,
     ) -> Result<Option<String>, generation_fusion::GenerationFusionError> {
@@ -274,14 +248,7 @@ impl KnowledgeRetrieval {
         generation_fusion::select_semantic_generation(
             retriever,
             *fusion,
-            character,
-            memories,
-            islands,
-            relations,
-            view,
-            window,
-            query,
-            config,
+            retrieval,
             history_fusion,
             turn,
         )

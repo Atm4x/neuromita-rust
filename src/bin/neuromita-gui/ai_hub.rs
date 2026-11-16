@@ -266,29 +266,6 @@ fn model(entry: UnifiedHubEntry) -> HubModel {
     }
 }
 
-pub fn install_preview(
-    window: &AppWindow,
-    category: String,
-    id: String,
-    token: i32,
-    summary: String,
-    error: String,
-    stage: String,
-    can_install: bool,
-    operation_id: String,
-) {
-    window.set_ai_hub_install_preview(HubInstallPreview {
-        category: category.into(),
-        id: id.into(),
-        token,
-        summary: summary.into(),
-        error: error.into(),
-        stage: stage.into(),
-        can_install,
-        operation_id: operation_id.into(),
-    });
-}
-
 pub fn install_operation(
     window: &AppWindow,
     operation_id: String,

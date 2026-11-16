@@ -482,8 +482,10 @@ pub fn fork_replacing_document(
         root,
         character,
         name,
-        expected_sha256,
-        replacement,
+        DocumentReplacement {
+            expected_sha256,
+            source: replacement,
+        },
         output_root,
         || Ok(()),
         sync_corpus_parent,
@@ -563,12 +565,17 @@ fn sync_corpus_parent(parent: &Path) -> std::io::Result<()> {
     }
 }
 
+#[derive(Clone, Copy)]
+struct DocumentReplacement<'a> {
+    expected_sha256: &'a str,
+    source: &'a Path,
+}
+
 fn fork_replacing_with_hooks(
     root: &Path,
     character: CharacterId,
     name: &str,
-    expected_sha256: &str,
-    replacement: &Path,
+    replacement: DocumentReplacement<'_>,
     output_root: &Path,
     after_staging: impl FnOnce() -> Result<(), DocumentError>,
     sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
@@ -577,10 +584,7 @@ fn fork_replacing_with_hooks(
         root,
         character,
         name,
-        ForkChange::Replace {
-            expected_sha256,
-            source: replacement,
-        },
+        ForkChange::Replace(replacement),
         output_root,
         after_staging,
         sync_parent,
@@ -588,7 +592,7 @@ fn fork_replacing_with_hooks(
     Ok(ForkedCorpus {
         character,
         replaced_name: name.to_owned(),
-        previous_sha256: expected_sha256.to_owned(),
+        previous_sha256: replacement.expected_sha256.to_owned(),
         replacement_sha256: result
             .replacement_sha256
             .ok_or(DocumentError::InvalidText)?,
@@ -657,31 +661,26 @@ fn fork_adding_with_hooks(
 
 #[derive(Clone, Copy)]
 enum ForkChange<'a> {
-    Add {
-        source: &'a Path,
-    },
-    Replace {
-        expected_sha256: &'a str,
-        source: &'a Path,
-    },
-    Remove {
-        expected_sha256: &'a str,
-    },
+    Add { source: &'a Path },
+    Replace(DocumentReplacement<'a>),
+    Remove { expected_sha256: &'a str },
 }
 
 impl<'a> ForkChange<'a> {
     fn source(self) -> Option<&'a Path> {
         match self {
-            Self::Add { source } | Self::Replace { source, .. } => Some(source),
+            Self::Add { source } | Self::Replace(DocumentReplacement { source, .. }) => {
+                Some(source)
+            }
             Self::Remove { .. } => None,
         }
     }
 
     fn expected_sha256(self) -> Option<&'a str> {
         match self {
-            Self::Replace {
+            Self::Replace(DocumentReplacement {
                 expected_sha256, ..
-            }
+            })
             | Self::Remove { expected_sha256 } => Some(expected_sha256),
             Self::Add { .. } => None,
         }
@@ -801,7 +800,7 @@ fn fork_changing_with_hooks(
         for document in &original.documents {
             let data = if document.path == name {
                 match change {
-                    ForkChange::Replace { .. } => replacement_bytes
+                    ForkChange::Replace(_) => replacement_bytes
                         .as_ref()
                         .ok_or(DocumentError::InvalidText)?
                         .clone(),
@@ -813,7 +812,7 @@ fn fork_changing_with_hooks(
             } else {
                 read_regular(&root.join(&document.path), MAX_SINGLE_BYTES)?
             };
-            if !(matches!(change, ForkChange::Replace { .. }) && document.path == name)
+            if !(matches!(change, ForkChange::Replace(_)) && document.path == name)
                 && sha256(&data) != document.source_sha256
             {
                 return Err(DocumentError::StaleIndex);
@@ -832,7 +831,7 @@ fn fork_changing_with_hooks(
         let mut expected = original.documents.clone();
         match change {
             ForkChange::Remove { .. } => expected.retain(|document| document.path != name),
-            ForkChange::Replace { .. } | ForkChange::Add { .. } => {
+            ForkChange::Replace(_) | ForkChange::Add { .. } => {
                 let bytes = replacement_bytes
                     .as_ref()
                     .ok_or(DocumentError::InvalidText)?;
@@ -1085,8 +1084,10 @@ mod fork_tests {
                 &self.root,
                 CharacterId::Kind,
                 "notes.md",
-                &self.expected,
-                &self.replacement,
+                DocumentReplacement {
+                    expected_sha256: &self.expected,
+                    source: &self.replacement,
+                },
                 &self.target,
                 hook,
                 sync,

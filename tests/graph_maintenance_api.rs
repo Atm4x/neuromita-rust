@@ -60,7 +60,7 @@ fn config() -> ApplicationConfig {
 async fn live_graph_clear_is_scoped_confirmed_versioned_and_preserves_canonical_fact() {
     let _single_app = APPLICATION.lock().await;
     let app = ApplicationLifecycle::start(config()).await.unwrap();
-    assert_eq!(GraphMaintenanceApi::reindex_available().unwrap(), false);
+    assert!(!GraphMaintenanceApi::reindex_available().unwrap());
     let crazy = CharacterApi::get(CharacterId::Crazy).unwrap();
     let kind = CharacterApi::get(CharacterId::Kind).unwrap();
     let initial = crazy.memories().await.unwrap();

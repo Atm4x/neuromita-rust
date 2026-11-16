@@ -6,7 +6,7 @@ use std::{
 use thiserror::Error;
 use tokio::sync::broadcast;
 
-use super::*;
+use super::{record::AdmittedConfiguration, *};
 use crate::timeline::selection::TimelineAdmission;
 
 pub(crate) struct RequestRegistry {
@@ -208,33 +208,17 @@ impl RequestRegistry {
         preset: Option<crate::generation::GenerationPreset>,
         prompt: Option<Arc<crate::prompts::PromptSetSnapshot>>,
     ) -> RequestHandle {
-        self.register_with_regenerate_cancellation(
-            message, id, admission, settings, preset, prompt, None,
-        )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn register_with_regenerate_cancellation(
-        &self,
-        message: Box<dyn GenerationCommand>,
-        id: RequestId,
-        admission: TimelineAdmission,
-        settings: Option<Arc<crate::settings::SettingsSnapshot>>,
-        preset: Option<crate::generation::GenerationPreset>,
-        prompt: Option<Arc<crate::prompts::PromptSetSnapshot>>,
-        cancel_ingress: Option<Arc<dyn super::RegenerateCancellation>>,
-    ) -> RequestHandle {
         self.register_with_regenerate_protocol(
             message,
             id,
             admission,
-            settings,
-            preset,
-            prompt,
-            cancel_ingress
-                .as_ref()
-                .map(|_| RegenerateProtocol::LegacyFork),
-            cancel_ingress,
+            AdmittedConfiguration {
+                settings,
+                preset,
+                prompt,
+            },
+            None,
+            None,
         )
     }
 
@@ -243,19 +227,15 @@ impl RequestRegistry {
         message: Box<dyn GenerationCommand>,
         id: RequestId,
         admission: TimelineAdmission,
-        settings: Option<Arc<crate::settings::SettingsSnapshot>>,
-        preset: Option<crate::generation::GenerationPreset>,
-        prompt: Option<Arc<crate::prompts::PromptSetSnapshot>>,
+        configuration: AdmittedConfiguration,
         protocol: Option<RegenerateProtocol>,
         cancel_ingress: Option<Arc<dyn super::RegenerateCancellation>>,
     ) -> RequestHandle {
-        let record = RequestRecord::new_with_protocol(
+        let record = RequestRecord::new(
             message,
             id,
             admission,
-            settings,
-            preset,
-            prompt,
+            configuration,
             Arc::downgrade(&self.inner),
             cancel_ingress,
             protocol,
@@ -433,10 +413,9 @@ mod tests {
                 },
                 context_epoch: 0,
             },
-            None,
-            None,
-            None,
+            AdmittedConfiguration::default(),
             std::sync::Weak::new(),
+            None,
             None,
         );
         registry

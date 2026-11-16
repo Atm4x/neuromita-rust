@@ -153,10 +153,16 @@ fn verify_staged_schemas(
     }
 }
 
+struct VerifiedStagedCatalog {
+    incoming: Vec<Vec<u8>>,
+    previous: Vec<Option<Vec<u8>>>,
+    plan: PythonPresetStage,
+}
+
 fn verified_staged_catalog(
     review: &Path,
     active: &Path,
-) -> Result<(Vec<Vec<u8>>, Vec<Option<Vec<u8>>>, PythonPresetStage), PresetActivationError> {
+) -> Result<VerifiedStagedCatalog, PresetActivationError> {
     let mut new = Vec::with_capacity(2);
     let mut old = Vec::with_capacity(2);
     for i in 0..2 {
@@ -196,7 +202,11 @@ fn verified_staged_catalog(
         }
     }
     validate_pair(&new[0], &new[1])?;
-    Ok((new, old, expected_plan))
+    Ok(VerifiedStagedCatalog {
+        incoming: new,
+        previous: old,
+        plan: expected_plan,
+    })
 }
 
 fn verified_staged_settings(
@@ -360,7 +370,7 @@ impl PresetActivation {
             return Err(PresetActivationError::UnsafePath);
         }
         verify_staged_schemas(review, schemas)?;
-        let (_, _, plan) = verified_staged_catalog(review, active)?;
+        let VerifiedStagedCatalog { plan, .. } = verified_staged_catalog(review, active)?;
         let (source, _) = verified_staged_settings(review, &plan)?;
         let current = read_file(&active.join("settings.json"), SETTINGS_LIMIT)?
             .ok_or(PresetActivationError::SnapshotConflict)?;
@@ -438,7 +448,11 @@ impl PresetActivation {
             return Err(PresetActivationError::UnsafePath);
         }
         verify_staged_schemas(review, schemas)?;
-        let (mut new, mut old, expected_plan) = verified_staged_catalog(review, active)?;
+        let VerifiedStagedCatalog {
+            incoming: mut new,
+            previous: mut old,
+            plan: expected_plan,
+        } = verified_staged_catalog(review, active)?;
         if with_settings {
             let (python_settings, selected) = verified_staged_settings(review, &expected_plan)?;
             let settings_original = read_file(&active.join("settings.json"), SETTINGS_LIMIT)?

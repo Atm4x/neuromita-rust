@@ -1,6 +1,10 @@
 #![cfg(feature = "sqlite-system")]
 
-use std::{fs, path::PathBuf, process::Command};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use neuromita::{
     character::CharacterId,
@@ -118,7 +122,7 @@ impl Fixture {
         self.restore_to(&self.restored, fingerprint)
     }
 
-    fn restore_to(&self, output: &PathBuf, fingerprint: &str) -> std::process::Output {
+    fn restore_to(&self, output: &Path, fingerprint: &str) -> std::process::Output {
         Command::new(env!("CARGO_BIN_EXE_neuromita"))
             .args([
                 "timeline-restore",
