@@ -35,6 +35,49 @@ fn mutation(kind: EventKind, who: CharacterId, key: &str, value: serde_json::Val
     draft
 }
 
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn sqlite_history_before_fork_excludes_later_inherited_facts() {
+    use neuromita::timeline::storage::SqliteTimelineRepository;
+    let path = std::env::temp_dir().join(format!("mitaview-fork-{}.sqlite", uuid::Uuid::new_v4()));
+    let root = BranchId::new();
+    let fork = BranchId::new();
+    let mut repo = SqliteTimelineRepository::open(&path).unwrap();
+    repo.create_session(SessionId::new(), root).unwrap();
+    let past = player("past", &[CharacterId::Crazy]);
+    let past_id = past.id;
+    let future = player("future", &[CharacterId::Crazy]);
+    let future_id = future.id;
+    let mut reset = EventDraft::new(EventKind::CharacterContextReset);
+    reset.observers.insert(CharacterId::Crazy);
+    let mut checkpoint = EventDraft::new(EventKind::Checkpoint);
+    checkpoint.payload.insert("snapshot".into(), json!({}));
+    let checkpoint_id = checkpoint.id;
+    push(&mut repo, root, vec![past, future, reset, checkpoint]);
+    repo.fork(root, checkpoint_id, fork).unwrap();
+    assert!(
+        repo.knows(fork, CharacterId::Crazy, past_id, Some(1))
+            .unwrap()
+    );
+    assert!(
+        !repo
+            .knows(fork, CharacterId::Crazy, future_id, Some(1))
+            .unwrap()
+    );
+    assert_eq!(
+        repo.context_epoch_at(fork, CharacterId::Crazy, Some(1))
+            .unwrap(),
+        0
+    );
+    let projection =
+        TimelineMessageQueries::capture(&repo, fork, CharacterId::Crazy, Some(1)).unwrap();
+    assert_eq!(projection.messages()[0].event_id, past_id);
+    drop(repo);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+}
+
 fn run_projection_contract(repo: &mut dyn TimelineRepository) {
     let branch = BranchId::new();
     repo.create_session(SessionId::new(), branch).unwrap();

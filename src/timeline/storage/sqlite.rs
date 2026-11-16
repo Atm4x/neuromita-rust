@@ -100,6 +100,8 @@ CREATE TABLE IF NOT EXISTS timeline_acquisitions(
 );
 CREATE INDEX IF NOT EXISTS timeline_acquisitions_by_event
     ON timeline_acquisitions(branch_id,character_id,event_id,sequence);
+CREATE INDEX IF NOT EXISTS timeline_acquisitions_by_observer
+    ON timeline_acquisitions(branch_id,character_id,sequence,event_id);
 CREATE TABLE IF NOT EXISTS timeline_resets(
     branch_id TEXT NOT NULL,
     sequence INTEGER NOT NULL,
@@ -695,8 +697,9 @@ impl<'a> IndexedWorld<'a> {
             if ceiling.is_some_and(|value| value > info.head_sequence) {
                 return Err(TimelineError::Invalid("read position exceeds branch head"));
             }
-            lineage.push((id, ceiling.unwrap_or(info.head_sequence)));
-            ceiling = Some(info.fork_sequence);
+            let cutoff = ceiling.unwrap_or(info.head_sequence);
+            lineage.push((id, cutoff));
+            ceiling = Some(info.fork_sequence.min(cutoff));
             next = info.parent;
         }
         Ok(Self {
@@ -715,6 +718,53 @@ impl<'a> IndexedWorld<'a> {
             }
         }
         Err(TimelineError::NotFound)
+    }
+
+    fn view(&self, character: CharacterId) -> Result<Vec<KnownEvent>, TimelineError> {
+        let reset = self
+            .max_position("timeline_resets", character, None)?
+            .unwrap_or(0);
+        let lineage =
+            serde_json::to_string(&self.lineage).map_err(|error| storage(error.to_string()))?;
+        // Drive fact lookups from observer acquisitions, not from the branch prefix.
+        self.connection
+            .query(
+                "WITH lineage AS (
+                SELECT json_extract(value, '$[0]') AS branch_id,
+                       json_extract(value, '$[1]') AS cutoff
+                FROM json_each(?1)
+             ), acquired AS (
+                SELECT a.event_id, max(a.sequence) AS learned_at
+                FROM lineage l
+                JOIN timeline_acquisitions a
+                  ON a.branch_id=l.branch_id AND a.sequence<=l.cutoff
+                WHERE a.character_id=?2 AND a.sequence>=?3
+                GROUP BY a.event_id
+             )
+             SELECT e.fact_json, a.learned_at
+             FROM acquired a
+             CROSS JOIN lineage l
+             JOIN timeline_fact_keys k
+               ON k.branch_id=l.branch_id AND k.event_id=a.event_id AND k.sequence<=l.cutoff
+             JOIN timeline_events e ON e.branch_id=k.branch_id AND e.sequence=k.sequence
+             WHERE NOT EXISTS (
+                SELECT 1 FROM lineage f
+                JOIN timeline_knowledge_forgets kf
+                  ON kf.branch_id=f.branch_id AND kf.sequence<=f.cutoff
+                WHERE kf.character_id=?2 AND kf.event_id=a.event_id
+                  AND kf.sequence>=a.learned_at
+             )
+             ORDER BY a.learned_at,k.sequence",
+                &[&lineage, &character.to_string(), &reset.to_string()],
+            )?
+            .into_iter()
+            .map(|row| {
+                Ok(KnownEvent {
+                    fact: decode(&row[0])?,
+                    learned_at: parse_u64(&row[1])?,
+                })
+            })
+            .collect()
     }
 
     fn latest_reset(&self, character: CharacterId) -> Result<u64, TimelineError> {
@@ -1399,12 +1449,9 @@ impl TimelineRepository for SqliteTimelineRepository {
         character: CharacterId,
         through: Option<u64>,
     ) -> Result<Vec<KnownEvent>, TimelineError> {
-        let connection = self.connection()?;
-        connection.exec("BEGIN")?;
-        let result = read_page(&connection, branch, 0, through, i64::MAX as usize, None)
-            .map(|facts| crate::timeline::domain::character_view(&facts, character));
-        connection.exec("ROLLBACK")?;
-        result
+        self.read_snapshot(|connection| {
+            IndexedWorld::through(connection, branch, through)?.view(character)
+        })
     }
     fn knows(
         &self,
