@@ -84,7 +84,6 @@ impl ContextSummary {
     }
 }
 
-#[cfg(feature = "sqlite-system")]
 pub(super) type IndexedContext = (
     ContextReadVersion,
     ContextSummary,

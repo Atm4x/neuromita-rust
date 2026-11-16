@@ -1957,7 +1957,7 @@ impl SessionTimeline {
             .transpose()
             .map_err(invalid)?;
         #[cfg(not(feature = "sqlite-system"))]
-        let indexed = None;
+        let indexed: Option<Option<context_summary::IndexedContext>> = None;
         let (read_version, summary, known) = if let Some(indexed) = indexed {
             indexed.ok_or(ContextCaptureError::StaleKnowledge)?
         } else {
