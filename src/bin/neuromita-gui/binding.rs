@@ -1002,13 +1002,16 @@ impl Options {
                 }
             }
         }
-        let root =
-            neuromita::portable::PortableDataRoot::resolve(explicit_data_directory.as_deref())?;
+        let root = neuromita::portable::PortableDataRoot::from_executable(
+            &std::env::current_exe()?,
+            explicit_data_directory.as_deref(),
+            None,
+        )?;
         root.ensure_writable()?;
         options.data_directory = root.path().to_path_buf();
         if !explicit_language {
             let path = options.data_directory.join("settings.json");
-            if path.exists() {
+            if path.try_exists()? {
                 use neuromita::settings::{JsonSettingsRepository, SettingsRepository};
                 let stored = JsonSettingsRepository::new(path).load()?;
                 options.locale = stored.settings.interface.language.locale();

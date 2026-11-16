@@ -3,9 +3,10 @@
 Validated on **2026-11-05** against the user-supplied `Prompts.zip`.
 The full original directory is kept byte-for-byte under
 `Prompts/` (538 files, 31 prompt sets, 9 characters). It is byte-identical to
-the `Prompts/` directory in `PythonBuild-v2026.06.22.1`. For a portable
-desktop profile, place this directory under its data root or explicitly set
-`NEUROMITA_PROMPTS_DIR` to the desired source directory.
+the `Prompts/` directory in `PythonBuild-v2026.06.22.1` at the time of validation.
+The current desktop initializes `UserData/Prompts` beside the executable from
+its bundled corpus. To use a separate profile, pass `--data-dir` and put the
+desired corpus in that profile's `Prompts` subdirectory before launching it.
 The uploaded archive SHA-256 was:
 `0e5cae2801096d47be4eef3230a15c5f0c914bcb93b4eee16430eb17384073c6`.
 `Legacy` files are preserved as fixtures; they were not modified or integrated.

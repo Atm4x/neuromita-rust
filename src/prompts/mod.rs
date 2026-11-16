@@ -1,5 +1,7 @@
 mod dsl;
 mod expression;
+#[cfg(feature = "gui")]
+mod portable_bundle;
 mod post_dsl;
 pub use post_dsl::{PostDslProgram, PostDslResult};
 

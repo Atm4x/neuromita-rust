@@ -2,9 +2,10 @@
 
 ## Filesystem convention
 
-The desktop runtime reads `NEUROMITA_PROMPTS_DIR` when set, otherwise
-`<data_directory>/Prompts`. The catalog is always attached; missing directories yield an empty list,
-and the existing character prompt remains active until a set is installed.
+The desktop runtime reads `<installation>/UserData/Prompts`. For a fresh profile it
+extracts the bundled corpus there before attaching the catalog. An explicitly
+selected `--data-dir` profile uses its own `Prompts` subdirectory. Existing local
+prompt files are preserved on subsequent runs and executable replacement.
 An explicitly selected missing set always fails the request. Each character ID owns `<Prompts>/<CharacterId>/<Set>/`, for example
 `Prompts/Crazy/Default/`. `main_template.txt` is required to list a set;
 `react_template.txt` is required when using that set for React operations.

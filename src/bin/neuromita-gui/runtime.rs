@@ -432,10 +432,13 @@ async fn start(
         ),
     )
     .with_ai_hub_install_root(directory.to_path_buf());
-    let root = std::env::var_os("NEUROMITA_PROMPTS_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| directory.join("Prompts"));
-    let mut config = config.with_prompt_catalog(neuromita::prompts::PromptCatalog::new(root));
+    let prompts = neuromita::prompts::PromptCatalog::open_portable(directory).map_err(|error| {
+        format!(
+            "Cannot initialize {}: {error}",
+            directory.join("Prompts").display()
+        )
+    })?;
+    let mut config = config.with_prompt_catalog(prompts);
     config.video_capture = neuromita::video_capture::VideoCapture::for_desktop(directory);
     config.game_link = Some(neuromita::game_link::GameLinkConfig::new(
         "127.0.0.1:12345"

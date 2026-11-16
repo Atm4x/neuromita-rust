@@ -62,10 +62,42 @@ fn main() {
     speech_manifests.push_str("];\n");
     std::fs::write(output.join("speech-plugin-manifests.rs"), speech_manifests).unwrap();
     #[cfg(feature = "gui")]
+    bundle_prompts(&root.join("Prompts"), &output);
+    #[cfg(feature = "gui")]
     slint_build::compile_with_config(
         "ui/app.slint",
         slint_build::CompilerConfiguration::new()
             .embed_resources(slint_build::EmbedResourcesKind::EmbedFiles),
     )
     .expect("compile desktop interface");
+}
+
+#[cfg(feature = "gui")]
+fn bundle_prompts(root: &std::path::Path, output: &std::path::Path) {
+    use std::fmt::Write;
+
+    fn collect(directory: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(directory).expect("read bundled prompts directory") {
+            let entry = entry.expect("read bundled prompt entry");
+            let kind = entry.file_type().expect("read bundled prompt entry type");
+            if kind.is_dir() {
+                collect(&entry.path(), files);
+            } else if kind.is_file() {
+                files.push(entry.path());
+            }
+        }
+    }
+
+    println!("cargo:rerun-if-changed={}", root.display());
+    let mut files = Vec::new();
+    collect(root, &mut files);
+    files.sort();
+    assert!(!files.is_empty(), "bundled prompt directory is empty");
+    let mut source = String::from("const BUNDLED_PROMPTS: &[(&str, &[u8])] = &[\n");
+    for path in files {
+        let relative = path.strip_prefix(root).unwrap();
+        writeln!(source, "({relative:?}, include_bytes!({path:?})),").unwrap();
+    }
+    source.push_str("];\n");
+    std::fs::write(output.join("bundled-prompts.rs"), source).expect("write bundled prompts");
 }

@@ -111,14 +111,7 @@ pub fn eula_text(code: &str) -> &'static str {
 }
 
 pub fn pending(data_dir: &Path) -> Result<bool, io::Error> {
-    let path = data_dir.join("settings.json");
-    if !path.exists() {
-        return Ok(true);
-    }
-    let stored = JsonSettingsRepository::new(path)
-        .load()
-        .map_err(io::Error::other)?;
-    Ok(!stored.settings.onboarding.eula_accepted)
+    Ok(startup_state(data_dir)?.requires_consent)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,7 +124,7 @@ pub struct StartupState {
 
 pub fn startup_state(data_dir: &Path) -> Result<StartupState, io::Error> {
     let path = data_dir.join("settings.json");
-    let onboarding = if path.exists() {
+    let onboarding = if path.try_exists()? {
         JsonSettingsRepository::new(path)
             .load()
             .map_err(io::Error::other)?
@@ -169,14 +162,7 @@ pub fn guide_reopen_position(data_dir: &Path) -> Result<(guide::GuideLevel, u8),
 }
 
 pub fn selected_guide_level(data_dir: &Path) -> Result<guide::GuideLevel, io::Error> {
-    let path = data_dir.join("settings.json");
-    if !path.exists() {
-        return Ok(guide::GuideLevel::default());
-    }
-    let stored = JsonSettingsRepository::new(path)
-        .load()
-        .map_err(io::Error::other)?;
-    Ok(stored.settings.onboarding.guide_level)
+    Ok(startup_state(data_dir)?.guide_level)
 }
 
 pub fn accept(data_dir: &Path, language: &str) -> Result<(), io::Error> {
@@ -190,9 +176,10 @@ pub fn accept(data_dir: &Path, language: &str) -> Result<(), io::Error> {
             ));
         }
     };
+    let lease = SettingsInstanceLease::acquire(data_dir).map_err(io::Error::other)?;
     let path = data_dir.join("settings.json");
     let repo = JsonSettingsRepository::new(path.clone());
-    let mut stored = if path.exists() {
+    let mut stored = if path.try_exists()? {
         repo.load().map_err(io::Error::other)?
     } else {
         StoredSettings {
@@ -211,7 +198,8 @@ pub fn accept(data_dir: &Path, language: &str) -> Result<(), io::Error> {
     stored.settings.onboarding.eula_accepted = true;
     stored.settings.onboarding.guide_completed = false;
     stored.settings.onboarding.guide_page = 0;
-    repo.save(&stored).map_err(io::Error::other)
+    repo.save_with_owner(&stored, &lease)
+        .map_err(io::Error::other)
 }
 
 #[cfg(test)]
@@ -286,6 +274,25 @@ mod tests {
         assert_eq!(accepted.settings.voice.voice, "existing-custom-voice");
         accept(&dir.0, "ru").unwrap();
         assert_eq!(repo.load().unwrap(), accepted);
+    }
+
+    #[test]
+    fn replacing_the_portable_executable_keeps_consent_and_completed_guide() {
+        let directory = Directory::new();
+        let executable = directory.0.join("neuromita-gui.exe");
+        std::fs::write(&executable, b"original build").unwrap();
+        let root =
+            crate::portable::PortableDataRoot::from_executable(&executable, None, None).unwrap();
+        root.ensure_writable().unwrap();
+        accept(root.path(), "en").unwrap();
+        GuideChange::Complete.persist_offline(root.path()).unwrap();
+
+        std::fs::write(&executable, b"recompiled build").unwrap();
+        let root =
+            crate::portable::PortableDataRoot::from_executable(&executable, None, None).unwrap();
+        let next_start = startup_state(root.path()).unwrap();
+        assert!(!next_start.requires_consent);
+        assert!(!next_start.requires_guide);
     }
 
     #[test]
