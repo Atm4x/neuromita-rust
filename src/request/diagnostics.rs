@@ -448,6 +448,7 @@ impl FailureStage {
             GenerationError::Http(_) => Self::ProviderHttp,
             GenerationError::Response(_) if malformed => Self::ProviderResponseMalformed,
             GenerationError::Response(_) => Self::ProviderResponse,
+            GenerationError::EmptySpoken => Self::ProviderResponse,
         }
     }
 }

@@ -401,7 +401,9 @@ impl OpenAiProvider {
                 .await?;
                 decode(&bytes, config.protocol)
             };
-            if let Err(error) = &result {
+            if let Err(error) = &result
+                && !matches!(error, GenerationError::EmptySpoken)
+            {
                 observer.failed(error);
             }
             result

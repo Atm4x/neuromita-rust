@@ -113,6 +113,7 @@ impl GeminiProvider {
             };
             match result {
                 Ok(response) => Ok(response),
+                Err(GenerationError::EmptySpoken) => Err(GenerationError::EmptySpoken),
                 Err(error) => {
                     observer.failed(&error);
                     Err(error)

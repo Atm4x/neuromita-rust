@@ -98,9 +98,7 @@ impl StructuredResponse {
 
     pub fn validate(&self) -> Result<(), GenerationError> {
         if self.segments.is_empty() || self.full_text().trim().is_empty() {
-            return Err(GenerationError::Response(
-                "structured response has no spoken segments".into(),
-            ));
+            return Err(GenerationError::EmptySpoken);
         }
         if self.segments.iter().any(|segment| {
             segment

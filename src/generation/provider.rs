@@ -30,6 +30,8 @@ pub enum GenerationError {
     Http(u16),
     #[error("invalid provider response: {0}")]
     Response(String),
+    #[error("structured response has no spoken segments")]
+    EmptySpoken,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -281,6 +283,8 @@ pub struct ResponseGenerator {
     providers: HashMap<ProviderKind, Arc<dyn GenerationProvider>>,
 }
 
+const EMPTY_SPOKEN_REPAIR: &str = "Your previous structured response contained no spoken text. Return one or more non-empty spoken segments and complete the requested action.";
+
 impl ResponseGenerator {
     pub fn new(
         providers: impl IntoIterator<Item = Arc<dyn GenerationProvider>>,
@@ -360,6 +364,7 @@ impl ResponseGenerator {
             assets: request.assets,
         };
         let mut depth = 0;
+        let mut empty_spoken_repair_attempted = false;
         let structured = loop {
             let mut output = match tokio::time::timeout_at(
                 deadline,
@@ -367,7 +372,23 @@ impl ResponseGenerator {
             )
             .await
             {
-                Ok(result) => result?,
+                Ok(Ok(output)) => output,
+                Ok(Err(GenerationError::EmptySpoken)) if !empty_spoken_repair_attempted => {
+                    empty_spoken_repair_attempted = true;
+                    input.tool_history.push(PromptMessage {
+                        role: PromptRole::User,
+                        text: EMPTY_SPOKEN_REPAIR.into(),
+                    });
+                    observer.stream_reset();
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+                Ok(Err(error)) => {
+                    if matches!(error, GenerationError::EmptySpoken) {
+                        observer.failed(&error);
+                    }
+                    return Err(error);
+                }
                 Err(_) => {
                     let error = GenerationError::DeadlineExceeded;
                     observer.failed(&error);
