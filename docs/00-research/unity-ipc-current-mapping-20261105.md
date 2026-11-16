@@ -1,6 +1,6 @@
 # Unity ↔ Python: observed wire contract and migration to GameLink (#1)
 
-**Audit date:** 2026-11-05. **Status:** source audit, pending pinned Unity Git SHA and real client/server E2E.
+**Audit date:** 2026-11-05, live update 2026-11-16. **Status:** source audit complete; live GameLink path verified on a pinned Unity checkout. Typed producer coverage remains partial (#13).
 
 ## Evidence and scope
 
@@ -80,3 +80,17 @@ Treat **world fact**, **character observation**, **generation trigger**, and **T
 3. **Unity↔Rust E2E:** perform at least one real Unity session handshake → player event → reply → typed result → audio/playback feedback → application acknowledgment, then reconnect and re-test; belongs primarily to #13/#25/#26.
 
 The source audit establishes the **semantics and migration mapping**. New client implementation and external E2E remain separately tracked. This document is not a claim of wire compatibility between the old Unity client and new Rust server.
+
+## 7. Live verification, 2026-11-16
+
+The pinned integration checkout is `C:/Development/NeuroMita-Unity-URP`, branch `GameLink` tracking `Atm4x/GameLink`, commit **`0e1605705f8656aecc9ac1ebb9a99dac6ee78810`**, Unity **6000.3.12f1**. Rust Core is `Atm4x/neuromita-rust` commit **`fc971655728f9c7788479c51d592172b113b1865`** plus the local acceptance fixes ending at **`0abb4c1e`**, built with `gui,mcp`. The live run used the isolated profile `E:/NeuroMita-Acceptance/rust-profile` and the real editor Play Mode scene `CrazyHouse`.
+
+Confirmed in the live process:
+
+- `hello`/`hello_ack`, `resume`, `get_game_settings`, `update_context`, `publish_message`, `publish_events`, `reply`, `request_accepted`, terminal result, `acknowledge_result`, cancel and playback reporting are the production callsites in `RustGameLinkClient`/`RustGameLinkRuntime`; no legacy Python `NetworkController` path is active in this branch.
+- Player message request `e2584053665345a6bb60cfece1115e29` created exactly one `PlayerMessage` (sequence 34) and one linked `CharacterMessage` (35, `reply_to` and `caused_by`) plus `CharacterStateChanged` (36).
+- A real `Switcher.Toggle()` in `MainHall` with `GetCharactersObserving` returning `Crazy` published `player_light_changed` as canonical `UnityEvent` facts at sequences 32 and 33, with `switch_id`, `world_id`, `room`, `is_on`, UTC time, event IDs and `observers=["Crazy"]`. A later three-actor run recorded `Crazy, Kind, Cappie` at sequence 47; after Crazy moved outside 10 m while remaining active, sequence 48 contained only `Kind, Cappie`, and the Core visibility projection matched those observers.
+- A production idle path exercised the empty structured-response retry: request `d38359b8-cbee-4707-a65b-4db82f7cc3ac` produced `PlayerInactive` at sequence 43 and one linked `CharacterMessage` at sequence 44, with a three-draft receipt and a successful terminal Presenter outcome.
+- Idle TCP reconnect, an in-flight request reconnect, and Core restart were previously verified in `acceptance.md` with the same client code.
+
+Still open for #13/#442: other semantic Unity producers, presence facts beyond the verified light event, conflicting retry payloads, receipt durability across a Core restart, playback/effect acknowledgement, missing-ACK recovery, and provider presentation of structured world facts.
