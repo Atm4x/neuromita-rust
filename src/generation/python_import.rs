@@ -80,6 +80,34 @@ fn has_entries(value: Option<&Value>) -> bool {
     })
 }
 
+fn python_number(values: &Value, key: &str) -> Result<f32, PresetCatalogError> {
+    values
+        .get(key)
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .map(|value| value as f32)
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| invalid(&format!("invalid number {key}")))
+}
+
+fn python_integer<T>(values: &Value, key: &str) -> Result<T, PresetCatalogError>
+where
+    T: TryFrom<i64> + std::str::FromStr,
+{
+    values
+        .get(key)
+        .and_then(|value| {
+            value
+                .as_i64()
+                .and_then(|value| T::try_from(value).ok())
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .ok_or_else(|| invalid(&format!("invalid integer {key}")))
+}
+
 impl PythonPresetImport {
     pub fn parse(presets: &[u8], templates: &[u8]) -> Result<Self, PresetCatalogError> {
         let presets: Value =
@@ -205,19 +233,6 @@ impl PythonPresetImport {
         }) {
             return Err(invalid("unsupported enabled model setting"));
         }
-        let number = |key: &str| {
-            values
-                .get(key)
-                .and_then(Value::as_f64)
-                .ok_or_else(|| invalid(&format!("missing number {key}")))
-        };
-        let integer = |key: &str| {
-            values
-                .get(key)
-                .and_then(Value::as_u64)
-                .and_then(|v| u32::try_from(v).ok())
-                .ok_or_else(|| invalid(&format!("invalid integer {key}")))
-        };
         let include_thoughts = if enabled.contains(&"include_thoughts") {
             Some(
                 values
@@ -245,11 +260,7 @@ impl PythonPresetImport {
             })
         } else if enabled.contains(&"thinking_budget") {
             Some(GeminiThinking::Budget {
-                tokens: values
-                    .get("thinking_budget")
-                    .and_then(Value::as_i64)
-                    .and_then(|v| i32::try_from(v).ok())
-                    .ok_or_else(|| invalid("invalid thinking budget"))?,
+                tokens: python_integer(values, "thinking_budget")?,
                 include_thoughts,
             })
         } else if include_thoughts.is_some() {
@@ -289,12 +300,12 @@ impl PythonPresetImport {
             send_temperature: enabled.contains(&"temperature"),
             send_max_output_tokens: enabled.contains(&"max_tokens"),
             top_p: if enabled.contains(&"top_p") {
-                Some(number("top_p")? as f32)
+                Some(python_number(values, "top_p")?)
             } else {
                 None
             },
             top_k: if enabled.contains(&"top_k") {
-                Some(integer("top_k")?)
+                Some(python_integer(values, "top_k")?)
             } else {
                 None
             },
@@ -317,8 +328,8 @@ impl PythonPresetImport {
                 endpoint: endpoint.into(),
                 model: model.into(),
                 credential: CredentialReference::Local(credential_name.clone()),
-                temperature: number("temperature")? as f32,
-                max_output_tokens: integer("max_tokens")?,
+                temperature: python_number(values, "temperature")?,
+                max_output_tokens: python_integer(values, "max_tokens")?,
                 timeout_ms: 60_000,
                 transforms,
                 options,
@@ -407,16 +418,9 @@ impl PythonPresetImport {
         }) {
             return Err(invalid("unsupported enabled model setting"));
         }
-        let number = |key: &str| {
-            values
-                .get(key)
-                .and_then(Value::as_f64)
-                .map(|v| v as f32)
-                .ok_or_else(|| invalid(&format!("missing number {key}")))
-        };
         let optional = |key: &str| {
             if enabled.contains(&key) {
-                number(key).map(Some)
+                python_number(values, key).map(Some)
             } else {
                 Ok(None)
             }
@@ -461,12 +465,8 @@ impl PythonPresetImport {
             model: text(preset, "default_model")?.into(),
             credential: (!key.is_empty())
                 .then(|| CredentialReference::Local(credential_name.clone())),
-            temperature: number("temperature")?,
-            max_output_tokens: values
-                .get("max_tokens")
-                .and_then(Value::as_u64)
-                .and_then(|v| u32::try_from(v).ok())
-                .ok_or_else(|| invalid("invalid max_tokens"))?,
+            temperature: python_number(values, "temperature")?,
+            max_output_tokens: python_integer(values, "max_tokens")?,
             timeout_ms: 60_000,
             options,
             transforms,
@@ -502,7 +502,7 @@ mod tests {
     #[test]
     fn template_protocol_wins_over_stale_preset_field_and_secret_is_separated() {
         let templates = json!({"templates":{"3":{"name":"Google", "protocol_id":"google_gemini_default", "url":"", "default_model":"model"}}});
-        let base = json!({"name":"Main","base":3,"protocol_id":"","protocol_overrides":{},"url":"","default_model":"model","key":"private-fixture-key","model_settings":{"values":{"temperature":1.0,"max_tokens":3000,"thinking_level":"minimal"},"enabled":["max_tokens","thinking_level"]}});
+        let base = json!({"name":"Main","base":3,"protocol_id":"","protocol_overrides":{},"url":"","default_model":"model","key":"private-fixture-key","model_settings":{"values":{"temperature":"0.75","max_tokens":" 3000 ","thinking_level":"minimal"},"enabled":["max_tokens","thinking_level"]}});
         let mut other = base.clone();
         other["protocol_id"] = "openai_compatible_default".into();
         let mut custom = other.clone();
@@ -525,6 +525,8 @@ mod tests {
         let PresetDefinition::Gemini(config) = &plan.records[&PresetId(18)].definition else {
             panic!()
         };
+        assert_eq!(config.temperature, 0.75);
+        assert_eq!(config.max_output_tokens, 3000);
         assert!(!config.options.send_temperature);
         assert!(config.options.send_max_output_tokens);
         assert!(matches!(
@@ -534,5 +536,38 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn openai_import_compiles_python_numeric_strings_without_accepting_invalid_numbers() {
+        let valid = json!({
+            "name": "OpenAI compatible", "protocol_id": "openai_compatible_default",
+            "url": "https://example.invalid/v1/chat/completions", "default_model": "model",
+            "key": "", "protocol_overrides": {},
+            "model_settings": {
+                "values": {"temperature": "0.5", "max_tokens": "+1024", "top_p": "0.25"},
+                "enabled": ["temperature", "max_tokens", "top_p"]
+            }
+        });
+        let mut non_finite = valid.clone();
+        non_finite["model_settings"]["values"]["top_p"] = json!("NaN");
+        let mut fractional_tokens = valid.clone();
+        fractional_tokens["model_settings"]["values"]["max_tokens"] = json!("10.5");
+        let plan = PythonPresetImport::parse(
+            &serde_json::to_vec(&json!({
+                "presets": {"1": valid, "2": non_finite, "3": fractional_tokens}
+            }))
+            .unwrap(),
+            br#"{"templates":{}}"#,
+        )
+        .unwrap();
+        assert_eq!(plan.records.len(), 1);
+        let PresetDefinition::OpenAi(config) = &plan.records[&PresetId(1)].definition else {
+            panic!("expected a compatible OpenAI preset");
+        };
+        assert_eq!(config.temperature, 0.5);
+        assert_eq!(config.max_output_tokens, 1024);
+        assert_eq!(config.options.top_p, Some(0.25));
+        assert_eq!(plan.blockers.len(), 2);
     }
 }
