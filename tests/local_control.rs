@@ -1904,7 +1904,7 @@ async fn lifecycle_probe_identifies_distinct_real_core_instances() {
 }
 
 #[tokio::test]
-async fn game_link_audio_chunks_delivery_ack_and_ptt_survive_resume() {
+async fn game_link_audio_chunks_playback_and_ptt_survive_resume() {
     let mut fixture = Fixture::with_voice(8, |_| {}, true).await;
     let address = fixture.app.game_link().unwrap().address();
     let mut game = GameClient::connect(address).await;
@@ -1934,9 +1934,6 @@ async fn game_link_audio_chunks_delivery_ack_and_ptt_survive_resume() {
     assert_eq!(game.until("playback_accepted").await["phase"], "started");
     game.send(json!({"command_id":Uuid::new_v4(),"command":"report_playback","request_id":request,"playback_id":playback,"phase":"completed"})).await;
     assert_eq!(game.until("playback_accepted").await["phase"], "completed");
-    let ack_id = Uuid::new_v4();
-    game.send(json!({"command_id":ack_id,"command":"acknowledge_result","request_id":request,"event_id":event,"applied":true})).await;
-    assert_eq!(game.until("result_acknowledged").await["applied"], true);
     let mut inspector = fixture.connect().await;
     let mut inspect = command("game_link_inspect");
     inspect["session_id"] = json!(session);
@@ -1951,15 +1948,10 @@ async fn game_link_audio_chunks_delivery_ack_and_ptt_survive_resume() {
         "game_link_protocol_session_owner"
     );
     assert_eq!(result["snapshot"]["session"]["observed"], true);
-    assert_eq!(result["snapshot"]["session"]["delivery_acks"], 1);
     assert_eq!(result["snapshot"]["session"]["resume_count"], 0);
     assert_eq!(result["snapshot"]["request"]["request_id"], json!(request));
     assert_eq!(result["snapshot"]["request"]["phase"], "finished");
     assert_eq!(result["snapshot"]["request"]["event_id"], json!(event));
-    assert_eq!(
-        result["snapshot"]["request"]["delivery_ack"]["applied"],
-        true
-    );
     assert_eq!(result["snapshot"]["request"]["playback_phase"], "completed");
     assert_eq!(result["snapshot"]["full_stack_e2e_verified"], false);
     assert!(!result.to_string().contains("audio output"));
@@ -1991,24 +1983,27 @@ async fn game_link_audio_chunks_delivery_ack_and_ptt_survive_resume() {
     resumed.until("session_resumed").await;
     let state = resumed.until("session_state").await;
     assert_eq!(state["ptt"]["capture_id"], capture.to_string());
-    assert_eq!(state["deliveries"][0]["ack"]["applied"], true);
     assert_eq!(state["playback"][0]["report"]["phase"], "completed");
+    let replayed = resumed.until("request_completed").await;
+    assert_eq!(replayed["request_id"], json!(request));
+    assert_eq!(replayed["event_id"], json!(event));
+    assert!(fixture.calls.try_recv().is_err());
+    assert_eq!(fixture.app.at().through, 1);
     inspector.send(inspect.clone()).await;
     let after_resume = inspector
         .until(|frame| frame["command_id"] == inspect["command_id"])
         .await;
     assert_eq!(
-        after_resume["snapshot"]["request"]["delivery_ack"]["applied"],
-        true
+        after_resume["snapshot"]["request"]["event_id"],
+        json!(event)
     );
     assert_eq!(after_resume["snapshot"]["session"]["connected"], true);
     assert_eq!(after_resume["snapshot"]["session"]["resume_count"], 1);
-    assert_eq!(after_resume["snapshot"]["session"]["delivery_acks"], 1);
     fixture.shutdown().await;
 }
 
 #[tokio::test]
-async fn game_link_restricts_audio_and_result_ack_to_session() {
+async fn game_link_restricts_audio_and_playback_to_session() {
     let mut fixture = Fixture::with_voice(8, |_| {}, true).await;
     let address = fixture.app.game_link().unwrap().address();
     let mut first = GameClient::connect(address).await;
@@ -2020,11 +2015,10 @@ async fn game_link_restricts_audio_and_result_ack_to_session() {
         .await;
     let request = uuid(&first.until("request_accepted").await["request_id"]);
     fixture.call().await.finish("secret");
-    let frame = first.until("request_completed").await;
-    let event = uuid(&frame["event_id"]);
+    first.until("request_completed").await;
     second.send(json!({"command_id":Uuid::new_v4(),"command":"read_audio_chunk","request_id":request,"offset":0,"length":1024})).await;
     assert_eq!(second.until("error").await["code"], "ownership_denied");
-    second.send(json!({"command_id":Uuid::new_v4(),"command":"acknowledge_result","request_id":request,"event_id":event,"applied":true})).await;
+    second.send(json!({"command_id":Uuid::new_v4(),"command":"report_playback","request_id":request,"playback_id":Uuid::new_v4(),"phase":"started"})).await;
     assert_eq!(second.until("error").await["code"], "ownership_denied");
     first.send(json!({"command_id":Uuid::new_v4(),"command":"read_audio_chunk","request_id":request,"offset":0,"length":20_000})).await;
     assert_eq!(first.until("error").await["code"], "invalid_chunk");

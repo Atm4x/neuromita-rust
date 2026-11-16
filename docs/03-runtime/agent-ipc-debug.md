@@ -241,24 +241,20 @@ The MCP tool takes optional `session_id` and `request_id` UUID strings.
 `request_id` without `session_id` is rejected. With neither ID, only counts
 of existing/connected sessions are returned; individual session identities are
 **not** enumerated. With a known session ID, it reports connected state,
-context revision, number of recorded command receipts, delivery ACK count,
+context revision, number of recorded command receipts,
 playback report count, PTT active flag, and **resume_count**. With a known
-request ID, the authoritative request state, terminal flag, matching event ID,
-GameLink accepted `acknowledge_result` (`applied` and `error_present` only), and
-playback phase become visible. No session credentials, private text, audio,
-raw Unity error messages, or other sessions' request IDs are returned.
+request ID, it reports the authoritative request state, terminal flag, matching
+event ID and playback phase. Session credentials, private text, audio and other
+sessions' request IDs are excluded.
 
-A GameLink ACK proves only that the GameLink protocol owner accepted a matching
-ACK sent by its connected client. An `applied: true` claim is supplied by the
-client and **does not independently prove Unity scene mutation, rendered speech,
-or actual playback**. `resume_count` increments on successful ownership transfer
-and does not reset on reconnect; a stable delivery ACK count and replayed request
-identity can then support a duplicate-prevention acceptance trace. The data is
-explicitly classified `core_gamelink_tcp_only`, not full-stack E2E.
+`resume_count` increments on successful ownership transfer. The replayed request
+and event IDs can support a duplicate-prevention acceptance trace, while Unity
+verifies presentation and scene changes locally. This snapshot is classified
+`core_gamelink_tcp_only`.
 
 Integration verification uses the real TCP GameLink lifecycle: initiate a
 request, finish generation, retrieve WAV bytes, send playback start/completed,
-acknowledge its event, inspect by session/request ID through LocalControl,
+inspect by session/request ID through LocalControl,
 reconnect with the real session credential, then inspect again. Unknown sessions
 and request-without-session cases fail closed without disclosing payloads.
 The Unity-side fixture/agent remains responsible for proving who sent that ACK.

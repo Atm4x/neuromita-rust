@@ -62,7 +62,7 @@ Unity сохраняет `session_id` и `session_token` на время игр�
 Сервер отправляет последовательно:
 
 1. `session_resumed` с `command_id`, `session_id` и числом `requests`.
-2. `session_state` с `context_revision`, состоянием PTT, playback и результатами `acknowledge_result`.
+2. `session_state` с `context_revision`, состоянием PTT и playback.
 3. **Текущие snapshots** всех сохранённых запросов этой сессии (`request_updated`/`request_completed`/`request_failed`/`request_cancelled`).
 
 Пример `session_state`:
@@ -73,8 +73,7 @@ Unity сохраняет `session_id` и `session_token` на время игр�
   "session_id":"00000000-0000-4000-8000-000000000101",
   "context_revision":3,
   "ptt":null,
-  "playback":[],
-  "deliveries":[]
+  "playback":[]
 }
 ```
 
@@ -112,7 +111,6 @@ Unity сохраняет `session_id` и `session_token` на время игр�
 | `report_ptt` | `capture_id`, `generation`, `active`; опционально `cancelled` | `ptt_accepted` |
 | `report_playback` | `request_id`, `playback_id`, `phase` | `playback_accepted` |
 | `read_audio_chunk` | `request_id`, `offset`, `length` | `audio_chunk` |
-| `acknowledge_result` | `request_id`, `event_id`, `applied`; опционально `error` | `result_acknowledged` |
 
 У `cancel` нет автоматического `request_accepted`; его `cancel_ack.result` — строковое представление результата метода отмены. Авторитетное изменение состояния запроса приходит push-кадром.
 
@@ -343,17 +341,9 @@ Unity при установке сессии запрашивает:
 
 Алгоритм клиента: запросить блок с `offset=0`, декодировать `base64`, продвигать `offset = next_offset`, пока `offset == size_bytes`, сверить собранную длину и SHA-256 с descriptor, затем передать WAV в игровую систему воспроизведения. Для последнего блока сервер вернёт фактический размер, вплоть до конца файла. Запрос с `offset == size_bytes` даёт пустой `base64`. Аудиоданные доступны только из сохранённого `RequestHandle` данной сессии; дополнительное хранилище на стороне Rust не создаётся.
 
-### 7.3 Подтверждение применения результата
+### 7.3 Применение результата в Unity
 
-После того как Unity обработала текст и структурированные `segments`, отправляется:
-
-```json
-{"command_id":"00000000-0000-4000-8000-000000000032","command":"acknowledge_result","request_id":"00000000-0000-4000-8000-000000000301","event_id":"00000000-0000-4000-8000-000000000302","applied":true}
-```
-
-Ответ: `{"type":"result_acknowledged","command_id":"...","request_id":"...","event_id":"...","applied":true}`.
-
-При ошибке применения: `"applied":false,"error":"причина"` (не более 1024 байт). При `applied:true` поле `error` отсутствует. Сервер принимает один результат применения на `request_id`. Повторяйте тот же `command_id` для идемпотентного replay. Состояние подтверждений приходит в `session_state.deliveries` после `resume`.
+Unity обрабатывает результат локально. `request_id` и `revision` позволяют пропустить повторный снимок запроса. `event_id` связывает реплику с канонической историей.
 
 `segments` имеют тип `ResponseSegment`: `text`, `emotions`, `animations`, `idle_animations`, `commands`, `movement_modes`, `visual_effects`, `clothes`, `music`, `interactions`, `face_params`, `intents`, `start_game`, `end_game`, `target`, `hint`, `allow_sleep`. В ответе отсутствующие опциональные/пустые поля допустимы. Список полей — контракт десериализации; фактическое применение анимаций, музыки, движения и визуальных эффектов реализует игровой клиент. В Core исполняются только поддержанные доменные игровые эффекты.
 
@@ -411,7 +401,7 @@ Unity при установке сессии запрашивает:
 | `audio_unavailable`, `invalid_chunk` | Нет готового WAV или параметры чанка некорректны |
 | `result_not_accepted`, `delivery_rejected` | Нет принятого результата с этим `event_id` или подтверждение уже записано |
 
-**Идемпотентность:** `publish_message`, `publish_events`, генерация, `update_context`, `report_ptt`, `report_playback`, `acknowledge_result` сохраняют receipts по `command_id` **внутри текущей игровой сессии**. Повтор с идентичным payload возвращает квитанцию или текущий snapshot; повтор с изменённым payload отклоняется. `cancel`, `get_game_settings`, `ping`, `read_audio_chunk` выполняются как обращения без сохранённой квитанции.
+**Идемпотентность**. `publish_message`, `publish_events`, генерация, `update_context`, `report_ptt` и `report_playback` сохраняют receipts по `command_id` в текущей игровой сессии. Повтор с идентичным payload возвращает квитанцию или текущий snapshot. Повтор с изменённым payload отклоняется. `cancel`, `get_game_settings`, `ping` и `read_audio_chunk` выполняются как обращения без сохранённой квитанции.
 
 При переподключении требуется сохранить IDs команд, факт их отправки и возможность повторить исходный payload. `event_id` опубликованного факта сохраняется при любых повторах доставки. Серверная гарантия receipts действует до истечения сессии или перезапуска Core; при повторном запуске приложения требуется новый session handshake.
 
@@ -422,9 +412,9 @@ Unity при установке сессии запрашивает:
 1. **Transport** — один постоянный TCP-сокет, чтение UTF-8 до `\n`, очередь исходящих кадров, reconnect, корреляция `command_id`.
 2. **Session** — `hello`/`resume`, хранение `session_id` и `session_token`, pending commands, reconciliation запросов по `request_id`/`revision`.
 3. **Game ingress** — доставка сообщений игрока и игровых фактов в Timeline, полные `GameRuntimeContext` snapshots с растущими revision.
-4. **Result/audio controller** — push-обработка генерации, выполнение подтверждённых сегментов на Unity main thread, скачивание WAV, playback/PTT reports и `acknowledge_result`.
+4. **Result/audio controller** принимает push-кадры генерации, применяет сегменты на основном потоке Unity, загружает WAV и передаёт playback/PTT reports.
 
-Сетевой reader может выполняться вне Unity main thread. Любые операции с `GameObject`, `Animator`, `AudioSource`, сценой и прочими Unity API должны передаваться на основной поток. `acknowledge_result` отправляется после того, как клиент реально определил исход применения полученного результата.
+Сетевой reader может выполняться вне Unity main thread. Любые операции с `GameObject`, `Animator`, `AudioSource`, сценой и прочими Unity API должны передаваться на основной поток.
 
 ### Минимальный сценарий: сообщение игрока → ответ Миты
 
@@ -443,8 +433,6 @@ Unity                                Rust GameLink / Core
   |<--- request_accepted(request_id=R) -----|
   |<--- request_updated(R,revision=...) -----|
   |<--- request_completed(R,event_id=B) ----|
-  |---- acknowledge_result(R,B,applied) --->|
-  |<--- result_acknowledged -----------------|
   |---- read_audio_chunk(R,offset=0) ------>|  [если audio_asset]
   |<--- audio_chunk -------------------------|
   |---- report_playback(R,started) -------->|
@@ -473,7 +461,7 @@ TCP disconnect
 ## 10. Приёмочные сценарии Unity ↔ Rust
 
 - [ ] Подключение `hello` и настройка адреса без хардкода порта.
-- [ ] `publish_message` → `reply` → push terminal, применение `segments` и `acknowledge_result`.
+- [ ] `publish_message` → `reply` → push terminal, локальное применение `segments`.
 - [ ] `publish_events` → `react` для наблюдавшего событие персонажа; проверка независимости `observers`.
 - [ ] `update_context` → генерация использует snapshot данной сессии; следующий snapshot меняет только новые запросы.
 - [ ] `game_settings_updated` доставляется автоматически после изменения `in_game`/`volume`/`voice`; стартовое состояние через `get_game_settings`.
@@ -489,7 +477,7 @@ TCP disconnect
 
 ## 11. Реализовано на сервере / границы следующей интеграции
 
-**Есть в Rust на указанном коммите:** команды и push-кадры из таблицы, session resume, внутренний Request lifecycle, admission-time GameContext, канонический event ingress, voice routing по Game origin, chunked WAV, PTT/playback state, result acknowledgment, настройки игры, проверки лимитов. Серверные контрактные тесты находятся в `tests/local_control.rs`.
+Rust реализует команды и push-кадры из таблицы, session resume, жизненный цикл запроса, снимок GameContext при принятии запроса, публикацию событий, озвучку для игровых запросов, передачу WAV чанками, PTT и playback, настройки игры и проверки лимитов. Серверные контрактные тесты находятся в `tests/local_control.rs`.
 
 **Работы на стороне Unity:** новый клиент GameLink, перенос игровых producers на `publish_message`/`publish_events`, сбор и обновление GameContext, привязка typed segments к действиям Unity, загрузка/воспроизведение WAV, ASR/PTT feedback, reconnect и игровые E2E-тесты.
 

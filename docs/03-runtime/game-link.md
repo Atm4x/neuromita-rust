@@ -9,12 +9,11 @@ GameLink binds to loopback. The default limits are 32 concurrent connections, 16
 ## Session and delivery
 
 - `hello` creates a session and returns `hello_ack` with `session_id` and `session_token`.
-- `resume` submits both credentials. The new connection owns the session and the old socket closes. The server pushes `session_resumed`, a `session_state` containing current GameContext revision, PTT, playback and result acknowledgments, then current request snapshots.
+- `resume` submits both credentials. The new connection owns the session and the old socket closes. The server pushes `session_resumed`, a `session_state` containing current GameContext revision, PTT and playback, then current request snapshots.
 - `ping` returns `pong`.
 - The game connection receives `request_accepted`, `request_updated`, and terminal `request_completed`, `request_failed`, or `request_cancelled` automatically. Request snapshots carry `request_id`, a monotonically increasing `revision`, and the actual state. The client reconciles snapshots by identity and revision. No polling or subscription command is needed.
-- `acknowledge_result` takes `request_id`, accepted `event_id`, `applied` and an optional `error` when `applied=false`. It records delivery/application status separately from successful generation. Its receipt is idempotent by command ID. On resume the `session_state.deliveries` list restores these acknowledgments.
 
-The client applies structured result segments according to the game action contract. A successful result contains `text`, `event_id`, and validated `segments`. A voice synthesis failure preserves the already accepted text and event ID.
+The client applies structured result segments locally and filters repeated snapshots by request ID and revision. A successful result contains `text`, `event_id`, and validated `segments`. A voice synthesis failure preserves the already accepted text and event ID.
 
 `segments[].hint` carries optional player-facing HUD text for Unity to display. Core normalizes a model's `hint.show` intent into this field before accepting the reply. An intent must carry one nonempty string in `payload.text`, `payload.message` or `payload.value`. Conflicting hints in one segment reject the response. The field uses ordinary segment delivery, independently of the `update_context` capability strings.
 
@@ -48,7 +47,7 @@ Frames are bounded while reading, before the complete line is accumulated. A slo
 
 The in-process session registry is intentionally transient. Restoring active network state following a full Core restart belongs to the deferred durable recovery work (#54). Transport-level `resume` restores state during the same application process lifetime.
 
-World-event receipts have a separate lifetime. The selected Timeline branch identifies a `publish_events` batch by its ordered list of event IDs. After opening a new GameLink session or restarting Core with the same branch, a client can resend the same batch and get `events_published` with `replayed: true`. An event's observers form a set. Ordering and repeated observers do not affect identity. Reusing the event identities with different semantic content is rejected. This receipt covers canonical world facts; the GameLink request registry and acknowledgments of presented replies still follow the session lifetime above.
+World-event receipts have a separate lifetime. The selected Timeline branch identifies a `publish_events` batch by its ordered list of event IDs. After opening a new GameLink session or restarting Core with the same branch, a client can resend the same batch and get `events_published` with `replayed: true`. An event's observers form a set. Ordering and repeated observers do not affect identity. Reusing the event identities with different semantic content is rejected. The GameLink request registry follows the session lifetime above.
 
 ### Dialogue audience
 
@@ -58,4 +57,4 @@ Unity captures player witnesses at submission, using local hearing for group inp
 
 ## Integration boundary
 
-The Rust contract tests cover framing, reconnect, ownership, event publication, retry, admission-time GameContext, voice origin, playback/PTT feedback and chunked audio transfer. The Unity repository still needs its client implementation for this new protocol and real engine-to-engine acceptance tests. Physical gameplay execution remains Unity's responsibility; Unity applies the typed result segments and acknowledges acceptance.
+The Rust contract tests cover framing, reconnect, ownership, event publication, retry, admission-time GameContext, voice origin, playback/PTT feedback and chunked audio transfer. Unity owns physical gameplay execution and the presentation of result segments.

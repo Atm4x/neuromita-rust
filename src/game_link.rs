@@ -78,8 +78,7 @@ impl GameLinkHandle {
         self.address
     }
 
-    /// Inspect the actual GameLink protocol owner. A result ACK proves that the
-    /// session sent an ACK, not that Unity rendered the result successfully.
+    /// Inspect request and playback state owned by the GameLink session.
     pub fn inspection(&self, session_id: Option<Uuid>, request_id: Option<Uuid>) -> Value {
         let sessions = self.sessions.0.lock().expect("game sessions poisoned");
         let connected = sessions.values().filter(|s| s.connection.is_some()).count();
@@ -92,7 +91,6 @@ impl GameLinkHandle {
                 "context_revision": session.context.revision,
                 "resume_count": session.resume_count,
                 "receipts": session.receipts.len(),
-                "delivery_acks": session.deliveries.len(),
                 "playback_reports": session.playback.len(),
                 "ptt_active": session.ptt.is_some_and(|ptt| ptt.active),
             }),
@@ -121,7 +119,6 @@ impl GameLinkHandle {
                         ) => ("finished", Some(response.event_id.0)),
                         RequestState::Finished(_) => ("finished", None),
                     };
-                    let ack = session.deliveries.get(&id);
                     json!({
                         "request_id": id,
                         "observed": true,
@@ -129,11 +126,6 @@ impl GameLinkHandle {
                         "terminal": snapshot.state.is_terminal(),
                         "revision": snapshot.revision,
                         "event_id": event_id,
-                        "delivery_ack": ack.map(|ack| json!({
-                            "event_id": ack.event_id,
-                            "applied": ack.applied,
-                            "error_present": ack.error.is_some(),
-                        })),
                         "playback_phase": session.playback.get(&id).map(|p| p.phase),
                     })
                 }
@@ -148,8 +140,7 @@ impl GameLinkHandle {
             "connected_sessions": connected,
             "session": session,
             "request": request,
-            "privacy": "no session tokens, request text, audio, or Unity error content",
-            "ack_semantics": "receipt confirms GameLink ACK was accepted, not that Unity rendered output",
+            "privacy": "no session tokens, request text, or audio",
             "evidence_level": "core_gamelink_tcp_only",
             "full_stack_e2e_verified": false,
         })
@@ -165,7 +156,6 @@ struct Session {
     receipts: HashMap<Uuid, (Value, Receipt)>,
     context: Arc<GameRuntimeContext>,
     playback: HashMap<Uuid, PlaybackReport>,
-    deliveries: HashMap<Uuid, DeliveryAck>,
     ptt: Option<PttReport>,
 }
 #[derive(Clone)]
@@ -196,13 +186,6 @@ struct PttReport {
     generation: u64,
     active: bool,
     cancelled: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct DeliveryAck {
-    event_id: Uuid,
-    applied: bool,
-    error: Option<String>,
 }
 
 #[derive(Default)]
@@ -246,7 +229,6 @@ impl Sessions {
                 receipts: HashMap::new(),
                 context: Arc::new(GameRuntimeContext::default()),
                 playback: HashMap::new(),
-                deliveries: HashMap::new(),
                 ptt: None,
             },
         );
@@ -382,25 +364,6 @@ impl Sessions {
         session.playback.insert(request_id, report);
         Ok(())
     }
-    fn acknowledge_result(
-        &self,
-        id: Uuid,
-        request_id: Uuid,
-        ack: DeliveryAck,
-    ) -> Result<(), &'static str> {
-        if ack.error.as_ref().is_some_and(|reason| reason.len() > 1024)
-            || (ack.applied && ack.error.is_some())
-        {
-            return Err("invalid delivery acknowledgment");
-        }
-        let mut sessions = self.0.lock().expect("game sessions poisoned");
-        let session = sessions.get_mut(&id).ok_or("session not found")?;
-        if session.deliveries.contains_key(&request_id) {
-            return Err("request result was already acknowledged");
-        }
-        session.deliveries.insert(request_id, ack);
-        Ok(())
-    }
     fn snapshots(&self, id: Uuid) -> Value {
         let sessions = self.0.lock().expect("game sessions poisoned");
         let session = &sessions[&id];
@@ -408,7 +371,6 @@ impl Sessions {
             "type":"session_state","session_id":id,
             "context_revision":session.context.revision,"ptt":session.ptt,
             "playback":session.playback.iter().map(|(request,report)|json!({"request_id":request,"report":report})).collect::<Vec<_>>(),
-            "deliveries":session.deliveries.iter().map(|(request,ack)|json!({"request_id":request,"ack":ack})).collect::<Vec<_>>(),
         })
     }
     fn request(&self, id: Uuid, request_id: Uuid) -> Option<RequestHandle> {
@@ -603,13 +565,6 @@ enum GameCommand {
         request_id: Uuid,
         offset: usize,
         length: usize,
-    },
-    AcknowledgeResult {
-        request_id: Uuid,
-        event_id: Uuid,
-        applied: bool,
-        #[serde(default)]
-        error: Option<String>,
     },
 }
 fn default_beat_stream() -> bool {
@@ -1144,31 +1099,6 @@ async fn client(
                                             tx.send(ack).await.map_err(io::Error::other)?;
                                         }
                                     }
-                                }
-                            }
-                        }
-                        GameCommand::AcknowledgeResult {request_id,event_id,applied,error:reason} => {
-                            if let Err(reason) = sessions.can_record(session,config.max_requests_per_session) {
-                                tx.send(error(Some(id),"capacity",reason)).await.map_err(io::Error::other)?;
-                                continue;
-                            }
-                            let Some(handle) = sessions.request(session,request_id) else {
-                                tx.send(error(Some(id),"ownership_denied","unknown game request")).await.map_err(io::Error::other)?; continue;
-                            };
-                            let snapshot = handle.snapshot();
-                            let accepted_event = match &snapshot.state {
-                                RequestState::Finished(RequestOutcome::Success(response) | RequestOutcome::VoiceGenerationFailed { response, .. }) => Some(response.event_id.0),
-                                _ => None,
-                            };
-                            if accepted_event != Some(event_id) {
-                                tx.send(error(Some(id),"result_not_accepted","request has no matching accepted event")).await.map_err(io::Error::other)?; continue;
-                            }
-                            match sessions.acknowledge_result(session,request_id,DeliveryAck {event_id,applied,error:reason}) {
-                                Err(reason)=>tx.send(error(Some(id),"delivery_rejected",reason)).await.map_err(io::Error::other)?,
-                                Ok(())=>{
-                                    let ack=json!({"type":"result_acknowledged","command_id":id,"request_id":request_id,"event_id":event_id,"applied":applied});
-                                    sessions.record(session,id,fingerprint,Receipt::Ack(ack.clone()),config.max_requests_per_session).map_err(io::Error::other)?;
-                                    tx.send(ack).await.map_err(io::Error::other)?;
                                 }
                             }
                         }
