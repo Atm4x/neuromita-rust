@@ -1,11 +1,43 @@
-use std::{cell::RefCell, error::Error, path::PathBuf, rc::Rc, time::Duration};
+use std::{
+    cell::RefCell,
+    error::Error,
+    io::Write,
+    path::{Path, PathBuf},
+    rc::Rc,
+    time::Duration,
+};
 
 use neuromita::localization::{FallbackPolicy, LocaleId, Localizer, i18n};
 use neuromita::presentation::PresetsPresenter;
 use slint::ComponentHandle;
+use slint::platform::software_renderer::MinimalSoftwareWindow;
 
 mod view {
     slint::include_modules!();
+}
+
+struct SnapshotPlatform(Rc<MinimalSoftwareWindow>);
+
+impl slint::platform::Platform for SnapshotPlatform {
+    fn create_window_adapter(
+        &self,
+    ) -> Result<Rc<dyn slint::platform::WindowAdapter>, slint::PlatformError> {
+        Ok(self.0.clone())
+    }
+}
+
+fn write_snapshot(window: &slint::Window, destination: &Path) -> Result<(), Box<dyn Error>> {
+    let image = window.take_snapshot()?;
+    let mut ppm = format!("P6\n{} {}\n255\n", image.width(), image.height()).into_bytes();
+    for pixel in image.as_bytes().as_chunks::<4>().0 {
+        ppm.extend_from_slice(&pixel[..3]);
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)?
+        .write_all(&ppm)?;
+    Ok(())
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -17,10 +49,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     if destination.exists() {
         return Err("snapshot destination already exists".into());
     }
-    slint::BackendSelector::new()
-        .backend_name("winit".into())
-        .renderer_name("femtovg".into())
-        .select()?;
+    let mode = std::env::args()
+        .nth(2)
+        .unwrap_or_else(|| "characters".into());
+    let chat = matches!(mode.as_str(), "chat" | "chat-narrow");
+    if chat {
+        slint::platform::set_platform(Box::new(SnapshotPlatform(MinimalSoftwareWindow::new(
+            Default::default(),
+        ))))?;
+    } else {
+        slint::BackendSelector::new()
+            .backend_name("winit".into())
+            .renderer_name("femtovg".into())
+            .select()?;
+    }
     let window = view::AppWindow::new()?;
     let catalog = Localizer::bundled(FallbackPolicy::EnglishThenSource)?;
     let translations = window.global::<view::I18n>();
@@ -56,9 +98,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     window
         .global::<view::CharacterCatalog>()
         .set_entries(slint::ModelRc::new(slint::VecModel::from(characters)));
-    let mode = std::env::args()
-        .nth(2)
-        .unwrap_or_else(|| "characters".into());
     let settings = window.global::<view::SettingsUi>();
     settings.set_section(if general {
         0
@@ -280,11 +319,49 @@ fn main() -> Result<(), Box<dyn Error>> {
             window.set_onboarding_guide_visible(true);
         }
     }
+    if chat {
+        window.set_page(view::PageId::Sandbox);
+        window.set_chat_messages(slint::ModelRc::new(slint::VecModel::from(vec![
+            view::ChatRow {
+                text: "Связь работает идеально. Я всё вижу и всё контролирую)".into(),
+                character_index: 0,
+                sequence: "#22".into(),
+                status: view::ChatStatus::History,
+                can_hide: true,
+                ..Default::default()
+            },
+            view::ChatRow {
+                text: "Для короткой проверки восстановления ответь: соединение восстановилось. Это достаточно длинный текст, чтобы проверить перенос строк и положение кнопок.".into(),
+                user: true,
+                sequence: "#24".into(),
+                status: view::ChatStatus::History,
+                can_hide: true,
+                ..Default::default()
+            },
+            view::ChatRow {
+                text: "Опять уставился в свой экран… Ну ладно, играй-играй, я пока понаблюдаю.".into(),
+                character_index: 0,
+                sequence: "#25".into(),
+                status: view::ChatStatus::History,
+                can_hide: true,
+                ..Default::default()
+            },
+            view::ChatRow {
+                character_index: 0,
+                status: view::ChatStatus::TextError,
+                detail: "invalid provider response: structured response has no spoken segments".into(),
+                ..Default::default()
+            },
+        ])));
+    }
     window.show()?;
     window.window().set_size(slint::PhysicalSize::new(
-        1560,
+        if mode == "chat-narrow" { 1100 } else { 1560 },
         if mode == "ai-engine" { 958 } else { 918 },
     ));
+    if chat {
+        return write_snapshot(window.window(), &destination);
+    }
     if mode == "api-dropdown" {
         let weak = window.as_weak();
         slint::Timer::single_shot(Duration::from_millis(250), move || {
@@ -315,17 +392,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     slint::Timer::single_shot(Duration::from_millis(500), move || {
         let outcome = (|| -> Result<(), Box<dyn Error>> {
             let window = weak.upgrade().ok_or("snapshot window closed")?;
-            let image = window.window().take_snapshot()?;
-            let mut ppm = format!("P6\n{} {}\n255\n", image.width(), image.height()).into_bytes();
-            for pixel in image.as_bytes().as_chunks::<4>().0 {
-                ppm.extend_from_slice(&pixel[..3]);
-            }
-            use std::io::Write;
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(destination)?
-                .write_all(&ppm)?;
+            write_snapshot(window.window(), &destination)?;
             window.hide()?;
             Ok(())
         })();
