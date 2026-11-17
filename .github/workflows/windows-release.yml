@@ -33,7 +33,7 @@ jobs:
         run: |
           cargo test --locked --offline --test updater_native_apply_e2e --test updater_offline_recovery
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo build --locked --offline --release --features gui,mcp --bin neuromita-gui --bin neuromita-agent-mcp
+          cargo build --locked --offline --release --features gui,mcp --bin neuromita
           exit $LASTEXITCODE
       - name: Create Windows assets
         shell: pwsh

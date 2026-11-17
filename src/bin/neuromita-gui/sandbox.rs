@@ -672,6 +672,11 @@ fn apply_with_catalog(
         Update::RemoteVoiceState(status, busy) => {
             super::voice::remote_status(window, &status, busy)
         }
+        Update::Mcp(status) => {
+            let ui = window.global::<SettingsUi>();
+            ui.set_mcp_active(status.active);
+            ui.set_mcp_error(status.error.unwrap_or_default().into());
+        }
         Update::RuntimeStatus(snapshot) => {
             super::voice::runtime_status(window, &snapshot);
             super::asr::runtime_status(window, &snapshot);

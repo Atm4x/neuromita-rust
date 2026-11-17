@@ -1260,7 +1260,7 @@ fn memory_render_and_contract(window: &AppWindow) {
             window,
             &state,
             uuid::Uuid::new_v4(),
-            Ok(crate::runtime::GraphPreviewReport {
+            Ok(crate::desktop::runtime::GraphPreviewReport {
                 count: 9,
                 relations: Vec::new(),
             }),
@@ -1271,7 +1271,7 @@ fn memory_render_and_contract(window: &AppWindow) {
             window,
             &state,
             graph_request,
-            Ok(crate::runtime::GraphPreviewReport {
+            Ok(crate::desktop::runtime::GraphPreviewReport {
                 count: 1,
                 relations: vec![neuromita::memory::ProvenancedRelation {
                     source: graph_memory,
@@ -1325,7 +1325,7 @@ fn memory_render_and_contract(window: &AppWindow) {
             window,
             &state,
             aborted_id,
-            Ok(crate::runtime::GraphPreviewReport {
+            Ok(crate::desktop::runtime::GraphPreviewReport {
                 count: 2,
                 relations: Vec::new(),
             }),
@@ -1344,7 +1344,7 @@ fn memory_render_and_contract(window: &AppWindow) {
             window,
             &state,
             in_flight_id,
-            Ok(crate::runtime::GraphPreviewReport {
+            Ok(crate::desktop::runtime::GraphPreviewReport {
                 count: 1,
                 relations: Vec::new(),
             }),
@@ -1401,7 +1401,7 @@ fn memory_render_and_contract(window: &AppWindow) {
             window,
             &state,
             reindex_id,
-            Ok(crate::runtime::GraphPreviewReport {
+            Ok(crate::desktop::runtime::GraphPreviewReport {
                 count: 3,
                 relations: Vec::new(),
             }),
@@ -1437,7 +1437,7 @@ fn memory_render_and_contract(window: &AppWindow) {
             window,
             &state,
             backend_lost_id,
-            Ok(crate::runtime::GraphPreviewReport {
+            Ok(crate::desktop::runtime::GraphPreviewReport {
                 count: 4,
                 relations: Vec::new(),
             }),
@@ -2312,7 +2312,7 @@ fn chat_retry_callback_preserves_original_request_identity_and_selection() {
 
 #[test]
 fn ai_hub_preserves_model_identity_when_inventory_updates_arrive_in_either_order() {
-    use crate::{ai_hub, runtime::Command, view::HubModelIdentity};
+    use crate::desktop::{ai_hub, runtime::Command, view::HubModelIdentity};
     use neuromita::ai_runtime::{
         native_model::NativeBackend,
         native_revisions::{NativeRevisionMetadata, NativeRevisionOverview},
@@ -2411,7 +2411,7 @@ fn ai_hub_preserves_model_identity_when_inventory_updates_arrive_in_either_order
         window.invoke_ai_hub_use_model(HubModelIdentity {
             category: "tts".into(),
             id: "shared".into(),
-            implementation: crate::view::HubImplementation::Rust,
+            implementation: crate::desktop::view::HubImplementation::Rust,
             revision: revision.clone().into(),
         });
         assert!(

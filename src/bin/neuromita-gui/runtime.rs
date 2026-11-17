@@ -1,4 +1,4 @@
-use std::{num::NonZeroUsize, path::PathBuf, sync::Arc, thread, time::Duration};
+use std::{path::PathBuf, sync::Arc, thread, time::Duration};
 
 use neuromita::{
     ai_runtime::{
@@ -10,17 +10,13 @@ use neuromita::{
         runtime_status::RuntimeSnapshot,
         speech_catalog::{SpeechInventory, SpeechModelCatalog},
     },
-    app::{ApplicationConfig, ApplicationLifecycle, RuntimeLimits},
+    app::ApplicationLifecycle,
     audio::{
         controller::SpeechSessionSnapshot, input_catalog::AudioInputDevice,
         monitor::MonitorSnapshot,
     },
     character::CharacterId,
     generation::PresetRecord,
-    generation::{
-        GenerationPreset, GenerationProvider, ProviderTemplate, ResponseGenerator,
-        gemini::{GeminiProvider, GeminiTemplate, GenerationSettings},
-    },
     onboarding::GuideChange,
     presentation::{
         ChatSelection, ConversationChange, ConversationChangePreview, ConversationSnapshot,
@@ -54,6 +50,7 @@ pub struct ChatOrigin {
 }
 
 pub enum Command {
+    SaveMcp(neuromita::settings::McpSettings),
     SelectSpeechModel(
         neuromita::ai_runtime::AiService,
         neuromita::settings::SpeechModelReference,
@@ -195,6 +192,7 @@ pub enum RemoteVoiceAction {
 }
 
 pub enum Update {
+    Mcp(neuromita::mcp::McpStatus),
     RuntimeStatus(RuntimeSnapshot),
     RemoteVoices(RemoteVoiceConfig),
     RemoteVoiceState(String, bool),
@@ -382,78 +380,6 @@ async fn enable_speech_session(
         .await
 }
 
-async fn start(
-    directory: &std::path::Path,
-    model: Option<&str>,
-    telegram_voice: Arc<DynamicTelegramVoice>,
-    telegram_admin: Arc<TelegramAdmin>,
-) -> Result<ApplicationLifecycle, String> {
-    tracing::debug!(directory = %directory.display(), "desktop application initialization started");
-    let provider: Arc<dyn GenerationProvider> =
-        Arc::new(GeminiProvider::new().map_err(|e| e.to_string())?);
-    let generator = ResponseGenerator::new([
-        provider,
-        Arc::new(neuromita::generation::openai::OpenAiProvider::new().map_err(|e| e.to_string())?)
-            as Arc<dyn GenerationProvider>,
-    ])
-    .map_err(|e| e.to_string())?;
-    tracing::debug!("desktop generation providers initialized");
-    let limits = RuntimeLimits {
-        request_queue: NonZeroUsize::new(16).unwrap(),
-        discovery_buffer: NonZeroUsize::new(128).unwrap(),
-        character_commands: NonZeroUsize::new(32).unwrap(),
-        presenter_updates: NonZeroUsize::new(128).unwrap(),
-        retained_finished: NonZeroUsize::new(100).unwrap(),
-    };
-    let bind = "127.0.0.1:0".parse().unwrap();
-    let config = match model {
-        Some(model) => {
-            let key = std::env::var("GEMINI_API_KEY").map_err(|_| {
-                "GEMINI_API_KEY is required for the explicitly selected startup model".to_owned()
-            })?;
-            let generation = GenerationSettings::new(0.7, 3000, Duration::from_secs(60))
-                .map_err(|e| e.to_string())?;
-            let template =
-                GeminiTemplate::google(model, &key, generation).map_err(|e| e.to_string())?;
-            ApplicationConfig::persistent(
-                GenerationPreset::new(ProviderTemplate::Gemini(template)),
-                generator,
-                limits,
-                bind,
-                directory,
-            )
-        }
-        None => ApplicationConfig::persistent_unconfigured(generator, limits, bind, directory),
-    }
-    .map_err(|e| e.to_string())?
-    .with_installed_speech_runtime(
-        neuromita::ai_runtime::installed_speech::InstalledSpeechEnvironment::for_desktop(
-            directory.to_path_buf(),
-        ),
-    )
-    .with_ai_hub_install_root(directory.to_path_buf());
-    let prompts = neuromita::prompts::PromptCatalog::open_portable(directory).map_err(|error| {
-        format!(
-            "Cannot initialize {}: {error}",
-            directory.join("Prompts").display()
-        )
-    })?;
-    let mut config = config.with_prompt_catalog(prompts);
-    config.video_capture = neuromita::video_capture::VideoCapture::for_desktop(directory);
-    config.game_link = Some(neuromita::game_link::GameLinkConfig::new(
-        "127.0.0.1:12345"
-            .parse()
-            .expect("valid Unity loopback endpoint"),
-    ));
-    config.voice = telegram_voice;
-    config.telegram_admin = Some(telegram_admin);
-    config.remote_voice_store = Some(directory.join("remote_voice.rust.json"));
-    tracing::debug!("desktop application configuration prepared");
-    ApplicationLifecycle::start(config)
-        .await
-        .map_err(|e| e.to_string())
-}
-
 async fn run(
     directory: PathBuf,
     initial_model: Option<String>,
@@ -469,7 +395,7 @@ async fn run(
         directory.clone(),
         telegram_voice.clone(),
     ));
-    let app = match start(
+    let app = match neuromita::app::standalone::start(
         &directory,
         initial_model.as_deref(),
         telegram_voice.clone(),
@@ -667,6 +593,8 @@ async fn observe(
         draft_updates.borrow_and_update().clone(),
     ));
     let mut liveness = tokio::time::interval(Duration::from_secs(5));
+    let mut mcp_status = app.mcp_status();
+    publish(Update::Mcp(mcp_status.borrow_and_update().clone()));
     liveness.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let native_owner = administration
         .native_hub
@@ -729,6 +657,9 @@ async fn observe(
             _ = stop.cancelled() => {
                 return Ok(());
             },
+            changed = mcp_status.changed() => {
+                if changed.is_ok() { publish(Update::Mcp(mcp_status.borrow_and_update().clone())); }
+            },
             changed = telegram_updates.changed(), if !telegram_watch_closed => {
                 if changed.is_ok() {
                     let status = telegram_updates.borrow_and_update().clone();
@@ -770,6 +701,11 @@ async fn observe(
                     match super::settings::execute(administration, command) {
                         Ok(()) => publish(Update::PresetSaved(id)),
                         Err(error) => publish(Update::AdminError(error)),
+                    }
+                },
+                Some(Command::SaveMcp(settings)) => {
+                    if let Err(error) = administration.settings.set_mcp(settings) {
+                        publish(Update::AdminError(error.to_string()));
                     }
                 },
                 Some(Command::ChangeGuide { request_id, change }) => {

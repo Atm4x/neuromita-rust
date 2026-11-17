@@ -359,6 +359,19 @@ fn id(value: &str) -> Result<PresetId, String> {
 }
 
 pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
+    let weak_mcp = window.as_weak();
+    let send_mcp = dispatch.clone();
+    window.global::<SettingsUi>().on_mcp_save(move || {
+        if let Some(window) = weak_mcp.upgrade() {
+            let ui = window.global::<SettingsUi>();
+            send_mcp(Command::SaveMcp(neuromita::settings::McpSettings {
+                enabled: ui.get_mcp_enabled(),
+                endpoint: ui.get_mcp_endpoint().to_string(),
+                allow_write: ui.get_mcp_allow_write(),
+                allow_content: ui.get_mcp_allow_content(),
+            }));
+        }
+    });
     let settings = window.global::<SettingsUi>();
     let send = dispatch.clone();
     let weak = window.as_weak();
@@ -884,6 +897,10 @@ pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {
             )
             .collect::<Vec<_>>(),
     )));
+    window.set_mcp_enabled(settings.values.mcp.enabled);
+    window.set_mcp_endpoint(settings.values.mcp.endpoint.clone().into());
+    window.set_mcp_allow_write(settings.values.mcp.allow_write);
+    window.set_mcp_allow_content(settings.values.mcp.allow_content);
     window.set_hide_private(settings.values.interface.hide_private);
     window.set_structured_mode(match settings.values.interface.structured_display {
         StructuredDisplayMode::Off => 0,

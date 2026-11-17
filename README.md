@@ -1,6 +1,6 @@
 # NeuroMita Rust
 
-Slint 1.18.1 и slint-build включены в необязательную feature `gui` и vendor. Добавлен десктопный GUI с Home, страницами-заглушками и реальной страницей Sandbox: `cargo run --locked --offline --features gui --bin neuromita-gui`. Он использует Winit + FemtoVG/OpenGL. Home остаётся preview, но Sandbox работает через `SandboxPresenter` и отдельный desktop runtime с реальным Gemini-провайдером при заданной модели и `GEMINI_API_KEY`; фейковые ответы не генерируются. [Статус GUI, меню и ограничения](future/gui.md), [порт Sandbox из PyQt](future/sandbox-ui-port-20261103.md). Для feature `gui` требуется Rust 1.92+, обычное ядро сохраняет минимальный Rust 1.89.
+Полное приложение запускается одним `neuromita.exe`; GUI, локальное управление и MCP включены в стандартную сборку. `neuromita.exe --headless` запускает тот же Core без окна, с теми же данными в `UserData` рядом с EXE. MCP по умолчанию выключен; включение, HTTP URL и разрешения доступны в «Настройки → MCP». [Единый запуск и MCP](docs/03-runtime/unified-application.md).
 
 Локализация — общий Rust-модуль с `i18n(ID, source)`, исходными JSON Python и переводом существующего интерфейса при смене языка. EN/RU доступны в sidebar, остальные языки — через глобус. Внешние JSON: `--translations-dir PATH`, стартовый язык: `--language CODE`; в меню глобуса есть перечитывание каталогов. [Контракты и формат](future/localization.md). Экспорт шаблона: `cargo run --locked --offline --bin neuromita-i18n -- template`.
 

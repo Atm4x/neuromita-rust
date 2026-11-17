@@ -32,14 +32,14 @@ fn stopped_installation_recovers_terminated_helper_transaction() {
     fs::write(data.join("settings.json"), b"original user settings").unwrap();
 
     let gui_name = if cfg!(windows) {
-        "neuromita-gui.exe"
+        "neuromita.exe"
     } else {
-        "neuromita-gui"
+        "neuromita"
     };
     let helper_name = if cfg!(windows) {
-        "neuromita-updater.exe"
+        "neuromita.exe"
     } else {
-        "neuromita-updater"
+        "neuromita"
     };
     let installed = install.join(gui_name);
     let old = b"verified previous executable";
@@ -70,8 +70,9 @@ fn stopped_installation_recovers_terminated_helper_transaction() {
         .unwrap(),
     )
     .unwrap();
-    let helper = install.join(helper_name);
-    fs::copy(env!("CARGO_BIN_EXE_neuromita-updater"), &helper).unwrap();
+    let helper = install.join(".neuromita-updater").join(helper_name);
+    fs::create_dir_all(helper.parent().unwrap()).unwrap();
+    fs::copy(env!("CARGO_BIN_EXE_neuromita"), &helper).unwrap();
 
     #[cfg(windows)]
     {
@@ -249,14 +250,14 @@ fn orphaned_verified_handoff_is_recovered_only_after_exact_validation() {
         fs::create_dir_all(&data).unwrap();
         fs::write(data.join("settings.json"), b"private unchanged").unwrap();
         let name = if cfg!(windows) {
-            "neuromita-gui.exe"
+            "neuromita.exe"
         } else {
-            "neuromita-gui"
+            "neuromita"
         };
         let helper_name = if cfg!(windows) {
-            "neuromita-updater.exe"
+            "neuromita.exe"
         } else {
-            "neuromita-updater"
+            "neuromita"
         };
         let old = b"old verified bytes";
         let new = b"new verified bytes";
@@ -288,8 +289,9 @@ fn orphaned_verified_handoff_is_recovered_only_after_exact_validation() {
             "target": name,
         });
         fs::write(&handoff, serde_json::to_vec(&intent).unwrap()).unwrap();
-        let helper = install.join(helper_name);
-        fs::copy(env!("CARGO_BIN_EXE_neuromita-updater"), &helper).unwrap();
+        let helper = install.join(".neuromita-updater").join(helper_name);
+        fs::create_dir_all(helper.parent().unwrap()).unwrap();
+        fs::copy(env!("CARGO_BIN_EXE_neuromita"), &helper).unwrap();
         let denied = Command::new(&helper)
             .arg("--recover-interrupted-update")
             .output()

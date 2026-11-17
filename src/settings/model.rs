@@ -470,6 +470,7 @@ const fn legacy_guide_completed() -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppSettings {
+    pub mcp: super::McpSettings,
     pub presets: PresetSettings,
     #[serde(default)]
     pub onboarding: OnboardingSettings,
@@ -493,6 +494,7 @@ impl AppSettings {
     pub fn initial_profile() -> Self {
         Self {
             presets: PresetSettings::default(),
+            mcp: super::McpSettings::default(),
             onboarding: OnboardingSettings::default(),
             characters: CharactersSettings::default(),
             voice: VoiceSettings {
@@ -539,6 +541,7 @@ impl AppSettings {
     }
 
     pub fn validate(&self) -> Result<(), SettingsError> {
+        self.mcp.validate()?;
         for character in crate::character::CharacterId::ALL {
             if let Some(name) = &self.characters.for_character(character).prompt_set {
                 crate::prompts::PromptCatalog::validate_set_name(name)
@@ -604,6 +607,7 @@ section!(CaptureSettings, capture);
 section!(InterfaceSettings, interface);
 section!(RemindersSettings, reminders);
 section!(ToolSettings, tools);
+section!(super::McpSettings, mcp);
 
 #[derive(Debug, Clone)]
 pub struct SectionSnapshot<T> {

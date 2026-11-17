@@ -1,6 +1,8 @@
 mod instance_lease;
+mod mcp;
 mod migration;
 mod model;
+pub use mcp::McpSettings;
 mod preset_activation;
 mod python_presets;
 mod python_schemas;

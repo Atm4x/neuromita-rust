@@ -361,6 +361,13 @@ pub struct SettingsPresenter {
     pub characters: CharactersSettingsPresenter,
 }
 impl SettingsPresenter {
+    pub fn set_mcp(&self, value: crate::settings::McpSettings) -> Result<(), SettingsError> {
+        value.validate()?;
+        self.owner
+            .edit::<crate::settings::McpSettings>(|settings| *settings = value)?;
+        Ok(())
+    }
+
     pub(crate) fn new(owner: Arc<SettingsOwner>) -> Self {
         Self {
             owner: Arc::clone(&owner),

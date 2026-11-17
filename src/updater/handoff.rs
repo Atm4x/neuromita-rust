@@ -7,7 +7,7 @@ use std::{
     ffi::{OsStr, OsString},
     fs::{self, OpenOptions},
     io::{self, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::{self, Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -34,9 +34,10 @@ const READY_WAIT: Duration = Duration::from_secs(30);
 const PARENT_EXIT_WAIT: Duration = Duration::from_secs(120);
 
 #[cfg(windows)]
-const HELPER_NAME: &str = "neuromita-updater.exe";
+const HELPER_NAME: &str = "neuromita.exe";
 #[cfg(not(windows))]
-const HELPER_NAME: &str = "neuromita-updater";
+const HELPER_NAME: &str = "neuromita";
+const HELPER_DIRECTORY: &str = ".neuromita-updater";
 
 trait HandoffRuntime {
     fn arm(&self, helper: &Path) -> io::Result<bool>;
@@ -149,7 +150,7 @@ struct ReadyReceipt {
 }
 
 /// Read-only preflight, invoked before staging and again when scheduling the helper.
-/// Refuses development binaries, custom user-data directories and missing helpers.
+/// Refuses renamed binaries and custom user-data directories.
 pub fn validate_handoff_environment(activator: &SingleFileActivator) -> Result<(), HandoffError> {
     if fs::canonicalize(std::env::current_exe()?)? != activator.target_path() {
         return Err(HandoffError::WrongCaller);
@@ -162,12 +163,56 @@ pub fn validate_handoff_environment(activator: &SingleFileActivator) -> Result<(
     {
         return Err(HandoffError::NonPortableDataRoot);
     }
-    let helper = activator.install_root().join(HELPER_NAME);
-    require_regular_file(&helper)?;
-    if fs::canonicalize(&helper)? == activator.target_path() {
+    Ok(())
+}
+
+fn prepare_helper(activator: &SingleFileActivator) -> Result<PathBuf, HandoffError> {
+    let directory = activator.install_root().join(HELPER_DIRECTORY);
+    match fs::create_dir(&directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+    let metadata = fs::symlink_metadata(&directory)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err(HandoffError::UnsafeHelper);
     }
-    Ok(())
+    let helper = directory.join(HELPER_NAME);
+    match fs::symlink_metadata(&helper) {
+        Ok(_) => require_regular_file(&helper)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let temporary = directory.join(format!("{}.tmp", Uuid::new_v4()));
+    let copied = (|| -> io::Result<()> {
+        let mut source = fs::File::open(activator.target_path())?;
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        io::copy(&mut source, &mut output)?;
+        output.set_permissions(source.metadata()?.permissions())?;
+        output.sync_all()?;
+        drop(output);
+        fs::rename(&temporary, &helper)
+    })();
+    if let Err(error) = copied {
+        let _ = fs::remove_file(&temporary);
+        return Err(error.into());
+    }
+    Ok(helper)
+}
+
+fn helper_install_root(executable: &Path) -> Result<&Path, HandoffError> {
+    let directory = executable.parent().ok_or(HandoffError::UnsafeHelper)?;
+    let metadata = fs::symlink_metadata(directory)?;
+    if directory.file_name() != Some(OsStr::new(HELPER_DIRECTORY))
+        || !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+    {
+        return Err(HandoffError::UnsafeHelper);
+    }
+    directory.parent().ok_or(HandoffError::UnsafeHelper)
 }
 
 /// Launches a separate installed helper and returns after the child has started.
@@ -184,9 +229,9 @@ fn schedule_after_shutdown_with(
 ) -> Result<u32, HandoffError> {
     validate_handoff_environment(activator)?;
     let expected = if cfg!(windows) {
-        "neuromita-gui.exe"
+        "neuromita.exe"
     } else {
-        "neuromita-gui"
+        "neuromita"
     };
     if activator.target_path().file_name() != Some(OsStr::new(expected)) {
         return Err(HandoffError::InvalidInvocation);
@@ -194,7 +239,7 @@ fn schedule_after_shutdown_with(
     if activator.recover()? != RecoveryOutcome::Prepared {
         return Err(HandoffError::NotPrepared);
     }
-    let helper = activator.install_root().join(HELPER_NAME);
+    let helper = prepare_helper(activator)?;
     let identity = current_process_identity()?;
     let intent = HandoffIntent {
         parent_pid: process::id(),
@@ -299,9 +344,9 @@ fn cancel_scheduled_before_exit_with(
     let intent: HandoffIntent =
         serde_json::from_slice(&bytes).map_err(|_| HandoffError::InvalidInvocation)?;
     let expected = if cfg!(windows) {
-        "neuromita-gui.exe"
+        "neuromita.exe"
     } else {
-        "neuromita-gui"
+        "neuromita"
     };
     if intent.parent_pid != process::id()
         || intent.parent_identity != current_process_identity()?
@@ -310,7 +355,10 @@ fn cancel_scheduled_before_exit_with(
     {
         return Err(HandoffError::WrongCaller);
     }
-    let helper = activator.install_root().join(HELPER_NAME);
+    let helper = activator
+        .install_root()
+        .join(HELPER_DIRECTORY)
+        .join(HELPER_NAME);
     activator.discard_scheduled_handoff(intent.nonce, &bytes, || runtime.disarm(&helper))?;
     Ok(())
 }
@@ -347,7 +395,7 @@ fn abort_failed_schedule(
     }
 }
 
-/// Entrypoint of the separately installed `neuromita-updater` binary.
+/// Entrypoint of a private copy of the application used for an update.
 /// The installation root is derived exclusively from the helper's own path.
 pub fn run_helper(args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> Result<(), HandoffError> {
     let arguments = args
@@ -396,7 +444,7 @@ fn run_apply_helper(
     if !runtime.is_armed(executable)? {
         return Err(HandoffError::MissingRecoveryGuard);
     }
-    let install_root = executable.parent().ok_or(HandoffError::UnsafeHelper)?;
+    let install_root = helper_install_root(executable)?;
     let target_name = prepared_target_name(install_root)?;
     let intent_path = install_root.join(".neuromita-update").join(HANDOFF_NAME);
     require_regular_file(&intent_path)?;
@@ -423,7 +471,7 @@ fn run_apply_helper(
     let activator = SingleFileActivator::new(install_root, &data_root, &target_name)?;
     let result = (|| -> Result<&'static str, HandoffError> {
         activator.verify_handoff_nonce(nonce)?;
-        if !target_name.starts_with("neuromita-gui") {
+        if !target_name.starts_with("neuromita") {
             return Err(HandoffError::InvalidInvocation);
         }
         let resolved = activator.apply_or_resume()?;
@@ -486,7 +534,7 @@ fn auto_recover_on_login() -> Result<(), HandoffError> {
         if !reboot_guard::is_armed(&helper)? {
             return Err(HandoffError::MissingRecoveryGuard);
         }
-        let install = helper.parent().ok_or(HandoffError::UnsafeHelper)?;
+        let install = helper_install_root(&helper)?;
         match fs::symlink_metadata(install.join(".neuromita-update")) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 // The normal helper may already have finished successfully.
@@ -508,12 +556,12 @@ fn recover_stopped_installation() -> Result<(), HandoffError> {
         return Err(HandoffError::UnsafeHelper);
     }
     require_regular_file(&executable)?;
-    let install = executable.parent().ok_or(HandoffError::UnsafeHelper)?;
+    let install = helper_install_root(&executable)?;
     let target_name = prepared_target_name(install)?;
     let required_name = if cfg!(windows) {
-        "neuromita-gui.exe"
+        "neuromita.exe"
     } else {
-        "neuromita-gui"
+        "neuromita"
     };
     if target_name != required_name {
         return Err(HandoffError::InvalidInvocation);
@@ -637,7 +685,7 @@ fn ensure_no_running_linux_inodes(activator: &SingleFileActivator) -> Result<(),
             Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
                 let comm = fs::read_to_string(format!("/proc/{pid}/comm"))
                     .map_err(|error| HandoffError::RecoveryInspection(error.to_string()))?;
-                if comm.trim_end() == "neuromita-gui" {
+                if comm.trim_end() == "neuromita" {
                     return Err(HandoffError::RecoveryBusy);
                 }
             }
@@ -660,9 +708,9 @@ pub fn acknowledge_gui_ready() -> Result<bool, HandoffError> {
         .ok_or(HandoffError::InvalidInvocation)?;
     let executable = fs::canonicalize(std::env::current_exe()?)?;
     let expected = if cfg!(windows) {
-        "neuromita-gui.exe"
+        "neuromita.exe"
     } else {
-        "neuromita-gui"
+        "neuromita"
     };
     if executable.file_name() != Some(OsStr::new(expected)) {
         return Err(HandoffError::WrongCaller);
@@ -1106,17 +1154,15 @@ mod tests {
 
     #[test]
     fn status_is_persisted_only_inside_portable_user_data() {
-        let base =
-            std::env::temp_dir().join(format!("neuromita-updater-report-{}", Uuid::new_v4()));
+        let base = std::env::temp_dir().join(format!("neuromita-report-{}", Uuid::new_v4()));
         fs::create_dir_all(&base).unwrap();
         let root =
-            PortableDataRoot::from_executable(&base.join("neuromita-gui"), Some(&base), None)
-                .unwrap();
-        write_report(&root, "neuromita-gui.exe", "failed", "simulated").unwrap();
+            PortableDataRoot::from_executable(&base.join("neuromita"), Some(&base), None).unwrap();
+        write_report(&root, "neuromita.exe", "failed", "simulated").unwrap();
         let contents = fs::read_to_string(base.join("updates").join(RESULT_NAME)).unwrap();
         assert!(contents.contains("\"state\":\"failed\""));
         assert!(contents.contains("simulated"));
-        write_report(&root, "neuromita-gui.exe", "updated-and-restarted", "").unwrap();
+        write_report(&root, "neuromita.exe", "updated-and-restarted", "").unwrap();
         let contents = fs::read_to_string(base.join("updates").join(RESULT_NAME)).unwrap();
         assert!(contents.contains("updated-and-restarted"));
         assert!(!contents.contains("simulated"));

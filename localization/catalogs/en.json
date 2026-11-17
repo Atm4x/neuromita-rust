@@ -1,4 +1,10 @@
 {
+  "settings.mcp.enable": {"source":"Включить MCP","translation":"Enable MCP"},
+  "settings.mcp.write": {"source":"Разрешить изменение данных","translation":"Allow data changes"},
+  "settings.mcp.content": {"source":"Разрешить чтение содержимого","translation":"Allow reading content"},
+  "settings.mcp.active": {"source":"Активен","translation":"Active"},
+  "settings.mcp.inactive": {"source":"Неактивен","translation":"Inactive"},
+  "settings.mcp.apply": {"source":"Применить","translation":"Apply"},
   "chess.white": {"source":"Белые","translation":"White"},
   "chess.black": {"source":"Чёрные","translation":"Black"},
   "chess.new": {"source":"Новая партия","translation":"New game"},

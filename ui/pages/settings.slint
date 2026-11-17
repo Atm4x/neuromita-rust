@@ -402,6 +402,7 @@ export component SettingsPage inherits Rectangle {
         { title: I18n.i18n("settings.images.title", "Изображения и камера"), description: I18n.i18n("settings.images.subtitle", "Захват экрана, камера, описание изображений и хранение."), glyph: "\u{f03e}" },
         { title: I18n.i18n("settings.updates", "Обновления"), description: I18n.i18n("settings.section-unavailable", "Этот раздел пока недоступен."), glyph: "\u{f2f1}" },
         { title: I18n.i18n("settings.data", "Сбор данных"), description: I18n.i18n("settings.section-unavailable", "Этот раздел пока недоступен."), glyph: Fa.database },
+        { title: "MCP", description: "Model Context Protocol", glyph: "\u{f1e6}" },
     ];
     in-out property <bool> general-sections-expanded: true;
     property <string> voice-draft: SettingsUi.settings-voice-name;
@@ -440,7 +441,8 @@ export component SettingsPage inherits Rectangle {
                         {section: 8, title: I18n.i18n("settings.models", "Модели"), glyph: "\u{f544}"},
                         {section: 9, title: I18n.i18n("settings.images", "Изображения"), glyph: "\u{f03e}"},
                         {section: 10, title: I18n.i18n("settings.updates", "Обновления"), glyph: "\u{f2f1}"},
-                        {section: 11, title: I18n.i18n("settings.data", "Сбор данных"), glyph: Fa.database}
+                        {section: 11, title: I18n.i18n("settings.data", "Сбор данных"), glyph: Fa.database},
+                        {section: 12, title: "MCP", glyph: "\u{f1e6}"}
                     ];
                     selected(section) => {
                         SettingsUi.section = section;
@@ -565,7 +567,17 @@ export component SettingsPage inherits Rectangle {
                 if SettingsUi.section == 7: GameSettingsPage { core-ready: root.connected; }
                 if SettingsUi.section == 8: ModelsSettingsPage { rag-open <=> SettingsUi.models-rag-open; }
                 if SettingsUi.section == 9: ImagesSettingsPage {}
-                if SettingsUi.section > 9: VerticalLayout { padding: 2px; spacing: 12px; alignment: start;
+                if SettingsUi.section == 12: VerticalLayout {
+                    padding: 2px; spacing: 12px; alignment: start;
+                    StyledCheckbox { text: I18n.i18n("settings.mcp.enable", "Включить MCP"); checked <=> SettingsUi.mcp-enabled; }
+                    EditorField { title: "HTTP URL"; text <=> SettingsUi.mcp-endpoint; }
+                    StyledCheckbox { text: I18n.i18n("settings.mcp.write", "Разрешить изменение данных"); checked <=> SettingsUi.mcp-allow-write; }
+                    StyledCheckbox { text: I18n.i18n("settings.mcp.content", "Разрешить чтение содержимого"); checked <=> SettingsUi.mcp-allow-content; }
+                    SettingsLabel { text: SettingsUi.mcp-active ? I18n.i18n("settings.mcp.active", "Активен") : I18n.i18n("settings.mcp.inactive", "Неактивен"); }
+                    if SettingsUi.mcp-error != "": SettingsLabel { text: SettingsUi.mcp-error; wrap: word-wrap; color: SettingsTheme.danger-text; }
+                    SettingsButton { text: I18n.i18n("settings.mcp.apply", "Применить"); enabled: root.connected; activated => { SettingsUi.mcp-save(); } }
+                }
+                if SettingsUi.section == 10 || SettingsUi.section == 11: VerticalLayout { padding: 2px; spacing: 12px; alignment: start;
                     SettingsLabel { text: I18n.i18n("settings.section-unavailable", "Этот раздел пока недоступен."); color: SettingsTheme.muted; }
                 }
             }

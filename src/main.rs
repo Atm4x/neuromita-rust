@@ -1,3 +1,9 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
+mod cli_tools;
+#[cfg(feature = "gui")]
+#[path = "bin/neuromita-gui/main.rs"]
+mod desktop;
 mod documents_cli;
 mod documents_operator;
 #[cfg(feature = "sqlite-system")]
@@ -27,8 +33,138 @@ use neuromita::{
     },
 };
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
+    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "--version")
+    {
+        println!("NeuroMita {}", neuromita::version::VERSION);
+        return ExitCode::SUCCESS;
+    }
+    #[cfg(feature = "gui")]
+    if !arguments.iter().any(|argument| argument == "--headless")
+        && (arguments.is_empty()
+            || arguments.first().is_some_and(|argument| {
+                matches!(
+                    argument.as_str(),
+                    "--data-dir"
+                        | "--language"
+                        | "--sandbox"
+                        | "--voice-preview"
+                        | "--asr-preview"
+                        | "--unity-dir"
+                        | "--launcher-config"
+                )
+            }))
+    {
+        return match desktop::run() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        };
+    }
+    let service = std::thread::Builder::new()
+        .name("neuromita-core".into())
+        .spawn(move || {
+            match tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime.block_on(Box::pin(run_cli(arguments))),
+                Err(error) => fail(error),
+            }
+        });
+    match service {
+        Ok(service) => service
+            .join()
+            .unwrap_or_else(|_| fail("application service thread panicked")),
+        Err(error) => fail(error),
+    }
+}
+
+async fn run_cli(arguments: Vec<String>) -> ExitCode {
+    if arguments.iter().any(|argument| argument == "--headless") {
+        return match Box::pin(run_headless(&arguments)).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        };
+    }
+    let operation: Result<(), Box<dyn Error>> = match arguments.first().map(String::as_str) {
+        #[cfg(feature = "mcp")]
+        Some("mcp-stdio") => Box::pin(neuromita::mcp::run_stdio()).await,
+        Some("agent") => Box::pin(neuromita::agent_ipc::run(arguments.into_iter().skip(1)))
+            .await
+            .map_err(Into::into),
+        Some("agent-http") => Box::pin(cli_tools::agent_http::main())
+            .await
+            .map_err(Into::into),
+        Some("i18n") => cli_tools::i18n::main(),
+        Some("beat-sync") => {
+            cli_tools::beat_sync::main();
+            Ok(())
+        }
+        Some("semantic-benchmark") => Box::pin(cli_tools::semantic_benchmark::main()).await,
+        Some("telegram-voice-smoke") => {
+            Box::pin(cli_tools::telegram_voice_smoke::main()).await;
+            Ok(())
+        }
+        Some(
+            "--internal-apply-update"
+            | "--auto-recover-interrupted-update"
+            | "--recover-interrupted-update",
+        ) => {
+            neuromita::updater::handoff::run_helper(std::env::args_os().skip(1)).map_err(Into::into)
+        }
+        _ => return Box::pin(run_main()).await,
+    };
+    match operation {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => fail(error),
+    }
+}
+
+async fn run_headless(arguments: &[String]) -> Result<(), Box<dyn Error>> {
+    let mut directory = None;
+    let mut parameters = arguments.iter();
+    while let Some(argument) = parameters.next() {
+        match argument.as_str() {
+            "--headless" => {}
+            "--data-dir" => {
+                directory = Some(std::path::PathBuf::from(
+                    parameters.next().ok_or("--data-dir requires a path")?,
+                ))
+            }
+            _ => return Err(format!("unsupported headless argument: {argument}").into()),
+        }
+    }
+    let logging = neuromita::diagnostics::init().map_err(std::io::Error::other)?;
+    let root = neuromita::portable::PortableDataRoot::resolve(directory.as_deref())?;
+    root.ensure_writable()?;
+    logging.attach(&root)?;
+    let voice = Arc::new(neuromita::telegram_voice::DynamicTelegramVoice::default());
+    let telegram = Arc::new(neuromita::telegram_admin::TelegramAdmin::new(
+        root.path().to_owned(),
+        voice.clone(),
+    ));
+    let app = Box::pin(neuromita::app::standalone::start(
+        root.path(),
+        None,
+        voice,
+        telegram,
+    ))
+    .await
+    .map_err(std::io::Error::other)?;
+    println!(
+        "NeuroMita {} headless; Core {}",
+        neuromita::version::VERSION,
+        app.server().address()
+    );
+    tokio::signal::ctrl_c().await?;
+    app.shutdown().await?;
+    Ok(())
+}
+
+async fn run_main() -> ExitCode {
     let logging = match neuromita::diagnostics::init() {
         Ok(logging) => logging,
         Err(error) => {

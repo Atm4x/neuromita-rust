@@ -20,7 +20,7 @@ try {
     $output = New-Item -ItemType Directory -Path $OutputDirectory -Force
     $root = New-Item -ItemType Directory -Path (Join-Path $output.FullName "NeuroMita-v$($package.version)") -Force
     $profile = New-Item -ItemType Directory -Path (Join-Path $root.FullName 'UserData') -Force
-    $executable = Join-Path $binary 'neuromita-gui.exe'
+    $executable = Join-Path $binary 'neuromita.exe'
     $nativeAsset = Join-Path $output.FullName 'neuromita-gui-windows-x86_64.exe'
     $portableAsset = Join-Path $output.FullName "NeuroMita-v$($package.version)-windows-x86_64.zip"
     if ((Test-Path -LiteralPath $nativeAsset) -or (Test-Path -LiteralPath $portableAsset)) {
@@ -33,7 +33,6 @@ try {
     }
 
     Copy-Item -LiteralPath $executable -Destination $root.FullName
-    Copy-Item -LiteralPath (Join-Path $binary 'neuromita-agent-mcp.exe') -Destination $root.FullName
     Copy-Item -LiteralPath (Join-Path $repository 'Prompts') -Destination $profile.FullName -Recurse
     Copy-Item -LiteralPath (Join-Path $repository 'licenses') -Destination $root.FullName -Recurse
     $chessLicense = Join-Path $root.FullName 'licenses/cozy-chess-LICENSE'

@@ -32,7 +32,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Compile Slint Telegram GUI integration
-        run: cargo +1.92.0 check --locked --offline --features gui --bin neuromita-gui
+        run: cargo +1.92.0 check --locked --offline --features gui --bin neuromita
       - name: Telegram focused tests
         run: cargo test --locked --offline telegram_
       - name: Clippy

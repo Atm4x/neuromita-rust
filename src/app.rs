@@ -1,4 +1,5 @@
 pub mod historical_recall;
+pub mod standalone;
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -457,6 +458,8 @@ impl SharedSpeechCapture {
 }
 
 pub struct ApplicationLifecycle {
+    #[cfg(feature = "mcp")]
+    mcp: crate::mcp::McpRuntime,
     bindings: Arc<ApiBindings>,
     timeline: Arc<Mutex<SessionTimeline>>,
     presenter: GuiPresenter,
@@ -1706,6 +1709,12 @@ impl ApplicationLifecycle {
             )),
         )));
         let stop = CancellationToken::new();
+        #[cfg(feature = "mcp")]
+        let mcp = crate::mcp::McpRuntime::start(
+            server.address(),
+            presenter.settings.observe()?,
+            stop.clone(),
+        );
         let stopped = stop.clone();
         let (completed, completion) = oneshot::channel();
         tokio::spawn(async move {
@@ -1714,6 +1723,8 @@ impl ApplicationLifecycle {
             let _ = completed.send(result);
         });
         Ok(Self {
+            #[cfg(feature = "mcp")]
+            mcp,
             presenter,
             bindings,
             timeline,
@@ -2078,12 +2089,19 @@ impl ApplicationLifecycle {
 
     pub async fn shutdown(mut self) -> Result<(), ApplicationError> {
         self.request_stop();
+        #[cfg(feature = "mcp")]
+        self.mcp.shutdown().await;
         self.stop_speech_capture().await;
         self.completion
             .take()
             .expect("application owns its completion")
             .await
             .map_err(|error| ApplicationError::Task(error.to_string()))?
+    }
+
+    #[cfg(feature = "mcp")]
+    pub fn mcp_status(&self) -> tokio::sync::watch::Receiver<crate::mcp::McpStatus> {
+        self.mcp.observe()
     }
 
     fn request_stop(&self) {

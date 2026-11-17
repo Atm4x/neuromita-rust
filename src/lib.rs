@@ -18,6 +18,8 @@ pub mod knowledge;
 pub mod launcher;
 pub mod lifecycle;
 pub mod localization;
+#[cfg(feature = "mcp")]
+pub mod mcp;
 pub mod music;
 pub mod prompts;
 // Administrative workflows are contract-tested; an authenticated control route is not yet wired.

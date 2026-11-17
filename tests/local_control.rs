@@ -1253,6 +1253,103 @@ async fn invalid_frames_close_connections_and_shutdown_interrupts_partial_reads(
     assert!(TcpStream::connect(server.address()).await.is_err());
 }
 
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn embedded_mcp_http_follows_settings_and_uses_the_same_core() {
+    use neuromita::settings::McpSettings;
+    let fixture = Fixture::start(|_| {}).await;
+    SettingsApi::edit::<VoiceSettings>(|voice| voice.volume = Volume::new(37).unwrap()).unwrap();
+    let mut status = fixture.app.mcp_status();
+    assert!(!status.borrow().active);
+    let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = reserved.local_addr().unwrap();
+    drop(reserved);
+    let endpoint = format!("http://{address}/qa-mcp");
+    let configured = McpSettings {
+        enabled: true,
+        endpoint: endpoint.clone(),
+        ..Default::default()
+    };
+    fixture
+        .app
+        .presenter()
+        .settings
+        .set_mcp(configured.clone())
+        .unwrap();
+    bounded(async {
+        while !status.borrow_and_update().active {
+            status.changed().await.unwrap();
+        }
+    })
+    .await;
+    let http = reqwest::Client::new();
+    let response = http.post(&endpoint)
+        .header("Accept", "application/json, text/event-stream")
+        .json(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"qa","version":"1"}
+        }})).send().await.unwrap();
+    assert!(response.status().is_success(), "{}", response.status());
+    let session = response.headers().get("mcp-session-id").unwrap().clone();
+    let initialized = response.text().await.unwrap();
+    assert!(initialized.contains("neuromita"), "{initialized}");
+    let client = http
+        .post(&endpoint)
+        .header("Accept", "application/json, text/event-stream")
+        .header("mcp-session-id", session.clone());
+    assert!(
+        client
+            .json(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    let result = http.post(&endpoint).header("Accept", "application/json, text/event-stream")
+        .header("mcp-session-id", session)
+        .json(&json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"inspect_presenter","arguments":{"surface":"voice"}}}))
+        .send().await.unwrap().text().await.unwrap();
+    let response: Value = serde_json::from_str(&result).unwrap_or_else(|_| {
+        result
+            .lines()
+            .filter_map(|line| line.strip_prefix("data:"))
+            .find_map(|data| serde_json::from_str(data.trim()).ok())
+            .expect("MCP response event")
+    });
+    assert_eq!(response["result"]["isError"], false);
+    assert_eq!(
+        response["result"]["structuredContent"]["snapshot"]["volume"],
+        37
+    );
+    assert!(!result.contains("unused-fixture-key"));
+    assert_eq!(
+        http.post(format!("http://{address}/wrong-path"))
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+    fixture
+        .app
+        .presenter()
+        .settings
+        .set_mcp(McpSettings {
+            enabled: false,
+            ..configured
+        })
+        .unwrap();
+    bounded(async {
+        while status.borrow_and_update().active {
+            status.changed().await.unwrap();
+        }
+    })
+    .await;
+    assert!(TcpStream::connect(address).await.is_err());
+    fixture.shutdown().await;
+}
+
 #[tokio::test]
 async fn game_link_push_resume_idempotency_and_session_ownership() {
     let mut fixture = Fixture::start(|_| {}).await;
@@ -2854,8 +2951,9 @@ async fn optional_http_gateway_rejects_untrusted_clients_and_probes_real_core() 
     let address = reserved.local_addr().unwrap();
     drop(reserved);
     let token = "gateway-test-secret-12345678901234567890";
-    let binary = env!("CARGO_BIN_EXE_neuromita-agent-http");
+    let binary = env!("CARGO_BIN_EXE_neuromita");
     let mut gateway = tokio::process::Command::new(binary)
+        .arg("agent-http")
         .args([
             "--listen",
             &address.to_string(),
@@ -2902,7 +3000,8 @@ async fn optional_http_gateway_rejects_untrusted_clients_and_probes_real_core() 
 #[tokio::test]
 async fn mcp_stdio_probes_the_same_running_core() {
     let fixture = Fixture::start(|_| {}).await;
-    let mut process = tokio::process::Command::new(env!("CARGO_BIN_EXE_neuromita-agent-mcp"))
+    let mut process = tokio::process::Command::new(env!("CARGO_BIN_EXE_neuromita"))
+        .arg("mcp-stdio")
         .args([
             "--core",
             &fixture.app.server().address().to_string(),
@@ -3027,10 +3126,11 @@ async fn mcp_stdio_probes_the_same_running_core() {
 async fn agent_ipc_binary_executes_jsonl_against_running_core() {
     let mut fixture = Fixture::start(|_| {}).await;
     let address = fixture.app.server().address().to_string();
-    let cli = env!("CARGO_BIN_EXE_neuromita-agent");
+    let cli = env!("CARGO_BIN_EXE_neuromita");
     let script = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/agent_ipc_smoke.jsonl");
     let output = bounded(
         tokio::process::Command::new(cli)
+            .arg("agent")
             .args(["--addr", address.as_str(), "batch", script])
             .output(),
     )
@@ -3058,6 +3158,7 @@ async fn agent_ipc_binary_executes_jsonl_against_running_core() {
 
     let denied = bounded(
         tokio::process::Command::new(cli)
+            .arg("agent")
             .args([
                 "--addr",
                 address.as_str(),

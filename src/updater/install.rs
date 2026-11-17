@@ -47,9 +47,9 @@ fn running_gui_activator(
 ) -> Result<SingleFileActivator, NativeInstallError> {
     let executable = std::env::current_exe()?;
     let expected_name = if cfg!(windows) {
-        "neuromita-gui.exe"
+        "neuromita.exe"
     } else {
-        "neuromita-gui"
+        "neuromita"
     };
     if executable.file_name() != Some(OsStr::new(expected_name)) {
         return Err(NativeInstallError::NotInstalledGui);

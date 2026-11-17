@@ -85,10 +85,7 @@ impl SingleFileActivator {
             || target_name.ends_with(['.', ' '])
             || target_name.contains(['\\', ':', '\0'])
             || target_name.chars().any(char::is_control)
-            || !matches!(
-                lower_name.as_str(),
-                "neuromita" | "neuromita-gui" | "neuromita.exe" | "neuromita-gui.exe"
-            )
+            || !matches!(lower_name.as_str(), "neuromita" | "neuromita.exe")
             || !matches!(
                 Path::new(target_name)
                     .components()
@@ -159,9 +156,9 @@ impl SingleFileActivator {
         artifact: &StagedArtifact,
     ) -> Result<(), ActivationError> {
         let installed_name = if cfg!(windows) {
-            "neuromita-gui.exe"
+            "neuromita.exe"
         } else {
-            "neuromita-gui"
+            "neuromita"
         };
         if self.target_name != installed_name
             || Some(asset.name())
@@ -859,10 +856,8 @@ pub(crate) fn prepared_target_name(install_root: &Path) -> Result<String, Activa
     }
     let journal: ActivationJournal = serde_json::from_slice(&bytes)?;
     let name = &journal.target_name;
-    if !matches!(
-        name.as_str(),
-        "neuromita" | "neuromita-gui" | "neuromita.exe" | "neuromita-gui.exe"
-    ) || !valid_digest(&journal.previous_sha256)
+    if !matches!(name.as_str(), "neuromita" | "neuromita.exe")
+        || !valid_digest(&journal.previous_sha256)
         || !valid_digest(&journal.next_sha256)
     {
         return Err(ActivationError::UnsafeTarget);
@@ -1052,9 +1047,9 @@ mod tests {
         };
         let fixture = Fixture::new();
         let target_name = if cfg!(windows) {
-            "neuromita-gui.exe"
+            "neuromita.exe"
         } else {
-            "neuromita-gui"
+            "neuromita"
         };
         fs::rename(fixture.target(), fixture.install.join(target_name)).unwrap();
         let activator =
@@ -1510,11 +1505,11 @@ mod tests {
     #[test]
     fn installer_must_not_point_at_its_data_root() {
         let f = Fixture::new();
-        let other = f.install.join("neuromita-gui.exe");
+        let other = f.install.join("other.exe");
         fs::write(&other, b"private").unwrap();
         let protected = PortableDataRoot::resolve(Some(&f.install)).unwrap();
         assert!(matches!(
-            SingleFileActivator::new(&f.install, &protected, "neuromita-gui.exe"),
+            SingleFileActivator::new(&f.install, &protected, "other.exe"),
             Err(ActivationError::UnsafeTarget)
         ));
         assert_eq!(fs::read(other).unwrap(), b"private");

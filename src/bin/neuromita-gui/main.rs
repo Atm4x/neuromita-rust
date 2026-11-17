@@ -1,5 +1,3 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-
 mod ai_engine;
 mod ai_hub;
 mod asr;
@@ -22,7 +20,7 @@ mod view {
     slint::include_modules!();
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args_os()
         .nth(1)
         .is_some_and(|arg| arg == "--version")

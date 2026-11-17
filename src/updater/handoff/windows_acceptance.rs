@@ -72,7 +72,7 @@ fn installed_parent_probe() {
     let data_path = executable.parent().unwrap().join("UserData");
     let data = PortableDataRoot::resolve(Some(&data_path)).unwrap();
     let activator =
-        SingleFileActivator::new(executable.parent().unwrap(), &data, "neuromita-gui.exe").unwrap();
+        SingleFileActivator::new(executable.parent().unwrap(), &data, "neuromita.exe").unwrap();
     let key = env::var(TEST_KEY).unwrap();
     let runtime = IsolatedHandoffRuntime::new(&key);
     schedule_after_shutdown_with(&activator, &runtime).unwrap();
@@ -195,8 +195,9 @@ fn installed_case(mode: Scenario) -> Result<(), Box<dyn std::error::Error>> {
     old.extend_from_slice(b"NM_D56_PREVIOUS");
     let mut next = fs::read(&source)?;
     next.extend_from_slice(if success { GOOD } else { BAD });
-    let installed_gui = install.join("neuromita-gui.exe");
-    let installed_helper = install.join("neuromita-updater.exe");
+    let installed_gui = install.join("neuromita.exe");
+    let installed_helper = install.join(".neuromita-updater/neuromita.exe");
+    fs::create_dir_all(installed_helper.parent().unwrap())?;
     fs::write(&installed_gui, &old)?;
     fs::copy(&source, &installed_helper)?;
 
@@ -217,7 +218,7 @@ fn installed_case(mode: Scenario) -> Result<(), Box<dyn std::error::Error>> {
     let artifact =
         runtime.block_on(UpdateStager::new(&data)?.stage(&asset, &CancellationToken::new()))?;
     assert!(artifact.reused());
-    let activator = SingleFileActivator::new(&install, &data, "neuromita-gui.exe")?;
+    let activator = SingleFileActivator::new(&install, &data, "neuromita.exe")?;
     activator.prepare_native_gui(&asset, &artifact)?;
     let subkey = format!("Software\\NeuroMita\\UpdaterLeaseTests\\{}", Uuid::new_v4());
     let lease = IsolatedHandoffRuntime::new(&subkey);
@@ -291,7 +292,8 @@ fn installed_case(mode: Scenario) -> Result<(), Box<dyn std::error::Error>> {
 fn installed_helper_rejects_missing_isolated_recovery_lease() {
     let install = env::temp_dir().join(format!("nm-d56-guard-refusal-{}", Uuid::new_v4()));
     fs::create_dir_all(&install).unwrap();
-    let helper = install.join("neuromita-updater.exe");
+    let helper = install.join(".neuromita-updater/neuromita.exe");
+    fs::create_dir_all(helper.parent().unwrap()).unwrap();
     fs::copy(env::current_exe().unwrap(), &helper).unwrap();
     let subkey = format!("Software\\NeuroMita\\UpdaterLeaseTests\\{}", Uuid::new_v4());
     let args = [

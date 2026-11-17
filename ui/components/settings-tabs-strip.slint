@@ -52,7 +52,7 @@ export component SettingsTabsStrip inherits Rectangle {
                 spacing: 3px;
 
                 for entry in root.entries: SettingsNavigationTab {
-                    visible: root.visibility[entry.section];
+                    visible: entry.section >= root.visibility.length || root.visibility[entry.section];
                     label: entry.title;
                     glyph: entry.glyph;
                     active: root.active-section == entry.section;

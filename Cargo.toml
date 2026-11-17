@@ -4,6 +4,7 @@ default-run = "neuromita"
 version = "0.2.0"
 edition = "2024"
 rust-version = "1.89"
+autobins = false
 
 [workspace]
 members = ["."]
@@ -11,14 +12,8 @@ exclude = ["third_party/cozy-chess/cozy-chess", "third_party/cozy-chess/types"]
 resolver = "2"
 
 [[bin]]
-name = "neuromita-gui"
-path = "src/bin/neuromita-gui/main.rs"
-required-features = ["gui"]
-
-[[bin]]
-name = "neuromita-agent-mcp"
-path = "src/bin/neuromita-agent-mcp.rs"
-required-features = ["mcp"]
+name = "neuromita"
+path = "src/main.rs"
 
 [[test]]
 name = "updater_native_apply_e2e"
@@ -33,10 +28,10 @@ name = "q2_onboarding_acceptance"
 required-features = ["gui"]
 
 [features]
-default = ["sqlite-system"]
+default = ["sqlite-system", "gui", "mcp"]
 sqlite-system = ["dep:rusqlite"]
-gui = ["dep:slint", "dep:slint-build"]
-mcp = ["dep:rmcp"]
+gui = ["dep:slint", "dep:slint-build", "mcp"]
+mcp = ["dep:rmcp", "dep:hyper", "dep:hyper-util", "dep:tower-service", "dep:http-body-util", "dep:bytes"]
 
 [dependencies]
 base64 = "0.23"
@@ -47,7 +42,12 @@ iana-time-zone = "0.1.65"
 libc = "0.2"
 rusqlite = { version = "0.41", optional = true, default-features = false, features = ["bundled", "libsqlite3-sys"] }
 ring = "0.17.14"
-rmcp = { version = "=3.10.0", optional = true, default-features = false, features = ["server", "transport-io"] }
+rmcp = { version = "=3.10.0", optional = true, default-features = false, features = ["server", "transport-io", "transport-streamable-http-server"] }
+hyper = { version = "1", optional = true, features = ["server", "http1"] }
+hyper-util = { version = "0.1", optional = true, features = ["tokio"] }
+tower-service = { version = "0.3", optional = true }
+http-body-util = { version = "0.1", optional = true }
+bytes = { version = "1", optional = true }
 regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "http2", "system-proxy"] }
 serde = { version = "1", features = ["derive", "rc"] }

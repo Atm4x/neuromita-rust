@@ -4,9 +4,9 @@ on:
   pull_request:
     paths:
       - 'src/agent_ipc.rs'
-      - 'src/bin/neuromita-agent.rs'
-      - 'src/bin/neuromita-agent-http.rs'
-      - 'src/bin/neuromita-agent-mcp.rs'
+      - 'src/agent_ipc.rs'
+      - 'src/cli_tools/agent_http.rs'
+      - 'src/mcp/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'src/app.rs'
@@ -42,7 +42,7 @@ jobs:
           CARGO_INCREMENTAL: '0'
         run: |
           cargo check --locked --offline --features mcp --all-targets
-          cargo test --locked --offline --bin neuromita-agent-http -- --test-threads=1
+          cargo test --locked --offline --bin neuromita -- --test-threads=1
           cargo test --locked --offline --lib agent_ipc::tests -- --test-threads=1
           cargo test --locked --offline --test local_control presenter_ipc_projects_live_gui_presenters_without_private_payloads -- --test-threads=1
           cargo test --locked --offline --test local_control optional_http_gateway_rejects_untrusted_clients_and_probes_real_core -- --test-threads=1

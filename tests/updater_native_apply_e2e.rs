@@ -39,7 +39,9 @@ fn main() {
     eprintln!("Native updater E2E is supported on Linux and Windows only");
     #[cfg(target_os = "linux")]
     {
-        let result = if env::var_os(READY_NONCE_ENV).is_some() {
+        let result = if env::args().nth(1).as_deref() == Some("--internal-apply-update") {
+            neuromita::updater::handoff::run_helper(env::args_os().skip(1)).map_err(Into::into)
+        } else if env::var_os(READY_NONCE_ENV).is_some() {
             restarted_gui()
         } else if matches!(
             env::args().nth(1).as_deref(),
@@ -48,7 +50,7 @@ fn main() {
             installed_parent()
         } else if env::current_exe()
             .ok()
-            .and_then(|p| p.file_name().map(|s| s == "neuromita-gui"))
+            .and_then(|p| p.file_name().map(|s| s == "neuromita"))
             .unwrap_or(false)
         {
             restored_gui()
@@ -144,8 +146,8 @@ fn wait_until_report(data: &Path) -> Result<String, Box<dyn std::error::Error>> 
 enum Scenario {
     Healthy,
     BadStartup,
-    HelperNotExecutable,
-    HelperMissing,
+    HelperPathBlocked,
+    HelperDirectoryBlocked,
     ConflictingHandoff,
     CancelledAfterScheduling,
 }
@@ -155,8 +157,8 @@ fn case(mode: Scenario, base: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let name = match mode {
         Scenario::Healthy => "healthy",
         Scenario::BadStartup => "rollback",
-        Scenario::HelperNotExecutable => "denied",
-        Scenario::HelperMissing => "missing",
+        Scenario::HelperPathBlocked => "denied",
+        Scenario::HelperDirectoryBlocked => "missing",
         Scenario::ConflictingHandoff => "conflicting-handoff",
         Scenario::CancelledAfterScheduling => "cancelled",
     };
@@ -167,7 +169,7 @@ fn case(mode: Scenario, base: &Path) -> Result<(), Box<dyn std::error::Error>> {
         data_path.join("settings.json"),
         b"unmodified private settings",
     )?;
-    let gui = install.join("neuromita-gui");
+    let gui = install.join("neuromita");
     let old_source = env::current_exe()?;
     if fs::hard_link(&old_source, &gui).is_err() {
         fs::copy(&old_source, &gui)?;
@@ -189,19 +191,14 @@ fn case(mode: Scenario, base: &Path) -> Result<(), Box<dyn std::error::Error>> {
     };
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&gui, fs::Permissions::from_mode(0o755))?;
-    let helper = install.join("neuromita-updater");
+    let helper_directory = install.join(".neuromita-updater");
     match mode {
-        Scenario::HelperMissing => {}
-        Scenario::HelperNotExecutable => {
-            fs::write(&helper, b"helper without execute permission")?;
-            fs::set_permissions(&helper, fs::Permissions::from_mode(0o644))?;
+        Scenario::HelperDirectoryBlocked => fs::write(&helper_directory, b"blocked")?,
+        Scenario::HelperPathBlocked => {
+            fs::create_dir(&helper_directory)?;
+            fs::create_dir(helper_directory.join("neuromita"))?;
         }
-        _ => {
-            if fs::hard_link(base.join("helper"), &helper).is_err() {
-                fs::copy(base.join("helper"), &helper)?;
-            }
-            fs::set_permissions(&helper, fs::Permissions::from_mode(0o755))?;
-        }
+        _ => {}
     }
 
     let data = PortableDataRoot::resolve(Some(&data_path))?;
@@ -228,7 +225,7 @@ fn case(mode: Scenario, base: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let artifact =
         runtime.block_on(UpdateStager::new(&data)?.stage(&asset, &CancellationToken::new()))?;
     assert!(artifact.reused(), "publisher-hash cache was not reused");
-    let activator = SingleFileActivator::new(&install, &data, "neuromita-gui")?;
+    let activator = SingleFileActivator::new(&install, &data, "neuromita")?;
     activator.prepare_native_gui(&asset, &artifact)?;
     if mode == Scenario::ConflictingHandoff {
         fs::create_dir(install.join(".neuromita-update/handoff.json"))?;
@@ -269,7 +266,7 @@ fn case(mode: Scenario, base: &Path) -> Result<(), Box<dyn std::error::Error>> {
             activator.discard_prepared()?;
             assert!(!install.join(".neuromita-update").exists());
         }
-        Scenario::HelperNotExecutable | Scenario::HelperMissing => {
+        Scenario::HelperPathBlocked | Scenario::HelperDirectoryBlocked => {
             assert!(
                 !parent.status.success(),
                 "helper failure unexpectedly started update"
@@ -317,11 +314,10 @@ fn conductor() -> Result<(), Box<dyn std::error::Error>> {
     let result = (|| {
         fs::write(base.join("new-good"), executable_bytes(NEW_OK)?)?;
         fs::write(base.join("new-bad"), executable_bytes(NEW_BAD)?)?;
-        fs::copy(env!("CARGO_BIN_EXE_neuromita-updater"), base.join("helper"))?;
         case(Scenario::Healthy, &base)?;
         case(Scenario::BadStartup, &base)?;
-        case(Scenario::HelperNotExecutable, &base)?;
-        case(Scenario::HelperMissing, &base)?;
+        case(Scenario::HelperPathBlocked, &base)?;
+        case(Scenario::HelperDirectoryBlocked, &base)?;
         case(Scenario::ConflictingHandoff, &base)?;
         case(Scenario::CancelledAfterScheduling, &base)?;
         Ok::<(), Box<dyn std::error::Error>>(())
@@ -361,7 +357,9 @@ mod windows_acceptance {
     const BAD: &[u8] = b"NM_APPLY_PROBE_NO";
 
     pub fn run() {
-        let result = if env::var_os(READY_NONCE_ENV).is_some() {
+        let result = if env::args().nth(1).as_deref() == Some("--internal-apply-update") {
+            neuromita::updater::handoff::run_helper(env::args_os().skip(1)).map_err(Into::into)
+        } else if env::var_os(READY_NONCE_ENV).is_some() {
             restarted_probe()
         } else {
             conductor()
@@ -400,7 +398,7 @@ mod windows_acceptance {
         let data_path = install.join("UserData");
         fs::create_dir_all(&data_path)?;
         fs::write(data_path.join("settings.json"), b"user settings unchanged")?;
-        let gui = install.join("neuromita-gui.exe");
+        let gui = install.join("neuromita.exe");
         let mut previous = fs::read(env::current_exe()?)?;
         previous.extend_from_slice(b"NM_APPLY_PROBE_OLD");
         let mut next = fs::read(env::current_exe()?)?;
@@ -422,7 +420,7 @@ mod windows_acceptance {
         let artifact =
             rt.block_on(UpdateStager::new(&data)?.stage(&asset, &CancellationToken::new()))?;
         assert!(artifact.reused());
-        let activator = SingleFileActivator::new(&install, &data, "neuromita-gui.exe")?;
+        let activator = SingleFileActivator::new(&install, &data, "neuromita.exe")?;
         activator.prepare_native_gui(&asset, &artifact)?;
         let nonce = Uuid::new_v4();
         activator.arm_health_check(nonce)?;

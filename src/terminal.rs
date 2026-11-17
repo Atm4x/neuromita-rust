@@ -63,6 +63,9 @@ impl Options {
         let mut values = HashMap::new();
         let mut installed_speech = false;
         while let Some(argument) = args.next() {
+            if argument == "--headless" {
+                continue;
+            }
             if argument == "--installed-speech" {
                 if installed_speech {
                     return Err(invalid("duplicate --installed-speech"));

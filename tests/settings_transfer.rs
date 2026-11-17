@@ -99,6 +99,7 @@ fn export_is_a_complete_canonical_envelope() {
             "document_generation",
             "history_generation",
             "interface",
+            "mcp",
             "memory",
             "onboarding",
             "presets",

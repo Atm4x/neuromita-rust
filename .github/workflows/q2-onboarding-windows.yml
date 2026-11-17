@@ -32,7 +32,7 @@ jobs:
           CARGO_PROFILE_TEST_DEBUG: "0"
         run: |
           cargo +1.98.1 fmt --all -- --check
-          cargo +1.98.1 check --locked --features gui --bin neuromita-gui
+          cargo +1.98.1 check --locked --features gui --bin neuromita
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo +1.98.1 test --locked --lib onboarding::tests -- --nocapture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
