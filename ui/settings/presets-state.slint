@@ -1,4 +1,4 @@
-export struct PromptSetItem { character: int, name: string, author: string, version: string, description: string }
+export struct PromptSetItem { name: string, author: string, version: string, description: string }
 export struct CharacterDebugItem { label: string, value: string }
 
 export struct CharacterPresets { reply: string, react: string, initiate: string, split: bool }
@@ -52,7 +52,7 @@ export global SettingsUi {
     in-out property <bool> settings-voice-game;
     in-out property <string> settings-voice-name;
     in-out property <[CharacterPresets]> character-presets;
-    in-out property <[PromptSetItem]> prompt-set-options;
+    in-out property <[[PromptSetItem]]> prompt-set-options;
     in-out property <[string]> character-prompt-sets;
     in-out property <[CharacterDebugItem]> character-debug-values;
     in-out property <int> character-debug-character: -1;

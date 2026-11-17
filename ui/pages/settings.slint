@@ -51,7 +51,7 @@ component PresetChoice inherits Rectangle {
 
 
 component PromptSetChoice inherits Rectangle {
-    in property <int> character;
+    in property <[PromptSetItem]> options;
     in property <string> value;
     callback selected(string);
     height: 40px;
@@ -70,11 +70,11 @@ component PromptSetChoice inherits Rectangle {
         }
         Glyph { text: "\u{f077}"; font-size: 11px; color: SettingsTheme.accent; }
     }
-    TouchArea { mouse-cursor: pointer; clicked => { if (root.value != "") { menu.show(); } } }
+    TouchArea { enabled: root.options.length > 0; mouse-cursor: pointer; clicked => { menu.show(); } }
     menu := PopupWindow {
         y: root.height + 3px;
         width: root.width;
-        height: min(300px, SettingsUi.prompt-set-options.length * 36px + 8px);
+        height: min(300px, choices.preferred-height);
         close-policy: close-on-click-outside;
         Rectangle {
             background: SettingsTheme.popup;
@@ -83,10 +83,10 @@ component PromptSetChoice inherits Rectangle {
             border-color: SettingsTheme.border;
             ScrollView {
                 width: 100%; height: 100%; content-width: self.visible-width;
-                VerticalLayout {
+                content-height: choices.preferred-height;
+                choices := VerticalLayout {
                     padding: 4px; spacing: 2px; alignment: start;
-                    for item in SettingsUi.prompt-set-options: QuickAction {
-                        visible: item.character == root.character;
+                    for item in root.options: QuickAction {
                         text: item.name;
                         activated => { root.selected(item.name); menu.close(); }
                     }
@@ -106,6 +106,8 @@ component CharacterWorkspace inherits HorizontalLayout {
     in-out property <bool> debug-expanded;
     in-out property <bool> maintenance-expanded;
     in-out property <bool> danger-expanded;
+    property <[PromptSetItem]> prompt-options: root.character >= 0 && root.character < SettingsUi.prompt-set-options.length
+        ? SettingsUi.prompt-set-options[root.character] : [];
     spacing: 9px;
     property <CharacterPresets> presets: {
         reply: SettingsUi.character-draft-reply,
@@ -233,28 +235,33 @@ component CharacterWorkspace inherits HorizontalLayout {
                     width: character-scroll.visible-width;
                     padding: 0px; spacing: 12px; alignment: start;
                     CollapsibleSettingsSection { title: I18n.i18n("settings.characters.prompt-set", "Набор промптов"); glyph: "\u{f15c}"; expanded <=> root.prompt-expanded;
-VerticalLayout {
+                        VerticalLayout {
                             padding: 0px; spacing: 12px;
                             PromptSetChoice {
-                                character: root.character;
+                                options: root.prompt-options;
                                 value: SettingsUi.character-draft-prompt;
                                 selected(value) => {
                                     if (root.connected && !SettingsUi.character-profile-pending) { SettingsUi.character-draft-prompt = value; }
                                 }
                             }
-                            for item in SettingsUi.prompt-set-options: VerticalLayout {
-                                visible: item.character == root.character && item.name == SettingsUi.character-draft-prompt;
-                                padding: 0px; spacing: 4px;
-                                HorizontalLayout { height: 20px; spacing: 8px;
-                                    SettingsLabel { text: I18n.i18n("settings.characters.author", "Автор:"); font-weight: 600; }
-                                    SettingsLabel { text: item.author == "" ? "—" : item.author; horizontal-stretch: 1; }
+                            VerticalLayout {
+                                padding: 0px; spacing: 0px;
+                                for item in root.prompt-options: VerticalLayout {
+                                    padding: 0px; spacing: 0px; vertical-stretch: 0;
+                                    if item.name == SettingsUi.character-draft-prompt: VerticalLayout {
+                                        padding: 0px; spacing: 4px;
+                                        HorizontalLayout { height: 20px; spacing: 8px;
+                                            SettingsLabel { text: I18n.i18n("settings.characters.author", "Автор:"); font-weight: 600; }
+                                            SettingsLabel { text: item.author == "" ? "—" : item.author; horizontal-stretch: 1; }
+                                        }
+                                        HorizontalLayout { height: 20px; spacing: 8px;
+                                            SettingsLabel { text: I18n.i18n("settings.characters.version", "Версия:"); font-weight: 600; }
+                                            SettingsLabel { text: item.version == "" ? "—" : item.version; horizontal-stretch: 1; }
+                                        }
+                                        SettingsLabel { text: I18n.i18n("settings.characters.prompt-description", "Описание:"); font-weight: 600; }
+                                        SettingsLabel { text: item.description == "" ? "—" : item.description; wrap: word-wrap; }
+                                    }
                                 }
-                                HorizontalLayout { height: 20px; spacing: 8px;
-                                    SettingsLabel { text: I18n.i18n("settings.characters.version", "Версия:"); font-weight: 600; }
-                                    SettingsLabel { text: item.version == "" ? "—" : item.version; horizontal-stretch: 1; }
-                                }
-                                SettingsLabel { text: I18n.i18n("settings.characters.prompt-description", "Описание:"); font-weight: 600; }
-                                SettingsLabel { text: item.description == "" ? "—" : item.description; wrap: word-wrap; }
                             }
                             HorizontalLayout { spacing: 6px;
                                 SettingsButton {

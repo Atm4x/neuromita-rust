@@ -98,6 +98,52 @@ impl slint::platform::Platform for TestPlatform {
 }
 
 #[test]
+fn extra_prompt_sets_do_not_shift_the_selected_prompt_details() {
+    use super::super::view::PromptSetItem;
+
+    slint::platform::set_platform(Box::new(TestPlatform)).unwrap();
+    let window = AppWindow::new().unwrap();
+    window.set_page(PageId::Settings);
+    let settings = window.global::<SettingsUi>();
+    settings.set_section(2);
+    settings.set_character_draft_prompt("Default".into());
+    let selected = PromptSetItem {
+        name: "Default".into(),
+        author: "Prompt author".into(),
+        description: "Selected prompt description".into(),
+        version: "1".into(),
+    };
+    let set_options = |first: Vec<PromptSetItem>, other: Vec<PromptSetItem>| {
+        settings.set_prompt_set_options(ModelRc::new(VecModel::from(vec![
+            ModelRc::new(VecModel::from(first)),
+            ModelRc::new(VecModel::from(other)),
+        ])));
+    };
+    set_options(vec![selected.clone()], Vec::new());
+    window.show().unwrap();
+    window
+        .window()
+        .set_size(slint::PhysicalSize::new(1560, 918));
+    let initial = window.window().take_snapshot().unwrap();
+
+    let extra = (0..24)
+        .map(|index| PromptSetItem {
+            name: format!("Another set {index}").into(),
+            ..selected.clone()
+        })
+        .collect::<Vec<_>>();
+    let mut current = extra.clone();
+    current.insert(5, selected);
+    set_options(current, extra);
+    let expanded_catalog = window.window().take_snapshot().unwrap();
+    assert!(initial.as_bytes() == expanded_catalog.as_bytes());
+
+    settings.set_character_draft_prompt("Another set 1".into());
+    let changed_selection = window.window().take_snapshot().unwrap();
+    assert!(expanded_catalog.as_bytes() != changed_selection.as_bytes());
+}
+
+#[test]
 fn existing_slint_bindings_retranslate_on_locale_change_and_catalog_revision() {
     slint::platform::set_platform(Box::new(TestPlatform)).unwrap();
     let controls = probe::ControlsProbe::new().unwrap();

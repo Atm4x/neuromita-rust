@@ -943,16 +943,18 @@ pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {
         })
         .collect::<Vec<_>>();
     window.set_character_presets(ModelRc::new(VecModel::from(rows)));
-    let prompt_options = model
-        .prompt_sets
-        .iter()
-        .map(|set| PromptSetItem {
-            character: set.character.index() as i32,
+    let mut prompt_options = vec![Vec::new(); CharacterId::ALL.len()];
+    for set in &model.prompt_sets {
+        prompt_options[set.character.index()].push(PromptSetItem {
             name: set.name.as_str().into(),
             author: set.author.as_str().into(),
             version: set.version.as_str().into(),
             description: set.description.as_str().into(),
-        })
+        });
+    }
+    let prompt_options = prompt_options
+        .into_iter()
+        .map(|options| ModelRc::new(VecModel::from(options)))
         .collect::<Vec<_>>();
     window.set_prompt_set_options(ModelRc::new(VecModel::from(prompt_options)));
     let prompt_selections = CharacterId::ALL
